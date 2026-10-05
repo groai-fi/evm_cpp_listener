@@ -171,8 +171,12 @@ The project follows a standard multi-tier RPC naming convention per chain (`<CHA
   - `ARBITRUM_RPC_URL_ANKR`
 - **Base**:
   - `BASE_RPC_URL`
+  - `BASE_WSS_URL`
   - `BASE_RPC_URL_ALCHEMY`
+  - `BASE_WSS_URL_ALCHEMY`
   - `BASE_RPC_URL_ANKR`
+  - `BASE_RPC_URL_QUICKNODE`
+  - `BASE_WSS_URL_QUICKNODE`
 - **Optimism**:
   - `OPTIMISM_RPC_URL`
   - `OPTIMISM_RPC_URL_ALCHEMY`
@@ -207,6 +211,12 @@ The project follows a standard multi-tier RPC naming convention per chain (`<CHA
 - **Exchange / API Credentials**:
   - `COINBASE_KEY`
   - `COINBASE_SECRET`
+- **evm_listener ops** (Redis sink, alerting, dead-man's switch):
+  - `REDIS_URL`
+  - `EVML_HOST_ID`
+  - `N8N_ALERT_WEBHOOK_URL`
+  - `N8N_ALERT_WEBHOOK_TOKEN`
+  - `DEADMAN_PING_URL`
 
 ---
 
