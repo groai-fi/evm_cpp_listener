@@ -14,15 +14,15 @@ All sensitive credentials and network endpoints must be strictly configuration-d
 ❌ **Hardcoded API keys, private keys, or secrets:**
 ```cpp
 // C++ VIOLATION
-const std::string BASESCAN_KEY = "xxxxx";
-const std::string COINBASE_KEY = "ec77d005-75c2-4dac-880b-xxxxxx";
-const std::string COINBASE_SECRET = "sl5dy/C7tXapHUuCyyQHtemkyGtm+xxxxx==";
+const std::string BASESCAN_KEY = "YOUR_BASESCAN_KEY";
+const std::string COINBASE_KEY = "YOUR_COINBASE_KEY";
+const std::string COINBASE_SECRET = "YOUR_COINBASE_SECRET";
 ```
 ```typescript
 // TypeScript VIOLATION
-const BASESCAN_KEY = "MGDJSYCPHW3NMKXDPN97DYRBWZ7R2BJ8PG";
-const COINBASE_KEY = "ec77d005-75c2-4dac-880b-35228702a7f6";
-const COINBASE_SECRET = "sl5dy/C7tXapHUuCyyQHtemkyGtm+xxxxxx==";
+const BASESCAN_KEY = "YOUR_BASESCAN_KEY";
+const COINBASE_KEY = "YOUR_COINBASE_KEY";
+const COINBASE_SECRET = "YOUR_COINBASE_SECRET";
 ```
 
 ❌ **Secret tokens embedded in fallback URLs:**

@@ -5,7 +5,10 @@
 *.slo
 *.lo
 *.o
+*.a
 *.obj
+*.app
+*.lib
 
 # Precompiled Headers
 *.gch
@@ -27,6 +30,19 @@
 *.mod
 *.smod
 
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
 # Compiled Static libraries
 *.lai
 *.la
@@ -42,6 +58,11 @@
 build/
 Build/
 build-*/
+cmake-build-*/
+out/
+bin/
+*.ninja
+.cache
 
 # CMake generated files
 CMakeFiles/
@@ -66,3 +87,50 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Python-related
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Documentation and profiling
+docs/_build/
+*.dSYM/
+*.gcno
+*.gcda
+*.profraw
+
+
+# C++ specific build configurations
+Debug/
+Release/
+x64/
+x86/
+
+
+# Ignore config backups
+*.config.bak
+
+.env.railway.production*
+node_modules/
+dist/
+build/
+
+
+# Environment
+.env
+.env.local
+!.env.example
+
+doc/
+# Conan-generated, WAL data, and other env variants the loader reads
+CMakeUserPresets.json
+*.wal
+**/wal/
+.env.local.dev

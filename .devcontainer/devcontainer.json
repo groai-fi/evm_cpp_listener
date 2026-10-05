@@ -1,0 +1,45 @@
+{
+  "name": "evm_cpp_listener",
+  
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  
+  "runArgs": [
+    // Assign a fixed container name for easy identification and docker exec access
+    "--name",
+    "evm_cpp_listener_dev",
+    // SYS_PTRACE and seccomp=unconfined are required for C++ debuggers (gdb/lldb) inside Docker
+    "--cap-add=SYS_PTRACE",
+    "--security-opt",
+    "seccomp=unconfined",
+    "--ipc=host"
+  ],
+
+  // Forward container ports to host machine (6379: Redis, 8080: HTTP API)
+  "forwardPorts": [8080, 6379],
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "C_Cpp.intelliSenseEngine": "disabled",
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "cmake.exportCompileCommandsFile": true
+      },
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+
+  "remoteUser": "vscode",
+  
+  // Start Redis daemon whenever container starts so test suites can run immediately
+  "postStartCommand": "redis-server --daemonize yes || true"
+}
