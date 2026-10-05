@@ -12,10 +12,14 @@ add_executable(evml_tests
     log_test.cpp
     backoff_test.cpp
     classify_test.cpp
+    http_rpc_client_test.cpp
+    mock_http_server.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
     EVML_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../config"
     EVML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
-catch_discover_tests(evml_tests PROPERTIES LABELS unit)
+# Tests tagged [integration] use in-process mock servers on 127.0.0.1; everything else is a pure unit test.
+catch_discover_tests(evml_tests TEST_SPEC "~[integration]" PROPERTIES LABELS unit)
+catch_discover_tests(evml_tests TEST_SPEC "[integration]" PROPERTIES LABELS integration)

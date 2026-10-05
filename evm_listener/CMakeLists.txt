@@ -42,6 +42,8 @@ add_library(evml_core STATIC
     src/rpc/blocking_http.cpp
     src/rpc/backoff.cpp
     src/rpc/classify.cpp
+    src/rpc/url.cpp
+    src/rpc/http_rpc_client.cpp
     src/app/tools.cpp
 )
 target_include_directories(evml_core PUBLIC

@@ -11,6 +11,7 @@
 #include <openssl/ssl.h>
 
 #include "core/env.hpp"
+#include "rpc/url.hpp"
 
 namespace evml::rpc {
 
@@ -21,41 +22,6 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 namespace {
-
-struct ParsedUrl {
-    bool tls{};
-    std::string host;
-    std::string port;
-    std::string target;
-};
-
-ParsedUrl parse_url(const std::string& url) {
-    ParsedUrl p;
-    std::string rest;
-    if (url.rfind("https://", 0) == 0) {
-        p.tls = true;
-        rest = url.substr(8);
-    } else if (url.rfind("http://", 0) == 0) {
-        rest = url.substr(7);
-    } else {
-        throw TransportError("unsupported URL scheme: " + core::env::redact(url));
-    }
-    const auto slash = rest.find_first_of("/?");
-    std::string authority = rest.substr(0, slash);
-    p.target = slash == std::string::npos ? "/" : rest.substr(slash);
-    if (p.target[0] == '?') p.target.insert(0, "/");
-    if (authority.find('@') != std::string::npos) throw TransportError("URL userinfo is not supported: " + core::env::redact(url));
-    const auto colon = authority.rfind(':');
-    if (colon != std::string::npos && authority.find(']') == std::string::npos) {
-        p.port = authority.substr(colon + 1);
-        authority.resize(colon);
-    } else {
-        p.port = p.tls ? "443" : "80";
-    }
-    if (authority.empty() || p.port.empty()) throw TransportError("malformed URL: " + core::env::redact(url));
-    p.host = authority;
-    return p;
-}
 
 // Runs one phase; maps any boost error to a TransportError naming the phase (never the full URL).
 template <class Awaitable>
@@ -91,7 +57,7 @@ net::awaitable<HttpResponse> exchange(Stream& stream, const ParsedUrl& u, const 
 net::awaitable<HttpResponse> post(const std::string& url, const std::string& body, std::chrono::milliseconds timeout,
                                   const std::string& user_agent) {
     const std::string redacted = core::env::redact(url);
-    const ParsedUrl u = parse_url(url);
+    const ParsedUrl u = parse_url(url, UrlKind::Http);
     auto executor = co_await net::this_coro::executor;
 
     tcp::resolver resolver(executor);
