@@ -40,6 +40,8 @@ add_library(evml_core STATIC
     src/core/log.cpp
     src/rpc/codec.cpp
     src/rpc/blocking_http.cpp
+    src/rpc/backoff.cpp
+    src/rpc/classify.cpp
     src/app/tools.cpp
 )
 target_include_directories(evml_core PUBLIC

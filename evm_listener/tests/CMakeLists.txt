@@ -10,6 +10,8 @@ add_executable(evml_tests
     config_test.cpp
     codec_test.cpp
     log_test.cpp
+    backoff_test.cpp
+    classify_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
