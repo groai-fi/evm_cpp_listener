@@ -1,0 +1,29 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/evm_cpp_listener:cached
+    # SYS_PTRACE and seccomp=unconfined are required for C++ debuggers (gdb/lldb) inside Docker
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  redis:
+    # Pinned to Railway prod (8.4.x). Not published to the host: the host may already run Redis on 6379.
+    image: redis:8.4
+    container_name: evm_cpp_listener_redis
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
