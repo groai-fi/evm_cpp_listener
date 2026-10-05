@@ -14,6 +14,8 @@ add_executable(evml_tests
     classify_test.cpp
     http_rpc_client_test.cpp
     mock_http_server.cpp
+    ws_session_test.cpp
+    mock_ws_server.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE

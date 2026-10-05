@@ -264,6 +264,20 @@ std::string build_subscribe(std::uint64_t id, std::string_view kind) {
     return request(id, "eth_subscribe", bj::array{bj::string(kind)});
 }
 
+std::string build_subscribe_logs(std::uint64_t id, const core::LogFilter& filter) {
+    if (filter.addresses.empty() || filter.topic0s.empty()) {
+        throw std::invalid_argument("build_subscribe_logs: filter needs at least one address and one topic0");
+    }
+    bj::array addrs;
+    for (const auto& a : filter.addresses) addrs.emplace_back(a.to_hex());
+    bj::array topic0s;
+    for (const auto& t : filter.topic0s) topic0s.emplace_back(t.to_hex());
+    bj::object f;
+    f["address"] = std::move(addrs);
+    f["topics"] = bj::array{std::move(topic0s)};
+    return request(id, "eth_subscribe", bj::array{bj::string("logs"), std::move(f)});
+}
+
 std::string build_unsubscribe(std::uint64_t id, std::string_view subscription_id) {
     return request(id, "eth_unsubscribe", bj::array{bj::string(subscription_id)});
 }

@@ -84,6 +84,8 @@ private:
 std::string build_block_number(std::uint64_t id);
 std::string build_chain_id(std::uint64_t id);
 std::string build_subscribe(std::uint64_t id, std::string_view kind);  // e.g. "newHeads"
+// eth_subscribe("logs", {address:[...], topics:[[t0...]]}). Throws std::invalid_argument for an empty filter.
+std::string build_subscribe_logs(std::uint64_t id, const core::LogFilter& filter);
 std::string build_unsubscribe(std::uint64_t id, std::string_view subscription_id);
 std::string build_get_block_by_number(std::uint64_t id, std::string_view block /* tag or 0x.. */, bool full_tx);
 std::string build_get_code(std::uint64_t id, const Address20& address, std::string_view block /* tag or 0x.. */);

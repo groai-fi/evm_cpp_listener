@@ -44,6 +44,7 @@ add_library(evml_core STATIC
     src/rpc/classify.cpp
     src/rpc/url.cpp
     src/rpc/http_rpc_client.cpp
+    src/rpc/ws_session.cpp
     src/app/tools.cpp
 )
 target_include_directories(evml_core PUBLIC
