@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+find_dependency(nlohmann_json)
+
+find_dependency(PkgConfig)
+pkg_check_modules(HIREDIS REQUIRED hiredis)
+
+include("${CMAKE_CURRENT_LIST_DIR}/commonTargets.cmake")
+
+check_required_components(common)
