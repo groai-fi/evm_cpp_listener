@@ -1,0 +1,11 @@
+#pragma once
+
+namespace evml::core {
+
+inline constexpr const char* kSemver = "@PROJECT_VERSION@";
+inline constexpr const char* kGitDescribe = "@EVML_GIT_DESCRIBE@";
+
+// "evm_listener <semver> (<git describe>)"
+const char* version_string();
+
+}  // namespace evml::core
