@@ -1,0 +1,148 @@
+# evm_listener config: Aerodrome Slipstream EURC/USDC on Base (shard base_eurc_usdc).
+# This file references env var NAMES only. Never put keyed URLs or tokens here.
+# Addresses/topic0s verified on-chain 2026-10-05 (plan 02_dynamic_discovery_review).
+
+[shard]
+id      = "base_eurc_usdc"   # Redis namespace {base_eurc_usdc}; alert `shard`
+host_id = ""                 # empty -> $EVML_HOST_ID -> hostname
+
+[chain]
+name               = "base"
+chain_id           = 8453
+block_time_ms      = 2000
+default_finality   = "finalized"      # finalized | safe | depth; per-contract override below
+depth              = 0                # only for finality = "depth" (Anvil tests)
+hash_ring_size     = 1024
+start_policy       = "contract_start" # no checkpoint -> min(contract.start_block); or "gate" (= now)
+safe_poll_ms       = 4000
+finalized_poll_ms  = 12000
+
+# A provider is ENABLED iff its env var(s) are non-empty.
+[[providers]]
+name = "quicknode"
+ws_env = "BASE_WSS_URL_QUICKNODE"
+http_env = "BASE_RPC_URL_QUICKNODE"
+max_getlogs_range = 5        # measured: Discover plan, -32615
+
+[[providers]]
+name = "infura"
+ws_env = "BASE_WSS_URL"
+http_env = "BASE_RPC_URL"
+max_getlogs_range = 500      # measured: 2000 -> HTTP 429
+
+[[providers]]
+name = "alchemy"
+ws_env = "BASE_WSS_URL_ALCHEMY"
+http_env = "BASE_RPC_URL_ALCHEMY"
+max_getlogs_range = 2000     # quota exhausted at probe time -> automatic cooldown/re-probe
+
+[[providers]]
+name = "ankr"
+http_env = "BASE_RPC_URL_ANKR"
+max_getlogs_range = 10000    # measured: 10k OK
+
+[[providers]]
+name = "base_public"
+http_url = "https://mainnet.base.org"   # credential-free public endpoint; best effort
+max_getlogs_range = 500                 # measured: -32614 above 500
+
+[redundancy]
+mode                   = "failover"     # failover (v1) | hedged
+ws_order               = ["quicknode", "infura", "alchemy"]
+getlogs_order          = ["infura", "alchemy", "ankr", "base_public", "quicknode"]
+failover_after         = 3
+stale_after_blocks     = 5
+prefer_primary_after_s = 600
+quota_cooldown_s       = 3600
+
+[lease]
+enabled  = true
+ttl_ms   = 15000
+renew_ms = 5000
+
+# ts=1 high-volume swap pool (its gauge is killed -> gauge NOT tracked)
+[[contracts]]
+name        = "eurc_usdc_cl1_pool"
+address     = "0xc5E51044eB7318950B1aFb044FccFb25782C48c1"
+start_block = 21861234   # deploy block (eth_getCode binary search, 2026-10-06)
+finality    = "safe"
+events = [
+  "Swap(address,address,int256,int256,uint160,uint128,int24)",
+  "Mint(address,address,int24,int24,uint128,uint256,uint256)",
+  "Burn(address,int24,int24,uint128,uint256,uint256)",
+  "Collect(address,address,int24,int24,uint128,uint128)",
+]
+
+# ts=50 incentivised LP pool
+[[contracts]]
+name        = "eurc_usdc_cl50_pool"
+address     = "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7"
+start_block = 17827297   # deploy block (eth_getCode binary search, 2026-10-06)
+finality    = "safe"
+events = [
+  "Swap(address,address,int256,int256,uint160,uint128,int24)",
+  "Mint(address,address,int24,int24,uint128,uint256,uint256)",
+  "Burn(address,int24,int24,uint128,uint256,uint256)",
+  "Collect(address,address,int24,int24,uint128,uint128)",
+]
+
+# ts=50 live gauge; finality = chain default (finalized)
+[[contracts]]
+name        = "eurc_usdc_cl50_gauge"
+address     = "0x1f6c9d116CE22b51b0BC666f86B038a6c19900B8"
+start_block = 17827325   # deploy block (eth_getCode binary search, 2026-10-06)
+events = [
+  "Deposit(address,uint256,uint128)",
+  "Withdraw(address,uint256,uint128)",
+  "ClaimRewards(address,uint256)",
+  "NotifyReward(address,uint256)",
+  "ClaimFees(address,uint256,uint256)",
+]
+
+# Registry contracts: no deep history needed (start_block defaults to "gate"). topic0s not yet live-confirmed.
+[[contracts]]
+name    = "aero_cl_factory"
+address = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+stream  = "registry"
+events  = ["PoolCreated(address,address,int24,address)"]
+
+[[contracts]]
+name    = "aero_voter"
+address = "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5"
+stream  = "registry"
+events  = [
+  "GaugeCreated(address,address,address,address,address,address,address,address)",
+  "GaugeKilled(address)",
+  "GaugeRevived(address)",
+]
+
+[backfill]
+min_range          = 10
+request_timeout_ms = 15000
+
+[watchdog]
+head_stall_ms        = 15000
+subscribe_timeout_ms = 10000
+progress_stall_ms    = 120000
+safe_gate_stuck_s    = 600
+gate_lag_alert_s     = 3600
+process_stall_ms     = 30000   # last: self-abort threshold
+
+[sink]
+redis_url_env      = "REDIS_URL"
+retention_ms       = 172800000   # XADD MINID ~ now-48h
+dedup_ttl_s        = 604800      # 7 d
+queue_capacity     = 100000
+wal_dir            = "/data/wal"
+wal_max_bytes      = 536870912
+require_noeviction = true
+
+[ops]
+http_listen             = "[::]:9464"
+heartbeat_s             = 10
+alert_webhook_env       = "N8N_ALERT_WEBHOOK_URL"
+alert_webhook_token_env = "N8N_ALERT_WEBHOOK_TOKEN"
+alert_service           = "evm-listener"
+deadman_ping_env        = "DEADMAN_PING_URL"
+deadman_ping_s          = 60
+http_user_agent         = "evm-listener/{version}"

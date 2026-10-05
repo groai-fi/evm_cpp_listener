@@ -33,6 +33,14 @@ find_package(Catch2 3 REQUIRED CONFIG)
 
 add_library(evml_core STATIC
     src/core/version.cpp
+    src/core/env.cpp
+    src/core/hex.cpp
+    src/core/keccak.cpp
+    src/core/config.cpp
+    src/core/log.cpp
+    src/rpc/codec.cpp
+    src/rpc/blocking_http.cpp
+    src/app/tools.cpp
 )
 target_include_directories(evml_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src

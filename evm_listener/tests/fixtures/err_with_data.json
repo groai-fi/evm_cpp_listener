@@ -1,0 +1,9 @@
+{
+ "jsonrpc": "2.0",
+ "id": 11,
+ "error": {
+  "code": 3,
+  "message": "execution reverted",
+  "data": "0x08c379a0"
+ }
+}

@@ -1,0 +1,8 @@
+{
+ "jsonrpc": "2.0",
+ "id": 9,
+ "error": {
+  "code": -32615,
+  "message": "eth_getLogs is limited to a 5 range"
+ }
+}

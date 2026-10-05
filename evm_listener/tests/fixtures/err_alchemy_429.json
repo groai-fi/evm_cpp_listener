@@ -1,0 +1,4 @@
+{
+ "code": 429,
+ "message": "Monthly capacity limit exceeded. Please upgrade your plan or wait for the next billing cycle."
+}

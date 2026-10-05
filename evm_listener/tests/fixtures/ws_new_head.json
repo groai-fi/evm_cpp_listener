@@ -1,0 +1,17 @@
+{
+ "jsonrpc": "2.0",
+ "method": "eth_subscription",
+ "params": {
+  "subscription": "0x9ce59a13059e417087c02d3236a0b1cc",
+  "result": {
+   "number": "0x31cbb7f",
+   "hash": "0x951b17bf34f30959309c76f2bbc3ea1df58465fde0579b940c95cf093c99e876",
+   "parentHash": "0xde7023c1aa788fec333b45aa09553c71216827c9b4b4ec2fbf9646e3ffbc6bd0",
+   "timestamp": "0x6ac3d3e1",
+   "miner": "0x4200000000000000000000000000000000000011",
+   "stateRoot": "0xbc5d5bcc49d27da0c361db768150af40b0174e64ef4a6992a3da6c583f906425",
+   "gasLimit": "0x17d78400",
+   "gasUsed": "0x206efad"
+  }
+ }
+}
