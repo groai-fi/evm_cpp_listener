@@ -23,6 +23,7 @@ add_executable(evml_tests
     finality_gate_test.cpp
     reorg_detector_test.cpp
     aimd_pager_test.cpp
+    pending_buffer_test.cpp
     event_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
