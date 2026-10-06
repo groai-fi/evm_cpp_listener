@@ -36,6 +36,8 @@ enum class CheckpointKind { Safe, Finalized };
 struct Checkpoint {
     std::optional<std::uint64_t> safe;
     std::optional<std::uint64_t> finalized;
+    // Sorted "address:start_block:class" entries the cursors cover (rev 5, N2); nullopt if never written.
+    std::optional<std::vector<std::string>> contracts;
 };
 
 // The pipeline's view of the Phase 4 sink. Writes never block the io thread: they enqueue and return (acks come
@@ -50,6 +52,8 @@ public:
 
     virtual void emit(Emission e) = 0;
     virtual void checkpoint(CheckpointKind kind, std::uint64_t block) = 0;
+    // Stores the contracts manifest (ckpt.contracts). Enqueued like a checkpoint: applied after earlier emissions.
+    virtual void set_contracts(std::vector<std::string> manifest) = 0;
     // ZREMRANGEBYSCORE released -inf block (plan 4.2 final_trim.lua).
     virtual void final_trim(std::uint64_t block) = 0;
 

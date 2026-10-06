@@ -46,6 +46,7 @@ public:
     std::vector<std::pair<pipeline::CheckpointKind, std::uint64_t>> checkpoints;
     std::vector<std::uint64_t> trims;
     pipeline::Checkpoint stored;
+    std::size_t contract_writes{0};
     std::map<std::string, pipeline::ReleasedEntry> released;
 
     bool saturated() const override { return saturated_flag; }
@@ -59,6 +60,10 @@ public:
         checkpoints.emplace_back(kind, block);
         auto& slot = kind == pipeline::CheckpointKind::Safe ? stored.safe : stored.finalized;
         if (!slot || *slot < block) slot = block;  // set-if-greater, like ckpt.lua
+    }
+    void set_contracts(std::vector<std::string> manifest) override {
+        ++contract_writes;
+        stored.contracts = std::move(manifest);
     }
     void final_trim(std::uint64_t block) override {
         trims.push_back(block);
