@@ -102,6 +102,11 @@ void ProviderPool::start() {
     if (started_) throw std::logic_error("ProviderPool::start called twice");
     started_ = true;
     running_ = true;
+    const auto now = Clock::now();
+    next_poll_ = now + cfg_.safe_poll;
+    next_finalized_ = now + cfg_.finalized_poll;
+    next_crosscheck_ = now + cfg_.crosscheck_period;
+    for (auto& [_, n] : nodes_) n.next_standby_probe = now + cfg_.standby_probe_period;
     reconcile();
     schedule_tick();
 }
