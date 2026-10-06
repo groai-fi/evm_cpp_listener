@@ -317,7 +317,9 @@ void ProviderPool::note(const std::string& provider, const RpcOutcome& o) {
     const auto now = Clock::now();
     std::optional<Transition> t;
     if (o.ok) {
-        t = book_.on_success(provider, now);
+        // A response that was in flight when the provider failed must not undo Down/Cooldown/Disabled: those states
+        // are left only through a probe (see provider_book.hpp).
+        if (book_.state(provider).state == State::Up) t = book_.on_success(provider, now);
     } else if (o.kind != rpc::FailKind::RangeTooLarge) {
         t = book_.on_failure(provider, o.kind, o.retry_after, now);
     }

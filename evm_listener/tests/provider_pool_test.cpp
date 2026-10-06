@@ -227,6 +227,9 @@ TEST_CASE("pool: three session failures on A fail over to B and heads flow", "[i
 
     REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B" && !rec.heads.empty(); }, 8s));
     CHECK(a_conns >= 3);
+    std::string trs;
+    for (const auto& t : rec.transitions) trs += t + " | ";
+    INFO("transitions: " << trs);
     CHECK(pool->state("A") == State::Down);
     CHECK(rec.heads[0].first == kHead);
     CHECK(rec.heads[0].second == "B");
@@ -262,7 +265,12 @@ TEST_CASE("pool: quota error on subscribe fails over immediately and A is not re
     REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B" && wsB.upgrades() == 1; }, 5s));
     run_until(ioc, [] { return false; }, 300ms);
     CHECK(a_conns == 1);
-    REQUIRE(run_until(ioc, [&] { return pool->state("A") == State::Cooldown; }, 5s));
+    const bool cooled = run_until(ioc, [&] { return pool->state("A") == State::Cooldown; }, 5s);
+    std::string trs;
+    for (const auto& t : rec.transitions) trs += t + " | ";
+    INFO("transitions: " << trs);
+    INFO("a_conns=" << a_conns << " active=" << pool->active_ws().value_or("-") << " A=" << to_string(pool->state("A")));
+    REQUIRE(cooled);
     CHECK(pool->state("A") == State::Cooldown);
     CHECK(contains(rec.transitions, "A:up->cooldown"));
     shutdown(ioc, pool);
