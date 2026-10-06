@@ -26,6 +26,8 @@ add_executable(evml_tests
     pending_buffer_test.cpp
     final_diff_test.cpp
     sweeper_test.cpp
+    coverage_test.cpp
+    pipeline_driver_test.cpp
     event_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)

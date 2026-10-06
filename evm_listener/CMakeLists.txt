@@ -55,6 +55,8 @@ add_library(evml_core STATIC
     src/pipeline/sink.cpp
     src/pipeline/final_diff.cpp
     src/pipeline/sweeper.cpp
+    src/pipeline/coverage.cpp
+    src/pipeline/pipeline_driver.cpp
     src/pipeline/event.cpp
     src/pipeline/log_validation.cpp
     src/app/pool_config.cpp
