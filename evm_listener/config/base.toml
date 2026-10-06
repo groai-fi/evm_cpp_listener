@@ -64,7 +64,7 @@ renew_ms = 5000
 [[contracts]]
 name        = "eurc_usdc_cl1_pool"
 address     = "0xc5E51044eB7318950B1aFb044FccFb25782C48c1"
-start_block = 21861234   # deploy block (eth_getCode binary search, 2026-10-06)
+start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it
 finality    = "safe"
 events = [
   "Swap(address,address,int256,int256,uint160,uint128,int24)",
@@ -77,7 +77,7 @@ events = [
 [[contracts]]
 name        = "eurc_usdc_cl50_pool"
 address     = "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7"
-start_block = 17827297   # deploy block (eth_getCode binary search, 2026-10-06)
+start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it
 finality    = "safe"
 events = [
   "Swap(address,address,int256,int256,uint160,uint128,int24)",
@@ -90,7 +90,7 @@ events = [
 [[contracts]]
 name        = "eurc_usdc_cl50_gauge"
 address     = "0x1f6c9d116CE22b51b0BC666f86B038a6c19900B8"
-start_block = 17827325   # deploy block (eth_getCode binary search, 2026-10-06)
+start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it
 events = [
   "Deposit(address,uint256,uint128)",
   "Withdraw(address,uint256,uint128)",

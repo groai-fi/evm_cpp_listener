@@ -81,9 +81,9 @@ TEST_CASE("base.toml parses: 5 contracts (2 safe, 3 finalized), 2 registry", "[u
 
 TEST_CASE("base.toml: start blocks and registry defaults", "[unit][config]") {
     const Config c = parse_with(base_toml(), full_env());
-    CHECK(c.contracts[0].start_block == std::optional<std::uint64_t>(21861234));
-    CHECK(c.contracts[1].start_block == std::optional<std::uint64_t>(17827297));
-    CHECK(c.contracts[2].start_block == std::optional<std::uint64_t>(17827325));
+    CHECK(c.contracts[0].start_block == std::optional<std::uint64_t>(52060000));
+    CHECK(c.contracts[1].start_block == std::optional<std::uint64_t>(52060000));
+    CHECK(c.contracts[2].start_block == std::optional<std::uint64_t>(52060000));
     CHECK_FALSE(c.contracts[3].start_block.has_value());  // registry -> gate
     CHECK_FALSE(c.contracts[4].start_block.has_value());
 }
@@ -253,11 +253,11 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("finality=depth requires depth > 0"));
     }
     SECTION("events stream requires an explicit start_block") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 21861234   # deploy block (eth_getCode binary search, 2026-10-06)\n", ""), env),
+        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it\n", ""), env),
                           ContainsSubstring("start_block: required for stream=events"));
     }
     SECTION("start_block must be integer or \"gate\"") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 21861234", "start_block = \"later\""), env),
+        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000", "start_block = \"later\""), env),
                           ContainsSubstring("expected a non-negative integer or \"gate\""));
     }
     SECTION("ws_order referencing an undeclared provider") {
