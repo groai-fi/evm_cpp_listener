@@ -20,6 +20,9 @@ add_executable(evml_tests
     stale_detector_test.cpp
     provider_pool_test.cpp
     pool_config_test.cpp
+    finality_gate_test.cpp
+    aimd_pager_test.cpp
+    event_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE

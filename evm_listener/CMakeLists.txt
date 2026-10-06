@@ -48,6 +48,10 @@ add_library(evml_core STATIC
     src/provider/provider_book.cpp
     src/provider/stale_detector.cpp
     src/provider/provider_pool.cpp
+    src/chain/finality_gate.cpp
+    src/pipeline/aimd_pager.cpp
+    src/pipeline/event.cpp
+    src/pipeline/log_validation.cpp
     src/app/pool_config.cpp
     src/app/tools.cpp
 )
