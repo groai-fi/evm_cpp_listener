@@ -49,6 +49,7 @@ add_library(evml_core STATIC
     src/provider/stale_detector.cpp
     src/provider/provider_pool.cpp
     src/chain/finality_gate.cpp
+    src/chain/reorg_detector.cpp
     src/pipeline/aimd_pager.cpp
     src/pipeline/event.cpp
     src/pipeline/log_validation.cpp
