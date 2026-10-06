@@ -26,6 +26,11 @@ int check_config_online(const core::Config& cfg);
 // Throws std::runtime_error if no provider can answer or the address has no code at `latest`.
 std::uint64_t find_deploy_block(const core::Config& cfg, const core::Address20& address);
 
+// Live end-to-end probe of the transport stack over the real (TLS) providers: runs the ProviderPool for `seconds`
+// (WS heads/logs), then one getLogs over the failover chain and the `safe`/`finalized` tags. Prints provider
+// names only (never URLs). Returns kExitOk iff heads streamed and every follow-up request succeeded.
+int probe_transport(const core::Config& cfg, unsigned seconds);
+
 // Entry point used by main(): parses argv, loads .env, dispatches. Returns the process exit code.
 int run_cli(int argc, char** argv);
 

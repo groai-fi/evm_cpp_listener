@@ -170,12 +170,15 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
     return {active_ws_, false, Reason::Keep};
 }
 
-std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const {
+std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const { return pick_getlogs(now, {}); }
+
+std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now, const std::unordered_set<std::string>& exclude) const {
     for (const auto& n : getlogs_order_) {
         if (active_ws_ && n == *active_ws_) continue;
-        if (usable(n, now)) return n;
+        if (exclude.count(n) == 0 && usable(n, now)) return n;
     }
-    if (active_ws_ && std::find(getlogs_order_.begin(), getlogs_order_.end(), *active_ws_) != getlogs_order_.end() &&
+    if (active_ws_ && exclude.count(*active_ws_) == 0 &&
+        std::find(getlogs_order_.begin(), getlogs_order_.end(), *active_ws_) != getlogs_order_.end() &&
         usable(*active_ws_, now)) {
         return active_ws_;
     }

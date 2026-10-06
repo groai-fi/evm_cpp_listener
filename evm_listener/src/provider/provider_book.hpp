@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rpc/classify.hpp"
@@ -92,6 +93,8 @@ public:
     // First usable getLogs provider that is NOT the active WS provider (independent cross-check); falls back to
     // the active WS provider only when nothing else is usable. nullopt = none usable.
     std::optional<std::string> pick_getlogs(TimePoint now) const;
+    // Same, skipping providers in `exclude` (those already tried for the current request).
+    std::optional<std::string> pick_getlogs(TimePoint now, const std::unordered_set<std::string>& exclude) const;
 
 private:
     ProviderState& at(std::string_view name);

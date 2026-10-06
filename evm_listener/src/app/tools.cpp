@@ -1,6 +1,7 @@
 #include "app/tools.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -9,10 +10,19 @@
 #include <stdexcept>
 #include <variant>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
+
+#include "app/pool_config.hpp"
 #include "core/env.hpp"
 #include "core/error.hpp"
 #include "core/keccak.hpp"
+#include "core/log.hpp"
 #include "core/version.hpp"
+#include "provider/provider_pool.hpp"
 #include "rpc/blocking_http.hpp"
 #include "rpc/codec.hpp"
 
@@ -190,15 +200,98 @@ std::uint64_t find_deploy_block(const Config& cfg, const Address20& address) {
     return hi;
 }
 
+int probe_transport(const Config& cfg, unsigned seconds) {
+    namespace net = boost::asio;
+    core::log::init("info");
+
+    struct Stats {
+        std::size_t heads{0}, logs{0};
+        std::uint64_t last_head{0};
+        std::string head_from;
+        bool ok{false};
+    } st;
+
+    provider::PoolHandlers h;
+    h.on_head = [&st](const rpc::Head& x, const std::string& p) {
+        ++st.heads;
+        st.last_head = x.number;
+        st.head_from = p;
+    };
+    h.on_log = [&st](const rpc::Log&, const std::string&) { ++st.logs; };
+    h.on_ws_active_changed = [](const std::optional<std::string>& p, std::string_view why) {
+        std::cout << "ws active: " << (p ? *p : std::string("none")) << " (" << why << ")\n";
+    };
+    h.on_ws_down = [](const rpc::WsClosed& c, const std::string& p) {
+        std::cout << "ws down:   " << p << " [" << rpc::to_string(c.kind) << "] " << c.reason << "\n";
+    };
+    h.on_transition = [](const provider::Transition& t, std::string_view why) {
+        std::cout << "provider:  " << t.provider << " " << provider::to_string(t.from) << " -> "
+                  << provider::to_string(t.to) << " (" << why << ")\n";
+    };
+
+    net::io_context ioc;
+    auto pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
+    pool->start();
+
+    net::co_spawn(
+        ioc,
+        [&]() -> net::awaitable<void> {
+            net::steady_timer t(ioc);
+            t.expires_after(std::chrono::seconds(seconds));
+            co_await t.async_wait(net::use_awaitable);
+
+            std::cout << "streamed: " << st.heads << " heads (last " << st.last_head << " via " << st.head_from
+                      << "), " << st.logs << " logs\n";
+            bool good = st.heads > 0;
+            if (st.last_head >= 2) {
+                const auto from = st.last_head - 2, to = st.last_head;
+                const auto filter = cfg.filter();
+                const auto o = co_await pool->call(
+                    [&](std::uint64_t id) { return rpc::build_get_logs(id, from, to, filter); });
+                if (o.ok) {
+                    rpc::Decoder dec;
+                    std::cout << "getLogs:   ok via " << o.provider << ", blocks " << from << ".." << to << ": "
+                              << dec.parse_logs(o.result_raw).size() << " logs\n";
+                } else {
+                    std::cout << "getLogs:   FAILED (" << rpc::to_string(o.kind) << ") via " << o.provider << ": "
+                              << o.error << "\n";
+                    good = false;
+                }
+                for (const auto tag : {provider::Tag::Safe, provider::Tag::Finalized}) {
+                    const auto who = pool->current_getlogs();
+                    std::optional<provider::TagSnapshot> s;
+                    if (who) s = co_await pool->read_tag(*who, tag);
+                    std::cout << (tag == provider::Tag::Safe ? "safe:      " : "finalized: ");
+                    if (s) {
+                        std::cout << s->number << " via " << s->provider << "\n";
+                    } else {
+                        std::cout << "FAILED\n";
+                        good = false;
+                    }
+                }
+            } else {
+                std::cout << "getLogs:   skipped (no head received)\n";
+            }
+            st.ok = good;
+            pool->stop();
+            ioc.stop();
+        },
+        net::detached);
+    ioc.run();
+    return st.ok ? kExitOk : kExitFailure;
+}
+
 int run_cli(int argc, char** argv) {
     const auto usage = [] {
         std::cerr << "usage: evm_listener --version\n"
                      "       evm_listener --config <file> --check-config\n"
-                     "       evm_listener --config <file> --find-deploy-block <address>\n";
+                     "       evm_listener --config <file> --find-deploy-block <address>\n"
+                     "       evm_listener --config <file> --probe-transport <seconds>\n";
         return kExitUsage;
     };
 
     std::optional<std::string> config_path, find_addr;
+    std::optional<unsigned> probe_seconds;
     bool version = false, check = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -210,6 +303,14 @@ int run_cli(int argc, char** argv) {
             config_path = argv[++i];
         } else if (a == "--find-deploy-block" && i + 1 < argc) {
             find_addr = argv[++i];
+        } else if (a == "--probe-transport" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v.empty() || v.size() > 4 || !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); })) {
+                std::cerr << "--probe-transport needs a number of seconds (1..9999)\n";
+                return usage();
+            }
+            probe_seconds = static_cast<unsigned>(std::stoul(v));
+            if (*probe_seconds == 0) return usage();
         } else {
             std::cerr << "unknown or incomplete argument: " << a << "\n";
             return usage();
@@ -221,7 +322,9 @@ int run_cli(int argc, char** argv) {
         std::cout << core::version_string() << '\n';
         return kExitOk;
     }
-    if (check == find_addr.has_value()) return usage();  // need exactly one action
+    if (static_cast<int>(check) + static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value()) != 1) {
+        return usage();  // need exactly one action
+    }
     if (!config_path) {
         std::cerr << "--config <file> is required\n";
         return usage();
@@ -234,6 +337,7 @@ int run_cli(int argc, char** argv) {
             print_config_summary(cfg);
             return check_config_online(cfg);
         }
+        if (probe_seconds) return probe_transport(cfg, *probe_seconds);
         const auto addr = Address20::from_hex(*find_addr);
         std::cout << find_deploy_block(cfg, addr) << "\n";
         return kExitOk;
