@@ -262,6 +262,7 @@ TEST_CASE("pool: quota error on subscribe fails over immediately and A is not re
     REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B" && wsB.upgrades() == 1; }, 5s));
     run_until(ioc, [] { return false; }, 300ms);
     CHECK(a_conns == 1);
+    REQUIRE(run_until(ioc, [&] { return pool->state("A") == State::Cooldown; }, 5s));
     CHECK(pool->state("A") == State::Cooldown);
     CHECK(contains(rec.transitions, "A:up->cooldown"));
     shutdown(ioc, pool);
