@@ -35,6 +35,15 @@ struct StepResult {
     bool safe_reorg{false};           // final sweep found released safe-class logs that vanished: raise SafeReorg
 };
 
+// Outcome of reverify_released(). status: NoWork (nothing released above C_f), Advanced (the whole window was
+// verified), Retry / Stalled (a page could not be fetched or validated; progress so far is kept) or Paused.
+struct ReverifyResult {
+    StepStatus status{StepStatus::NoWork};
+    std::string detail;                       // reason for Retry/Stalled
+    bool reorg{false};                        // released logs vanished or new ones appeared: raise SafeReorg
+    std::optional<std::uint64_t> fork_point;  // reorg only: highest block both views agree on; C_s was rewound to it
+};
+
 struct SweepStats {
     std::uint64_t emitted_safe{0};     // safe sweep log emissions
     std::uint64_t emitted_final{0};    // final sweep log emissions (finalized-class + late)
@@ -46,6 +55,7 @@ struct SweepStats {
     std::uint64_t range_shrinks{0};    // RangeTooLarge
     std::uint64_t failure_shrinks{0};  // rate limit / timeout / 5xx on a wide span (rev 5, G1)
     std::uint64_t volume_shrinks{0};   // page returned more than max_page_logs (rev 5, G6)
+    std::uint64_t reverified_new{0};   // logs emitted by reverify_released that the safe sweep had not released
     std::uint64_t address_splits{0};
 };
 
@@ -83,6 +93,13 @@ public:
     // One page of ALL logs in (C_f, min(g_f, C_s)]: finalized-class emitted, safe-class diffed against `released`.
     boost::asio::awaitable<StepResult> final_step(std::uint64_t g_f);
 
+    // Immediate re-check of the released window (C_f, C_s] (plan 3.5 Re-verify, rev 5 G3): run it on a safe-reorg
+    // signal instead of waiting for the final sweep. Safe-class logs of the whole window are fetched and diffed
+    // against `released`: vanished => revert (full original fields); new => emitted at finality=safe and tracked;
+    // matched => nothing. On completion, if anything differed, C_s = min(C_s, fork point) (C_f never moves) and the
+    // result has reorg=true. Idempotent: after a Retry/Stalled/Paused, call again; the fork point found so far is kept.
+    boost::asio::awaitable<ReverifyResult> reverify_released();
+
     const SweepStats& stats() const { return stats_; }
 
 private:
@@ -109,6 +126,7 @@ private:
     LastTypeMap recent_;
     std::unordered_map<std::string, AimdPager> pagers_;
     std::uint64_t c_s_{0}, c_f_{0};
+    std::optional<std::uint64_t> pending_fork_;  // lowest fork point found by an unfinished reverify_released
     SweepStats stats_;
 };
 

@@ -268,4 +268,63 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
     co_return StepResult{StepStatus::Advanced, f.range, {}, !diff.vanished.empty()};
 }
 
+boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released() {
+    const std::uint64_t ceiling = c_s_;  // snapshot: the sweeps are serialised, so C_s cannot move under us
+    std::uint64_t cursor = c_f_;
+    const auto note_fork = [this](std::uint64_t changed_block) {
+        const std::uint64_t fork = changed_block - 1;  // changed_block > C_f >= 0, so this cannot underflow
+        pending_fork_ = pending_fork_ ? std::min(*pending_fork_, fork) : fork;
+    };
+
+    if (cursor >= ceiling && !pending_fork_) co_return ReverifyResult{};
+
+    while (cursor < ceiling) {
+        if (sink_.saturated()) co_return ReverifyResult{StepStatus::Paused, "sink saturated", false, std::nullopt};
+
+        auto f = co_await fetch_page(cursor, ceiling, cfg_.filter(core::Finality::Safe), core::Finality::Safe);
+        if (f.status != StepStatus::Advanced)
+            co_return ReverifyResult{f.status, std::move(f.detail), false, std::nullopt};
+
+        const auto released = co_await sink_.released_range(f.range.from, f.range.to);
+        const FinalDiff diff = diff_released(cfg_.chain.chain_id, released, f.logs);
+
+        std::set<std::string> new_ids;
+        for (const auto& l : diff.late) new_ids.insert(make_event_id(cfg_.chain.chain_id, l.block_hash, l.log_index));
+
+        // Retractions first, then the replacement logs in (block, logIndex) order.
+        for (const auto& v : diff.vanished) {
+            note_fork(v.block_number);
+            if (!recent_.admit(v.event_id, EventType::Revert)) {  // already retracted (I6)
+                ++stats_.deduped;
+                continue;
+            }
+            sink_.emit(make_revert(v, now_ms_()));
+            ++stats_.reverts;
+        }
+        for (const auto& log : f.logs) {
+            const Event ev = build_event(log, f, EventType::Log);
+            if (new_ids.count(ev.event_id) == 0) continue;  // matched: still canonical
+            note_fork(log.block_number);
+            if (!recent_.admit(ev.event_id, EventType::Log)) {
+                ++stats_.deduped;
+                continue;
+            }
+            sink_.emit(make_emission(ev, ev.block_number));  // still above C_f: tracked for the final-sweep diff
+            ++stats_.reverified_new;
+        }
+        stats_.matched += diff.matched.size();
+        cursor = f.range.to;
+    }
+
+    ReverifyResult out;
+    out.status = StepStatus::Advanced;
+    if (pending_fork_) {
+        out.reorg = true;
+        out.fork_point = *pending_fork_;
+        rewind_safe(*pending_fork_);
+        pending_fork_.reset();
+    }
+    co_return out;
+}
+
 }  // namespace evml::pipeline

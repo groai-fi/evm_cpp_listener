@@ -451,3 +451,125 @@ TEST_CASE("sweep: cursors violating C_f <= C_s are rejected", "[unit][sweep]") {
     Rig r;
     CHECK_THROWS_AS(r.sw->set_cursors(5, 10), std::invalid_argument);
 }
+
+TEST_CASE("reverify: nothing released above C_f is no work and asks nothing", "[unit][reverify]") {
+    Rig r;  // C_s == C_f
+    const auto res = run(r.sw->reverify_released());
+    CHECK(res.status == StepStatus::NoWork);
+    CHECK_FALSE(res.reorg);
+    CHECK(r.src.calls.empty());
+}
+
+TEST_CASE("reverify: a window that is still canonical changes nothing", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+
+    const auto res = run(r.sw->reverify_released());
+    CHECK(res.status == StepStatus::Advanced);
+    CHECK_FALSE(res.reorg);
+    CHECK_FALSE(res.fork_point.has_value());
+    CHECK(r.sink.emitted.size() == 1);
+    CHECK(r.sw->c_s() == 110);
+    CHECK(r.sw->stats().matched == 1);
+}
+
+TEST_CASE("reverify: a reorg below the safe tag is reverted and replaced at once, C_s rewinds, C_f stays", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+
+    r.src.logs.clear();  // block 105 is re-mined with another hash
+    r.add(mklog(r.cfg, kSafeA, 105, 2, 0), 2);
+
+    const auto res = run(r.sw->reverify_released());
+    REQUIRE(res.status == StepStatus::Advanced);
+    CHECK(res.reorg);
+    CHECK(res.fork_point == 104);
+    CHECK(r.sw->c_s() == 104);
+    CHECK(r.sw->c_f() == 100);
+
+    REQUIRE(r.sink.emitted.size() == 3);
+    CHECK(r.sink.emitted[1].type == EventType::Revert);
+    CHECK(field(r.sink.emitted[1], "block_hash") == hash_of(1).to_hex());  // the retracted log's own fields
+    CHECK(r.sink.emitted[2].type == EventType::Log);
+    CHECK(field(r.sink.emitted[2], "block_hash") == hash_of(2).to_hex());
+    CHECK(field(r.sink.emitted[2], "finality") == "safe");  // not final yet
+    CHECK(r.sink.emitted[2].released_block.has_value());    // tracked for the final-sweep diff
+    REQUIRE(r.sink.released.size() == 1);
+    CHECK(r.sink.released.count(r.sink.emitted[2].event_id) == 1);
+    CHECK(r.sw->stats().reverts == 1);
+    CHECK(r.sw->stats().reverified_new == 1);
+}
+
+TEST_CASE("reverify: a block that flips A to B and back to A keeps alternating log and revert (I6)", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    const auto id_a = r.sink.emitted[0].event_id;
+
+    r.src.logs.clear();  // A -> B
+    r.add(mklog(r.cfg, kSafeA, 105, 2, 0), 2);
+    REQUIRE(run(r.sw->reverify_released()).reorg);
+    const auto id_b = r.sink.emitted[2].event_id;
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);  // re-sweep after the rewind: B is absorbed
+    CHECK(r.sink.emitted.size() == 3);
+
+    r.src.logs.clear();  // B -> A
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    const auto res = run(r.sw->reverify_released());
+    REQUIRE(res.status == StepStatus::Advanced);
+    CHECK(res.reorg);
+    CHECK(res.fork_point == 104);
+
+    const auto seq = [&](const std::string& id) {
+        std::vector<EventType> s;
+        for (const auto& m : r.sink.emitted)
+            if (m.event_id == id) s.push_back(m.type);
+        return s;
+    };
+    CHECK(seq(id_a) == std::vector<EventType>{EventType::Log, EventType::Revert, EventType::Log});
+    CHECK(seq(id_b) == std::vector<EventType>{EventType::Log, EventType::Revert});
+    REQUIRE(r.sink.released.size() == 1);
+    CHECK(r.sink.released.count(id_a) == 1);
+}
+
+TEST_CASE("reverify: a page that fails midway keeps the fork point for the next run", "[unit][reverify]") {
+    Rig r;
+    r.src.limit = 100;  // pages of 100 blocks
+    r.add(mklog(r.cfg, kSafeA, 150, 1, 0), 1);
+    r.add(mklog(r.cfg, kSafeA, 250, 3, 0), 3);
+    for (int i = 0; i < 3; ++i) REQUIRE(run(r.sw->safe_step(400)).status == StepStatus::Advanced);
+    REQUIRE(r.sw->c_s() == 400);
+    REQUIRE(r.sink.released.size() == 2);
+
+    r.src.logs.clear();  // block 150 is re-mined; block 250 is untouched
+    r.add(mklog(r.cfg, kSafeA, 150, 2, 0), 2);
+    r.add(mklog(r.cfg, kSafeA, 250, 3, 0), 3);
+    r.src.unreadable_blocks.insert(250);  // the second page cannot be verified yet
+
+    const auto first = run(r.sw->reverify_released());
+    CHECK(first.status == StepStatus::Retry);
+    CHECK(first.detail.find("250") != std::string::npos);
+    CHECK_FALSE(first.reorg);
+    CHECK(r.sw->c_s() == 400);  // not rewound until the window is complete
+    CHECK(r.sink.count(EventType::Revert) == 1);
+
+    r.src.unreadable_blocks.clear();
+    const auto second = run(r.sw->reverify_released());
+    REQUIRE(second.status == StepStatus::Advanced);
+    CHECK(second.reorg);  // page 1 is already corrected, but the reorg is still reported
+    CHECK(second.fork_point == 149);
+    CHECK(r.sw->c_s() == 149);
+    CHECK(r.sink.count(EventType::Revert) == 1);  // not repeated
+}
+
+TEST_CASE("reverify: a saturated sink pauses it without asking the provider", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    r.src.calls.clear();
+    r.sink.saturated_flag = true;
+    CHECK(run(r.sw->reverify_released()).status == StepStatus::Paused);
+    CHECK(r.src.calls.empty());
+}
