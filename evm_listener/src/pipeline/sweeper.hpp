@@ -21,8 +21,9 @@ namespace evml::pipeline {
 enum class StepStatus {
     NoWork,   // cursor already at its ceiling
     Advanced, // one page swept, emitted and checkpointed
-    Retry,    // transient: nothing emitted, cursor unchanged (a provider failure, bad response, unreadable block)
-    Stalled,  // cannot proceed without operator action (I5): CRITICAL, cursor unchanged
+    Retry,    // transient: nothing emitted, cursor unchanged (a provider failure, an unreadable block)
+    Stalled,  // cannot proceed without operator action (I5): CRITICAL, cursor unchanged. Also: bad responses persisted
+              // through max_bad_attempts (no agreement between getLogs and the canonical-hash source)
     Paused,   // sink saturated (plan 4.6): nothing done
 };
 const char* to_string(StepStatus s);
@@ -42,13 +43,21 @@ struct SweepStats {
     std::uint64_t late{0};             // safe-class logs the safe sweep missed (safe_missed_total)
     std::uint64_t matched{0};
     std::uint64_t inconsistent{0};     // discarded responses (provider_inconsistency_total)
-    std::uint64_t range_shrinks{0};
+    std::uint64_t range_shrinks{0};    // RangeTooLarge
+    std::uint64_t failure_shrinks{0};  // rate limit / timeout / 5xx on a wide span (rev 5, G1)
+    std::uint64_t volume_shrinks{0};   // page returned more than max_page_logs (rev 5, G6)
     std::uint64_t address_splits{0};
 };
 
 struct SweeperOptions {
     std::uint32_t min_range{10};         // [backfill] min_range; clamped per provider by AimdPager
     std::size_t recent_capacity{8192};   // layer-1 dedup window
+    // A response that fails validation or the canonical-hash check is discarded, the provider is reported bad and
+    // the page is retried; no agreement after this many attempts => Stalled (rev 5, G2). Must be >= 1.
+    std::uint32_t max_bad_attempts{3};
+    // Soft memory cap: a page with more logs than this still goes out, but the next page is smaller (rev 5, G6).
+    // Phase 5 wires it to sink queue capacity / 2.
+    std::size_t max_page_logs{5000};
 };
 
 // The two sweeps (plan 3.5) over one LogSource and one Sink. Single-threaded: call from one executor, and do not

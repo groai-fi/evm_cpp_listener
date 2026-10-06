@@ -22,9 +22,9 @@ struct Rig {
     MemorySink sink;
     std::unique_ptr<Sweeper> sw;
 
-    explicit Rig(evml::core::Config c = load_base_config()) : cfg(std::move(c)) {
+    explicit Rig(evml::core::Config c = load_base_config(), SweeperOptions opt = {}) : cfg(std::move(c)) {
         sw = std::make_unique<Sweeper>(cfg, EventContext{"base_eurc_usdc", "test-host", "test"}, src, sink,
-                                       [] { return std::uint64_t{1000}; });
+                                       [] { return std::uint64_t{1000}; }, opt);
         sw->set_cursors(100, 100);
     }
     void add(const evml::rpc::Log& l, std::uint8_t canonical_hash) {
@@ -150,31 +150,132 @@ TEST_CASE("sweep: no usable getLogs provider is a retry", "[unit][sweep]") {
     CHECK(r.src.calls.empty());
 }
 
-TEST_CASE("sweep: a log outside the requested range discards the response", "[unit][sweep]") {
+TEST_CASE("sweep: a log outside the requested range is reported and the page is retried", "[unit][sweep]") {
     Rig r;
     LogResult out;
     out.ok = true;
     out.provider = "infura";
     out.logs = {mklog(r.cfg, kSafeA, 999, 1, 0)};
-    r.src.overrides.push_back(out);
+    r.src.overrides.push_back(out);  // only the first answer is bad
 
     const auto res = run(r.sw->safe_step(110));
-    CHECK(res.status == StepStatus::Retry);
+    CHECK(res.status == StepStatus::Advanced);  // the retry got a sound answer
     CHECK(r.sw->stats().inconsistent == 1);
+    REQUIRE(r.src.bad.size() == 1);
+    CHECK(r.src.bad[0].first == "infura");
+    CHECK(r.src.bad[0].second.find("outside requested range") != std::string::npos);
+    CHECK(r.src.calls.size() == 2);
+    CHECK(r.sw->c_s() == 110);
+}
+
+TEST_CASE("sweep: a provider that keeps answering badly stalls the sweep after max_bad_attempts", "[unit][sweep]") {
+    Rig r;
+    LogResult out;
+    out.ok = true;
+    out.provider = "infura";
+    out.logs = {mklog(r.cfg, kSafeA, 999, 1, 0)};
+    for (int i = 0; i < 3; ++i) r.src.overrides.push_back(out);
+
+    const auto res = run(r.sw->safe_step(110));
+    CHECK(res.status == StepStatus::Stalled);
+    CHECK(res.detail.find("no agreement after 3 attempts") != std::string::npos);
+    CHECK(r.sw->stats().inconsistent == 3);
+    CHECK(r.src.bad.size() == 3);
+    CHECK(r.sink.emitted.empty());
+    CHECK(r.sink.checkpoints.empty());
+    CHECK(r.sw->c_s() == 100);
+}
+
+TEST_CASE("sweep: a log whose blockHash is not the canonical hash is never released", "[unit][sweep]") {
+    Rig r;
+    r.src.logs.push_back(mklog(r.cfg, kSafeA, 105, 1, 0));
+    r.src.blocks[105] = binfo(9);  // canonical block 105 has another hash: the two sources never agree
+
+    const auto res = run(r.sw->safe_step(110));
+    CHECK(res.status == StepStatus::Stalled);
+    CHECK(res.detail.find("blockHash") != std::string::npos);
+    CHECK(r.sw->stats().inconsistent == 3);
+    CHECK(r.src.bad.size() == 3);
     CHECK(r.sink.emitted.empty());
     CHECK(r.sw->c_s() == 100);
 }
 
-TEST_CASE("sweep: a log whose blockHash is not the canonical hash discards the response", "[unit][sweep]") {
+TEST_CASE("sweep: a stale block hash that resolves on the retry is released once", "[unit][sweep]") {
     Rig r;
-    r.src.logs.push_back(mklog(r.cfg, kSafeA, 105, 1, 0));
-    r.src.blocks[105] = binfo(9);  // canonical block 105 has another hash
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    LogResult stale;
+    stale.ok = true;
+    stale.provider = "infura";
+    stale.logs = {mklog(r.cfg, kSafeA, 105, 7, 0)};  // a lagging replica's pre-reorg view
+    r.src.overrides.push_back(stale);
 
     const auto res = run(r.sw->safe_step(110));
-    CHECK(res.status == StepStatus::Retry);
-    CHECK(res.detail.find("blockHash") != std::string::npos);
+    REQUIRE(res.status == StepStatus::Advanced);
     CHECK(r.sw->stats().inconsistent == 1);
-    CHECK(r.sink.emitted.empty());
+    REQUIRE(r.sink.emitted.size() == 1);
+    CHECK(field(r.sink.emitted[0], "block_hash") == hash_of(1).to_hex());
+}
+
+TEST_CASE("sweep: a rate limit on a wide span halves the page once, none on a narrow one", "[unit][sweep]") {
+    Rig r;  // infura: 500 blocks
+    LogResult limited;
+    limited.provider = "infura";
+    limited.kind = evml::rpc::FailKind::RateLimited;
+    limited.error = "429";
+    r.src.overrides.push_back(limited);
+
+    CHECK(run(r.sw->safe_step(2000)).status == StepStatus::Retry);
+    CHECK(r.sw->stats().failure_shrinks == 1);
+    CHECK(run(r.sw->safe_step(2000)).status == StepStatus::Advanced);
+    CHECK(r.src.calls[0].range == BlockRange{101, 600});
+    CHECK(r.src.calls[1].range == BlockRange{101, 350});  // 500 / 2
+
+    // a span within min_range (10) is not a range problem
+    Rig n;
+    n.src.overrides.push_back(limited);
+    CHECK(run(n.sw->safe_step(105)).status == StepStatus::Retry);
+    CHECK(n.sw->stats().failure_shrinks == 0);
+}
+
+TEST_CASE("sweep: a timeout shrinks too, a quota error does not", "[unit][sweep]") {
+    Rig r;
+    LogResult slow;
+    slow.provider = "infura";
+    slow.kind = evml::rpc::FailKind::Retry;
+    slow.error = "timeout";
+    r.src.overrides.push_back(slow);
+    CHECK(run(r.sw->safe_step(2000)).status == StepStatus::Retry);
+    CHECK(r.sw->stats().failure_shrinks == 1);
+
+    LogResult quota;
+    quota.provider = "infura";
+    quota.kind = evml::rpc::FailKind::QuotaExhausted;
+    quota.error = "monthly capacity";
+    r.src.overrides.push_back(quota);
+    CHECK(run(r.sw->safe_step(2000)).status == StepStatus::Retry);
+    CHECK(r.sw->stats().failure_shrinks == 1);
+}
+
+TEST_CASE("sweep: a page above the soft event cap is kept whole and the next page is smaller", "[unit][sweep]") {
+    SweeperOptions opt;
+    opt.max_page_logs = 2;
+    Rig r(load_base_config(), opt);
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    r.add(mklog(r.cfg, kSafeA, 106, 2, 0), 2);
+    r.add(mklog(r.cfg, kSafeA, 107, 3, 0), 3);
+
+    const auto res = run(r.sw->safe_step(2000));
+    REQUIRE(res.status == StepStatus::Advanced);
+    CHECK(r.sink.emitted.size() == 3);  // nothing dropped
+    CHECK(r.sw->stats().volume_shrinks == 1);
+    CHECK(run(r.sw->safe_step(2000)).status == StepStatus::Advanced);
+    CHECK(r.src.calls.back().range == BlockRange{601, 850});  // 500 / 2
+}
+
+TEST_CASE("sweep: max_bad_attempts must be at least 1", "[unit][sweep]") {
+    SweeperOptions opt;
+    opt.max_bad_attempts = 0;
+    CHECK_THROWS_AS(Rig(load_base_config(), opt), std::invalid_argument);
 }
 
 TEST_CASE("sweep: an unreadable block is a retry", "[unit][sweep]") {

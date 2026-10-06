@@ -35,7 +35,9 @@ Sweeper::Sweeper(const core::Config& cfg, EventContext ctx, LogSource& source, S
       sink_(sink),
       now_ms_(std::move(now_ms)),
       opt_(opt),
-      recent_(opt.recent_capacity) {}
+      recent_(opt.recent_capacity) {
+    if (opt.max_bad_attempts == 0) throw std::invalid_argument("Sweeper: max_bad_attempts must be >= 1");
+}
 
 void Sweeper::set_cursors(std::uint64_t c_s, std::uint64_t c_f) {
     if (c_f > c_s) throw std::invalid_argument("Sweeper::set_cursors: C_f > C_s violates I2");
@@ -74,93 +76,124 @@ boost::asio::awaitable<Sweeper::Fetched> Sweeper::fetch_page(std::uint64_t curso
         co_return out;
     }
 
-    const auto first = source_.current_provider();
-    if (!first) {
-        out.status = StepStatus::Retry;
-        out.detail = "no usable getLogs provider";
-        co_return out;
-    }
+    std::string last_problem;
+    for (std::uint32_t attempt = 1; attempt <= opt_.max_bad_attempts; ++attempt) {
+        out = Fetched{};
 
-    AimdPager* pg = &pager_for(*first);
-    for (;;) {
-        const auto r = next_range(cursor, ceiling, pg->range());
-        if (!r) throw std::logic_error("Sweeper::fetch_page: called with cursor at the ceiling");
+        const auto first = source_.current_provider();
+        if (!first) {
+            out.status = StepStatus::Retry;
+            out.detail = "no usable getLogs provider";
+            co_return out;
+        }
 
-        LogResult res = co_await source_.get_logs(*r, filter);
-        if (res.ok) {
-            pager_for(res.provider).on_success();
+        bool direct = false;  // one request for the whole filter (not split by address)
+        AimdPager* pg = &pager_for(*first);
+        for (;;) {
+            const auto r = next_range(cursor, ceiling, pg->range());
+            if (!r) throw std::logic_error("Sweeper::fetch_page: called with cursor at the ceiling");
+
+            LogResult res = co_await source_.get_logs(*r, filter);
+            if (res.ok) {
+                out.range = *r;
+                out.logs = std::move(res.logs);
+                out.provider = res.provider;
+                direct = true;
+                break;
+            }
+            if (res.kind != rpc::FailKind::RangeTooLarge) {
+                // Congestion rule (G1): a provider that rate-limits, times out or errors on a wide span may really be
+                // saying "this query is too expensive" (Infura answered a 2000-block range with 429). Halve once.
+                AimdPager& failed = pager_for(res.provider);
+                const std::uint64_t span = r->to - r->from + 1;
+                if ((res.kind == rpc::FailKind::Retry || res.kind == rpc::FailKind::RateLimited) &&
+                    span > failed.min()) {
+                    failed.on_range_too_large(std::nullopt);
+                    ++stats_.failure_shrinks;
+                }
+                out.status = StepStatus::Retry;
+                out.detail = "getLogs failed on " + res.provider + ": " + res.error;
+                co_return out;
+            }
+
+            ++stats_.range_shrinks;
+            pg = &pager_for(res.provider);
+            if (pg->on_range_too_large(res.range_limit) == AimdPager::Shrink::Shrunk) continue;
+
+            // Already at the minimum range and still too large: one request per address (plan 3.5).
+            ++stats_.address_splits;
+            std::vector<rpc::Log> merged;
+            std::string last_provider = res.provider;
+            for (const auto& addr : filter.addresses) {
+                core::LogFilter one;
+                one.addresses = {addr};
+                one.topic0s = filter.topic0s;
+                LogResult r2 = co_await source_.get_logs(*r, one);
+                if (!r2.ok) {
+                    out.status = r2.kind == rpc::FailKind::RangeTooLarge ? StepStatus::Stalled : StepStatus::Retry;
+                    out.detail = std::string(out.status == StepStatus::Stalled
+                                                 ? "range still too large at the minimum size for a single address on "
+                                                 : "getLogs failed while splitting by address on ") +
+                                 r2.provider + ": " + r2.error;
+                    co_return out;
+                }
+                last_provider = r2.provider;
+                merged.insert(merged.end(), std::make_move_iterator(r2.logs.begin()),
+                              std::make_move_iterator(r2.logs.end()));
+            }
             out.range = *r;
-            out.logs = std::move(res.logs);
-            out.provider = res.provider;
+            out.logs = std::move(merged);
+            out.provider = last_provider;
             break;
         }
-        if (res.kind != rpc::FailKind::RangeTooLarge) {
-            out.status = StepStatus::Retry;
-            out.detail = "getLogs failed on " + res.provider + ": " + res.error;
+
+        std::string problem;
+        if (const auto violation = validate_logs(out.logs, out.range.from, out.range.to, cfg_, only_class)) {
+            problem = "invalid getLogs response from " + out.provider + ": " + *violation;
+        } else {
+            std::sort(out.logs.begin(), out.logs.end(), [](const rpc::Log& a, const rpc::Log& b) {
+                return a.block_number != b.block_number ? a.block_number < b.block_number : a.log_index < b.log_index;
+            });
+
+            // I3: every event-block must still be canonical, and the log must belong to it.
+            for (const auto& l : out.logs) {
+                auto it = out.blocks.find(l.block_number);
+                if (it == out.blocks.end()) {
+                    const auto info = co_await source_.block(l.block_number);
+                    if (!info) {
+                        out.status = StepStatus::Retry;
+                        out.detail = "could not read block " + std::to_string(l.block_number);
+                        co_return out;
+                    }
+                    it = out.blocks.emplace(l.block_number, *info).first;
+                }
+                if (!(it->second.hash == l.block_hash)) {
+                    problem = "log from " + out.provider + " carries blockHash " + l.block_hash.to_hex() +
+                              " but block " + std::to_string(l.block_number) + " is " + it->second.hash.to_hex();
+                    break;
+                }
+            }
+        }
+
+        if (problem.empty()) {
+            if (direct) pager_for(out.provider).on_success();
+            if (out.logs.size() > opt_.max_page_logs) {  // soft memory cap (G6): keep this page, shrink the next
+                pager_for(out.provider).on_range_too_large(std::nullopt);
+                ++stats_.volume_shrinks;
+            }
             co_return out;
         }
 
-        ++stats_.range_shrinks;
-        pg = &pager_for(res.provider);
-        if (pg->on_range_too_large(res.range_limit) == AimdPager::Shrink::Shrunk) continue;
-
-        // Already at the minimum range and still too large: one request per address (plan 3.5).
-        ++stats_.address_splits;
-        std::vector<rpc::Log> merged;
-        std::string last_provider = res.provider;
-        for (const auto& addr : filter.addresses) {
-            core::LogFilter one;
-            one.addresses = {addr};
-            one.topic0s = filter.topic0s;
-            LogResult r2 = co_await source_.get_logs(*r, one);
-            if (!r2.ok) {
-                out.status = r2.kind == rpc::FailKind::RangeTooLarge ? StepStatus::Stalled : StepStatus::Retry;
-                out.detail = std::string(out.status == StepStatus::Stalled ? "range still too large at the minimum "
-                                                                           "size for a single address on "
-                                                                         : "getLogs failed while splitting by address on ") +
-                             r2.provider + ": " + r2.error;
-                co_return out;
-            }
-            last_provider = r2.provider;
-            merged.insert(merged.end(), std::make_move_iterator(r2.logs.begin()), std::make_move_iterator(r2.logs.end()));
-        }
-        out.range = *r;
-        out.logs = std::move(merged);
-        out.provider = last_provider;
-        break;
-    }
-
-    if (const auto violation = validate_logs(out.logs, out.range.from, out.range.to, cfg_, only_class)) {
+        // Do not trust either side (G2): penalise the provider that answered, and ask again (the adapter steers the
+        // next get_logs to another provider).
         ++stats_.inconsistent;
-        out.status = StepStatus::Retry;
-        out.detail = "invalid getLogs response from " + out.provider + ": " + *violation;
-        co_return out;
+        source_.report_bad(out.provider, problem);
+        last_problem = std::move(problem);
     }
 
-    std::sort(out.logs.begin(), out.logs.end(), [](const rpc::Log& a, const rpc::Log& b) {
-        return a.block_number != b.block_number ? a.block_number < b.block_number : a.log_index < b.log_index;
-    });
-
-    // I3: every event-block must still be canonical, and the log must belong to it.
-    for (const auto& l : out.logs) {
-        auto it = out.blocks.find(l.block_number);
-        if (it == out.blocks.end()) {
-            const auto info = co_await source_.block(l.block_number);
-            if (!info) {
-                out.status = StepStatus::Retry;
-                out.detail = "could not read block " + std::to_string(l.block_number);
-                co_return out;
-            }
-            it = out.blocks.emplace(l.block_number, *info).first;
-        }
-        if (!(it->second.hash == l.block_hash)) {
-            ++stats_.inconsistent;
-            out.status = StepStatus::Retry;
-            out.detail = "log from " + out.provider + " carries blockHash " + l.block_hash.to_hex() + " but block " +
-                         std::to_string(l.block_number) + " is " + it->second.hash.to_hex();
-            co_return out;
-        }
-    }
+    out = Fetched{};
+    out.status = StepStatus::Stalled;
+    out.detail = "no agreement after " + std::to_string(opt_.max_bad_attempts) + " attempts: " + last_problem;
     co_return out;
 }
 

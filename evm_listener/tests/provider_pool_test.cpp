@@ -388,6 +388,7 @@ TEST_CASE("pool: WS head lagging the getLogs provider's head fails over to the o
     MockHttpServer httpA(ioc, healthy(chain_a)), httpB(ioc, healthy(chain_b));
 
     auto cfg = base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"});
+    cfg.safe_poll = 20ms;
     cfg.stale.ws_lag_blocks = 5;
     cfg.stale.ws_lag_for = 1s;
     Rec rec;

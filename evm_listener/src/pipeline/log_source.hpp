@@ -43,6 +43,11 @@ public:
 
     // The provider that the next get_logs will start on (sizes the first page); nullopt when none is usable.
     virtual std::optional<std::string> current_provider() const = 0;
+
+    // `provider` answered with data that failed validation or the canonical-hash check (rev 5, G2). The adapter
+    // counts it as a provider failure (provider_inconsistency_total{p}) so the next get_logs prefers another provider.
+    // `reason` carries no secrets.
+    virtual void report_bad(const std::string& provider, const std::string& reason) = 0;
 };
 
 }  // namespace evml::pipeline

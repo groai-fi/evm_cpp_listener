@@ -98,6 +98,9 @@ public:
         std::size_t addresses;
     };
     std::vector<Call> calls;
+    std::vector<std::pair<std::string, std::string>> bad;  // report_bad(provider, reason) calls
+
+    void report_bad(const std::string& p, const std::string& reason) override { bad.emplace_back(p, reason); }
 
     std::optional<std::string> current_provider() const override {
         return no_provider ? std::nullopt : std::optional<std::string>(provider);
