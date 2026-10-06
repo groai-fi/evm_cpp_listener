@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "pipeline/aimd_pager.hpp"
-#include "pipeline/recent_set.hpp"
+#include "pipeline/last_type_map.hpp"
 
 using namespace evml::pipeline;
 
@@ -95,18 +95,25 @@ TEST_CASE("pager: converges on a provider whose true limit is 37 blocks", "[unit
     CHECK(p.range() >= 18);  // within a factor of two of the real limit
 }
 
-TEST_CASE("recent set: insert reports novelty and evicts the least recently used", "[unit][dedup]") {
-    CHECK_THROWS_AS(RecentSet(0), std::invalid_argument);
-    RecentSet s(3);
-    CHECK(s.insert("a"));
-    CHECK(s.insert("b"));
-    CHECK(s.insert("c"));
-    CHECK_FALSE(s.insert("a"));  // duplicate, refreshed: now b is the oldest
-    CHECK(s.insert("d"));        // evicts b
-    CHECK(s.size() == 3);
-    CHECK_FALSE(s.contains("b"));
-    CHECK(s.contains("a"));
-    CHECK(s.contains("c"));
-    CHECK(s.contains("d"));
-    CHECK(s.insert("b"));  // b was evicted, so it is new again (Redis is the authority beyond this window)
+TEST_CASE("last-type map: admits only when the type changes (I6) and evicts the least recently used", "[unit][dedup]") {
+    CHECK_THROWS_AS(LastTypeMap(0), std::invalid_argument);
+    LastTypeMap m(3);
+    CHECK(m.admit("a", EventType::Log));
+    CHECK_FALSE(m.admit("a", EventType::Log));  // same type again: duplicate
+    CHECK(m.admit("a", EventType::Revert));
+    CHECK_FALSE(m.admit("a", EventType::Revert));
+    CHECK(m.admit("a", EventType::Log));  // canonical again after a revert (A->B->A): emitted again
+    CHECK(m.last("a") == EventType::Log);
+
+    CHECK(m.admit("b", EventType::Log));
+    CHECK(m.admit("c", EventType::Log));
+    CHECK_FALSE(m.admit("a", EventType::Log));  // refreshed: b is now the oldest
+    CHECK(m.admit("d", EventType::Log));        // evicts b
+    CHECK(m.size() == 3);
+    CHECK_FALSE(m.last("b").has_value());
+    CHECK(m.last("a").has_value());
+    CHECK(m.last("c").has_value());
+    CHECK(m.last("d").has_value());
+    CHECK(m.admit("b", EventType::Log));  // evicted, so unknown: admitted (Redis is the authority beyond this window)
 }
+

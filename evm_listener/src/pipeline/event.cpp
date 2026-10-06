@@ -10,7 +10,7 @@ std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash
     return std::to_string(chain_id) + ":" + block_hash.to_hex() + ":" + std::to_string(log_index);
 }
 
-std::string dedup_key(const Event& e) { return "dedup:" + e.event_id + ":" + to_string(e.type); }
+std::string dedup_key(const Event& e) { return "dedup:" + e.event_id; }
 
 Event make_event(const rpc::Log& log, const core::Config& cfg, const EventContext& ctx, EventType type,
                  std::uint64_t block_timestamp, std::string first_source, std::uint64_t observed_ms,

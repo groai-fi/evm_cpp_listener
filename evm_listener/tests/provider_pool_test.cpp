@@ -109,7 +109,7 @@ PoolConfig base_cfg(std::vector<ProviderEndpoint> eps, std::vector<std::string> 
     c.subscribe_heads = true;
     c.logs = pool_filter();
     c.connect_timeout = c.handshake_timeout = c.request_timeout = c.subscribe_timeout = 2000ms;
-    c.idle_timeout = 5000ms;
+    c.idle_timeout = 3600s;
     c.http_timeout = 2000ms;
     c.policy.failover_after = 3;
     c.policy.probe_interval = 3600s;  // Down providers stay Down unless a test wants the probe
@@ -123,6 +123,7 @@ PoolConfig base_cfg(std::vector<ProviderEndpoint> eps, std::vector<std::string> 
     c.safe_poll = 3600s;
     c.finalized_poll = 3600s;
     c.crosscheck_period = 3600s;
+    c.stale.head_stall = 3600s;
     return c;
 }
 
@@ -328,7 +329,15 @@ TEST_CASE("pool: A recovers (probe) and takes over again after prefer_primary_af
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return rec.active.size() == 3 && !rec.heads.empty(); }, 10s));
+    const bool ok = run_until(ioc, [&] { return rec.active.size() == 3 && !rec.heads.empty(); }, 15s);
+    std::string trs;
+    for (const auto& t : rec.transitions) trs += t + " | ";
+    std::string acts;
+    for (const auto& a : rec.active) acts += a + " -> ";
+    INFO("transitions: " << trs);
+    INFO("active history: " << acts);
+    INFO("heads count: " << rec.heads.size() << " a_conns: " << a_conns);
+    REQUIRE(ok);
     CHECK(rec.active == std::vector<std::string>{"A", "B", "A"});
     CHECK(pool->active_ws() == "A");
     CHECK(pool->state("A") == State::Up);

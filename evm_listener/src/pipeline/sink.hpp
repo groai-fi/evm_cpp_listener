@@ -17,7 +17,7 @@ struct Emission {
     core::StreamKind stream{core::StreamKind::Events};
     EventType type{EventType::Log};
     std::string event_id;
-    std::string dedup_key;                     // "dedup:{event_id}:{log|revert}"
+    std::string dedup_key;                     // "dedup:{event_id}"; its value in Redis is the last `type`
     std::vector<Field> fields;                 // schema v=1, flat
     std::optional<std::uint64_t> released_block;  // set for safe-class log events: tracked in `released` (plan 3.5)
 };

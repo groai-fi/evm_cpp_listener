@@ -52,6 +52,7 @@ public:
 
     void emit(pipeline::Emission e) override {
         if (e.released_block) released[e.event_id] = pipeline::to_released_entry(e);
+        if (e.type == pipeline::EventType::Revert) released.erase(e.event_id);  // emit.lua: reverted = no longer released
         emitted.push_back(std::move(e));
     }
     void checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) override {

@@ -20,7 +20,7 @@ Emission make_revert(const ReleasedEntry& entry, std::uint64_t emitted_ms) {
     m.stream = entry.stream;
     m.type = EventType::Revert;
     m.event_id = entry.event_id;
-    m.dedup_key = "dedup:" + entry.event_id + ":" + to_string(EventType::Revert);
+    m.dedup_key = "dedup:" + entry.event_id;
     m.fields = entry.fields;
     bool saw_type = false, saw_emitted = false;
     for (auto& [k, v] : m.fields) {

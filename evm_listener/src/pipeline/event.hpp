@@ -43,7 +43,8 @@ struct Event {
 // "{chain_id}:{blockHash}:{logIndex}": unique per canonical log; a reorg changes the blockHash and so the id.
 std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash, std::uint64_t log_index);
 
-// Dedup key "dedup:{event_id}:{type}" with type log|revert, so a revert is never swallowed by its log's key.
+// Dedup key "dedup:{event_id}" (rev 5, N1). Its Redis value is the last emitted type (log|revert), so a revert is
+// never swallowed by its log and a log that is canonical again after a revert is emitted again.
 std::string dedup_key(const Event& e);
 
 // Process-level constants of every event this instance emits.

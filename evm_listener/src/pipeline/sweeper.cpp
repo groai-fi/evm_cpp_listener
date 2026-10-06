@@ -173,7 +173,7 @@ boost::asio::awaitable<StepResult> Sweeper::safe_step(std::uint64_t g_s) {
 
     for (const auto& log : f.logs) {
         const Event ev = build_event(log, f, EventType::Log);
-        if (!recent_.insert(dedup_key(ev))) {
+        if (!recent_.admit(ev.event_id, EventType::Log)) {
             ++stats_.deduped;
             continue;
         }
@@ -205,19 +205,24 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
 
     // Retractions first, then the replacement/late logs in (block, logIndex) order.
     for (const auto& v : diff.vanished) {
+        if (!recent_.admit(v.event_id, EventType::Revert)) {  // already retracted: a revert is never repeated (I6)
+            ++stats_.deduped;
+            continue;
+        }
         sink_.emit(make_revert(v, now_ms_()));
         ++stats_.reverts;
     }
     for (const auto& log : f.logs) {
         Event ev = build_event(log, f, EventType::Log);
-        if (is_safe_class(cfg_, log)) {
-            if (late_ids.count(ev.event_id) == 0) continue;  // matched: already released, nothing to emit
-            ev.finality = core::Finality::Finalized;         // it is final now; no `released` record needed
-            recent_.insert(dedup_key(ev));
-            ++stats_.late;
-        } else if (!recent_.insert(dedup_key(ev))) {
+        const bool safe_class = is_safe_class(cfg_, log);
+        if (safe_class && late_ids.count(ev.event_id) == 0) continue;  // matched: already released, nothing to emit
+        if (!recent_.admit(ev.event_id, EventType::Log)) {
             ++stats_.deduped;
             continue;
+        }
+        if (safe_class) {
+            ev.finality = core::Finality::Finalized;  // it is final now; no `released` record needed
+            ++stats_.late;
         }
         sink_.emit(make_emission(ev, std::nullopt));
         ++stats_.emitted_final;

@@ -67,10 +67,10 @@ TEST_CASE("make_event: pool log is safe-class on the events stream with the full
     CHECK(e.host == "host-1");
     CHECK(e.shard == "base_eurc_usdc");
     CHECK(e.listener_version == "0.1.0-test");
-    CHECK(dedup_key(e) == "dedup:" + e.event_id + ":log");
+    CHECK(dedup_key(e) == "dedup:" + e.event_id);
 }
 
-TEST_CASE("make_event: gauge is finalized-class, factory goes to the registry stream, reverts have their own dedup key",
+TEST_CASE("make_event: gauge is finalized-class, factory goes to the registry stream, a revert shares its log's dedup key",
           "[unit][event]") {
     const auto cfg = load_base_config();
     const auto gauge = make_event(log_of(contract(cfg, "eurc_usdc_cl50_gauge"), 1, 52060600, 0), cfg, kCtx,
@@ -86,8 +86,8 @@ TEST_CASE("make_event: gauge is finalized-class, factory goes to the registry st
     const auto rev = make_event(log_of(contract(cfg, "eurc_usdc_cl50_gauge"), 1, 52060600, 0), cfg, kCtx,
                                 EventType::Revert, 1, "infura", 0, 0);
     CHECK(rev.event_id == gauge.event_id);  // same identity...
-    CHECK(dedup_key(rev) != dedup_key(gauge));  // ...but a revert is never swallowed by its log's dedup key
-    CHECK(dedup_key(rev) == "dedup:" + rev.event_id + ":revert");
+    CHECK(dedup_key(rev) == dedup_key(gauge));  // ...and one dedup key per event: its value is the last type (rev 5)
+    CHECK(dedup_key(rev) == "dedup:" + rev.event_id);
 }
 
 TEST_CASE("make_event: untracked or topic-less logs are a contract violation", "[unit][event]") {

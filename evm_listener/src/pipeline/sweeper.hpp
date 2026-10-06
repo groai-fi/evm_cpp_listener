@@ -12,8 +12,8 @@
 #include "core/config.hpp"
 #include "pipeline/aimd_pager.hpp"
 #include "pipeline/event.hpp"
+#include "pipeline/last_type_map.hpp"
 #include "pipeline/log_source.hpp"
-#include "pipeline/recent_set.hpp"
 #include "pipeline/sink.hpp"
 
 namespace evml::pipeline {
@@ -97,7 +97,7 @@ private:
     Sink& sink_;
     std::function<std::uint64_t()> now_ms_;
     SweeperOptions opt_;
-    RecentSet recent_;
+    LastTypeMap recent_;
     std::unordered_map<std::string, AimdPager> pagers_;
     std::uint64_t c_s_{0}, c_f_{0};
     SweepStats stats_;

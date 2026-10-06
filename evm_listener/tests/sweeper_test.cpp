@@ -276,13 +276,63 @@ TEST_CASE("sweep: a released safe log that is no longer canonical is reverted an
     CHECK(field(r.sink.emitted[1], "type") == "revert");
     CHECK(field(r.sink.emitted[1], "block_hash") == hash_of(1).to_hex());  // the retracted log's own fields
     CHECK(field(r.sink.emitted[1], "emitted_ms") == "1000");
-    CHECK(r.sink.emitted[1].dedup_key == "dedup:" + original_id + ":revert");
+    CHECK(r.sink.emitted[1].dedup_key == "dedup:" + original_id);
     CHECK(r.sink.emitted[2].type == EventType::Log);
     CHECK(field(r.sink.emitted[2], "block_hash") == hash_of(2).to_hex());
     CHECK(field(r.sink.emitted[2], "finality") == "finalized");
     CHECK(r.sw->stats().reverts == 1);
     CHECK(r.sw->stats().late == 1);
     CHECK(r.sink.released.empty());
+}
+
+TEST_CASE("sweep: a log that is canonical again after its revert is emitted again (I6)", "[unit][sweep]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    const auto id_a = r.sink.emitted[0].event_id;
+
+    // block 105 is re-mined (hash 2): the final sweep retracts A and emits B late
+    r.src.logs.clear();
+    r.add(mklog(r.cfg, kSafeA, 105, 2, 0), 2);
+    REQUIRE(run(r.sw->final_step(110)).status == StepStatus::Advanced);
+    REQUIRE(r.sink.emitted.size() == 3);  // log A, revert A, log B
+
+    // ...and flips back to hash 1: A is canonical again, so the old dedup state must not swallow it
+    r.src.logs.clear();
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    r.sw->rewind_safe(100);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+
+    REQUIRE(r.sink.emitted.size() == 4);
+    CHECK(r.sink.emitted[3].event_id == id_a);
+    CHECK(r.sink.emitted[3].type == EventType::Log);
+    CHECK(r.sink.emitted[3].released_block.has_value());
+    CHECK(r.sw->stats().deduped == 0);
+
+    std::vector<EventType> seq_a;
+    for (const auto& m : r.sink.emitted)
+        if (m.event_id == id_a) seq_a.push_back(m.type);
+    CHECK(seq_a == std::vector<EventType>{EventType::Log, EventType::Revert, EventType::Log});
+}
+
+TEST_CASE("sweep: a revert is not repeated when the same vanished entry is seen again", "[unit][sweep]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    const auto released_a = r.sink.released.begin()->second;  // the sink's record of A
+    r.src.logs.clear();
+    r.add(mklog(r.cfg, kSafeA, 105, 2, 0), 2);
+    REQUIRE(run(r.sw->final_step(110)).status == StepStatus::Advanced);
+    REQUIRE(r.sink.count(EventType::Revert) == 1);
+
+    // a stale `released` record (e.g. a replayed sink) surfaces A again: the second revert is absorbed
+    r.sink.released[released_a.event_id] = released_a;
+    r.sw->rewind_safe(100);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    REQUIRE(run(r.sw->final_step(110)).status == StepStatus::Advanced);
+    CHECK(r.sink.count(EventType::Revert) == 1);
+    CHECK(r.sw->stats().reverts == 1);
+    CHECK(r.sw->stats().deduped >= 1);
 }
 
 TEST_CASE("sweep: rewinding the safe cursor drags the final cursor along", "[unit][sweep]") {
