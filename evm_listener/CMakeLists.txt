@@ -59,6 +59,7 @@ add_library(evml_core STATIC
     src/pipeline/pipeline_driver.cpp
     src/pipeline/event.cpp
     src/pipeline/log_validation.cpp
+    src/sink/spill.cpp
     src/app/pool_config.cpp
     src/app/tools.cpp
 )

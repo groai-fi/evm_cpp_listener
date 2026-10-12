@@ -30,6 +30,7 @@ add_executable(evml_tests
     pipeline_driver_test.cpp
     pipeline_property_test.cpp
     event_test.cpp
+    spill_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
