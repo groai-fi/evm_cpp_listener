@@ -31,12 +31,15 @@ add_executable(evml_tests
     pipeline_property_test.cpp
     event_test.cpp
     spill_test.cpp
+    redis_scripts_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
     EVML_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../config"
     EVML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
-# Tests tagged [integration] use in-process mock servers on 127.0.0.1; everything else is a pure unit test.
+# Tests tagged [integration] use in-process mock servers on 127.0.0.1 or the compose Redis (REDIS_URL); everything
+# else is a pure unit test. [redis_serial] tests change server-wide Redis state (maxmemory, SCRIPT FLUSH) and run alone.
 catch_discover_tests(evml_tests TEST_SPEC "~[integration]" PROPERTIES LABELS unit)
-catch_discover_tests(evml_tests TEST_SPEC "[integration]" PROPERTIES LABELS integration)
+catch_discover_tests(evml_tests TEST_SPEC "[integration]~[redis_serial]" PROPERTIES LABELS integration)
+catch_discover_tests(evml_tests TEST_SPEC "[redis_serial]" PROPERTIES LABELS integration RUN_SERIAL TRUE)
