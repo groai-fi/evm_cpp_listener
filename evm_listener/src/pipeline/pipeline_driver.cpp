@@ -67,7 +67,10 @@ TickResult PipelineDriver::fail(std::string why) {
 
 asio::awaitable<TickResult> PipelineDriver::recover() {
     state_ = PipelineState::Recovering;
-    const Checkpoint ck = co_await sink_.load_checkpoint();
+    const auto loaded = co_await sink_.load_checkpoint();
+    // Redis unreachable or the sink not yet readable: stay in Recovering and ask again (plan 4.3: never exit for this).
+    if (!loaded) co_return TickResult{opt_.idle_poll, false};
+    const Checkpoint& ck = *loaded;
     const int present = (ck.safe ? 1 : 0) + (ck.finalized ? 1 : 0) + (ck.contracts ? 1 : 0);
     const auto manifest = contract_manifest(cfg_);
 
@@ -75,9 +78,7 @@ asio::awaitable<TickResult> PipelineDriver::recover() {
         if (!g_s_) co_return TickResult{opt_.idle_poll, false};  // first run: wait for the safe gate
         const std::uint64_t c0 = initial_cursor(cfg_, *g_s_);
         sweeper_.set_cursors(c0, c0);
-        sink_.checkpoint(CheckpointKind::Safe, c0);
-        sink_.checkpoint(CheckpointKind::Finalized, c0);
-        sink_.set_contracts(manifest);
+        sink_.init_checkpoint(c0, manifest);  // one atomic write: never a partial checkpoint (rev 6, E)
     } else if (present != 3) {
         co_return fail(std::string("partial checkpoint: safe=") + (ck.safe ? "set" : "missing") +
                        " finalized=" + (ck.finalized ? "set" : "missing") +
@@ -102,6 +103,10 @@ asio::awaitable<TickResult> PipelineDriver::recover() {
         }
         sweeper_.set_cursors(*ck.safe, *ck.finalized);
         if (*ck.contracts != manifest) sink_.set_contracts(manifest);
+        // Events of the previous run may have been lost in a discarded spill, including a revert that never
+        // reached Redis. Re-check the released window now instead of waiting for the final sweep (rev 6, F).
+        // Nothing is released above C_f when C_f == C_s, so there is nothing to verify then.
+        if (*ck.safe > *ck.finalized) on_safe_reorg_signal("recovered from a checkpoint with a released window");
     }
 
     safe_progress_ = Progress{sweeper_.c_s(), std::nullopt, 0};

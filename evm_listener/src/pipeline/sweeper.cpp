@@ -231,7 +231,10 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
         if (is_safe_class(cfg_, l)) safe_logs.push_back(l);
 
     const auto released = co_await sink_.released_range(f.range.from, f.range.to);
-    const FinalDiff diff = diff_released(cfg_.chain.chain_id, released, safe_logs);
+    // Unavailable (sink degraded/replaying): diffing against a partial view would skip vanished logs (rev 6, A).
+    // Nothing has been emitted for this page yet, so pausing leaves the cursor untouched (I5).
+    if (!released) co_return StepResult{StepStatus::Paused, std::nullopt, "released set unavailable", false};
+    const FinalDiff diff = diff_released(cfg_.chain.chain_id, *released, safe_logs);
 
     std::set<std::string> late_ids;
     for (const auto& l : diff.late) late_ids.insert(make_event_id(cfg_.chain.chain_id, l.block_hash, l.log_index));
@@ -286,7 +289,8 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released() {
             co_return ReverifyResult{f.status, std::move(f.detail), false, std::nullopt};
 
         const auto released = co_await sink_.released_range(f.range.from, f.range.to);
-        const FinalDiff diff = diff_released(cfg_.chain.chain_id, released, f.logs);
+        if (!released) co_return ReverifyResult{StepStatus::Paused, "released set unavailable", false, std::nullopt};
+        const FinalDiff diff = diff_released(cfg_.chain.chain_id, *released, f.logs);
 
         std::set<std::string> new_ids;
         for (const auto& l : diff.late) new_ids.insert(make_event_id(cfg_.chain.chain_id, l.block_hash, l.log_index));

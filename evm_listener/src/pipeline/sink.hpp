@@ -43,6 +43,10 @@ struct Checkpoint {
 // The pipeline's view of the Phase 4 sink. Writes never block the io thread: they enqueue and return (acks come
 // back asynchronously and are the sink's business). Reads are awaitable because they are Redis round-trips.
 // Order is preserved: a checkpoint enqueued after emissions is applied after them (plan 4.2 ckpt.lua).
+//
+// Reads return nullopt when the sink cannot answer (rev 6, C/A): it is degraded or replaying, or the connection
+// failed. A read never returns a partial or stale answer: a released set that misses queued emissions would make the
+// final-sweep diff skip a vanished log, so the caller must pause and ask again later.
 class Sink {
 public:
     virtual ~Sink() = default;
@@ -52,15 +56,19 @@ public:
 
     virtual void emit(Emission e) = 0;
     virtual void checkpoint(CheckpointKind kind, std::uint64_t block) = 0;
+    // First run only (rev 6, E): writes safe = finalized = c0 and the contracts manifest in one atomic step, so a crash
+    // can never leave a partial checkpoint. A no-op if a checkpoint already exists (plan 4.2 ckpt.lua init).
+    virtual void init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) = 0;
     // Stores the contracts manifest (ckpt.contracts). Enqueued like a checkpoint: applied after earlier emissions.
     virtual void set_contracts(std::vector<std::string> manifest) = 0;
     // ZREMRANGEBYSCORE released -inf block (plan 4.2 final_trim.lua).
     virtual void final_trim(std::uint64_t block) = 0;
 
-    virtual boost::asio::awaitable<Checkpoint> load_checkpoint() = 0;
-    // Released members with score in [from, to], including those released before a restart.
-    virtual boost::asio::awaitable<std::vector<ReleasedEntry>> released_range(std::uint64_t from,
-                                                                              std::uint64_t to) = 0;
+    // nullopt: unavailable right now (see above). A Checkpoint with every field empty is a fresh store.
+    virtual boost::asio::awaitable<std::optional<Checkpoint>> load_checkpoint() = 0;
+    // Released members with score in [from, to], including those released before a restart. nullopt: unavailable.
+    virtual boost::asio::awaitable<std::optional<std::vector<ReleasedEntry>>> released_range(std::uint64_t from,
+                                                                                          std::uint64_t to) = 0;
 };
 
 Emission make_emission(const Event& e, std::optional<std::uint64_t> released_block);
