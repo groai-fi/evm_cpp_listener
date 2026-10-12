@@ -91,8 +91,8 @@ struct SinkCfg {
     std::uint64_t retention_ms{};
     std::uint32_t dedup_ttl_s{};
     std::uint32_t queue_capacity{};
-    std::string wal_dir;
-    std::uint64_t wal_max_bytes{};
+    std::string spill_dir;
+    std::uint64_t spill_max_bytes{};
     bool require_noeviction{};
 };
 

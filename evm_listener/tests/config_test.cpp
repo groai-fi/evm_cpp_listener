@@ -79,6 +79,12 @@ TEST_CASE("base.toml parses: 5 contracts (2 safe, 3 finalized), 2 registry", "[u
     CHECK(c.routes.size() == 4 + 4 + 5 + 1 + 3);
 }
 
+TEST_CASE("base.toml: sink spill settings (process-scoped, ephemeral disk)", "[unit][config]") {
+    const Config c = parse_with(base_toml(), full_env());
+    CHECK(c.sink.spill_dir == "/tmp/evml-spill");
+    CHECK(c.sink.spill_max_bytes == 536870912);
+}
+
 TEST_CASE("base.toml: start blocks and registry defaults", "[unit][config]") {
     const Config c = parse_with(base_toml(), full_env());
     CHECK(c.contracts[0].start_block == std::optional<std::uint64_t>(52060000));
@@ -210,6 +216,10 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
     SECTION("unknown key is rejected, not ignored") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "[shard]\n", "[shard]\ntypo_key = 1\n"), env),
                           ContainsSubstring("[shard].typo_key: unknown key"));
+    }
+    SECTION("the retired wal_dir key is rejected, not ignored") {
+        CHECK_THROWS_WITH(parse_with(mutate(base, "spill_dir ", "wal_dir   "), env),
+                          ContainsSubstring("[sink].wal_dir: unknown key"));
     }
     SECTION("missing table") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "[backfill]", "[backfill_x]"), env), ContainsSubstring("unknown key"));

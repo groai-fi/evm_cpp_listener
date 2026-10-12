@@ -133,8 +133,8 @@ redis_url_env      = "REDIS_URL"
 retention_ms       = 172800000   # XADD MINID ~ now-48h
 dedup_ttl_s        = 604800      # 7 d
 queue_capacity     = 100000
-wal_dir            = "/data/wal"
-wal_max_bytes      = 536870912
+spill_dir          = "/tmp/evml-spill"   # ephemeral; wiped at process start
+spill_max_bytes    = 536870912
 require_noeviction = true
 
 [ops]

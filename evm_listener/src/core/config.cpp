@@ -468,15 +468,15 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
     // [sink]
     {
         const Section s(table_of(root, origin, "sink"), origin, "[sink]",
-                        {"redis_url_env", "retention_ms", "dedup_ttl_s", "queue_capacity", "wal_dir", "wal_max_bytes",
+                        {"redis_url_env", "retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir", "spill_max_bytes",
                          "require_noeviction"});
         auto& k = cfg.sink;
         k.redis_url_env = s.str("redis_url_env");
         k.retention_ms = s.uint<std::uint64_t>("retention_ms", 1);
         k.dedup_ttl_s = s.uint<std::uint32_t>("dedup_ttl_s", 1);
         k.queue_capacity = s.uint<std::uint32_t>("queue_capacity", 1);
-        k.wal_dir = s.str("wal_dir");
-        k.wal_max_bytes = s.uint<std::uint64_t>("wal_max_bytes", 1);
+        k.spill_dir = s.str("spill_dir");
+        k.spill_max_bytes = s.uint<std::uint64_t>("spill_max_bytes", 1);
         k.require_noeviction = s.boolean("require_noeviction");
     }
 
