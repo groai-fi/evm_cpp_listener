@@ -42,11 +42,13 @@ inline std::string field(const pipeline::Emission& m, const std::string& key) {
 class MemorySink : public pipeline::Sink {
 public:
     bool saturated_flag{false};
+    bool unreadable{false};  // reads return nullopt, like a degraded or replaying sink (rev 6, A/C)
     std::vector<pipeline::Emission> emitted;
     std::vector<std::pair<pipeline::CheckpointKind, std::uint64_t>> checkpoints;
     std::vector<std::uint64_t> trims;
     pipeline::Checkpoint stored;
     std::size_t contract_writes{0};
+    std::size_t init_calls{0};  // init_checkpoint calls that wrote (a checkpoint did not exist yet)
     std::map<std::string, pipeline::ReleasedEntry> released;
 
     bool saturated() const override { return saturated_flag; }
@@ -61,6 +63,13 @@ public:
         auto& slot = kind == pipeline::CheckpointKind::Safe ? stored.safe : stored.finalized;
         if (!slot || *slot < block) slot = block;  // set-if-greater, like ckpt.lua
     }
+    void init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) override {
+        if (stored.safe || stored.finalized || stored.contracts) return;  // ckpt.lua init: only if nothing exists
+        ++init_calls;
+        stored.safe = c0;
+        stored.finalized = c0;
+        stored.contracts = std::move(manifest);
+    }
     void set_contracts(std::vector<std::string> manifest) override {
         ++contract_writes;
         stored.contracts = std::move(manifest);
@@ -70,8 +79,13 @@ public:
         for (auto it = released.begin(); it != released.end();)
             it = it->second.block_number <= block ? released.erase(it) : std::next(it);
     }
-    net::awaitable<pipeline::Checkpoint> load_checkpoint() override { co_return stored; }
-    net::awaitable<std::vector<pipeline::ReleasedEntry>> released_range(std::uint64_t from, std::uint64_t to) override {
+    net::awaitable<std::optional<pipeline::Checkpoint>> load_checkpoint() override {
+        if (unreadable) co_return std::nullopt;
+        co_return stored;
+    }
+    net::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> released_range(std::uint64_t from,
+                                                                                       std::uint64_t to) override {
+        if (unreadable) co_return std::nullopt;
         std::vector<pipeline::ReleasedEntry> out;
         for (const auto& [id, e] : released)
             if (e.block_number >= from && e.block_number <= to) out.push_back(e);

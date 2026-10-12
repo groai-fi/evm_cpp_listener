@@ -573,3 +573,43 @@ TEST_CASE("reverify: a saturated sink pauses it without asking the provider", "[
     CHECK(run(r.sw->reverify_released()).status == StepStatus::Paused);
     CHECK(r.src.calls.empty());
 }
+
+TEST_CASE("sweep: final step pauses without emitting or moving when the released set is unavailable", "[unit][sweep]") {
+    Rig r;
+    r.add(mklog(r.cfg, kGauge, 106, 2, 0), 2);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    const auto emitted = r.sink.emitted.size();
+    const auto checkpoints = r.sink.checkpoints.size();
+
+    r.sink.unreadable = true;
+    const auto res = run(r.sw->final_step(108));
+    CHECK(res.status == StepStatus::Paused);
+    CHECK(r.sink.emitted.size() == emitted);
+    CHECK(r.sink.checkpoints.size() == checkpoints);
+    CHECK(r.sink.trims.empty());
+    CHECK(r.sw->c_f() == 100);
+    CHECK(r.sw->c_s() == 110);
+
+    r.sink.unreadable = false;
+    REQUIRE(run(r.sw->final_step(108)).status == StepStatus::Advanced);
+    CHECK(r.sw->c_f() == 108);
+    CHECK(r.sink.emitted.size() == emitted + 1);  // the gauge log
+}
+
+TEST_CASE("reverify: an unavailable released set is a pause, not a reorg", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+
+    r.sink.unreadable = true;
+    const auto res = run(r.sw->reverify_released());
+    CHECK(res.status == StepStatus::Paused);
+    CHECK_FALSE(res.reorg);
+    CHECK_FALSE(res.fork_point.has_value());
+    CHECK(r.sw->c_s() == 110);
+
+    r.sink.unreadable = false;
+    const auto again = run(r.sw->reverify_released());
+    CHECK(again.status == StepStatus::Advanced);
+    CHECK_FALSE(again.reorg);
+}

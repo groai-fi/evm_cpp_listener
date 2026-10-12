@@ -84,17 +84,54 @@ TEST_CASE("driver: a first run waits for the safe gate then writes cursors and m
     CHECK(r.drv->status().state == PipelineState::Recovering);
     CHECK(r.sink.checkpoints.empty());
     CHECK(r.sink.contract_writes == 0);
+    CHECK(r.sink.init_calls == 0);
 
     r.drv->set_gates(52060100, 52060000);
     CHECK(r.tick().wait.count() == 0);
     CHECK(r.drv->status().state == PipelineState::CatchingUp);
     CHECK(r.sw->c_s() == 52059999);
     CHECK(r.sw->c_f() == 52059999);
-    REQUIRE(r.sink.checkpoints.size() == 2);
+    // rev 6 (E): one atomic init_checkpoint, not two checkpoints plus a manifest write
+    CHECK(r.sink.init_calls == 1);
+    CHECK(r.sink.checkpoints.empty());
+    CHECK(r.sink.contract_writes == 0);
     CHECK(r.sink.stored.safe == 52059999);
     CHECK(r.sink.stored.finalized == 52059999);
-    CHECK(r.sink.contract_writes == 1);
     CHECK(r.sink.stored.contracts == contract_manifest(r.cfg));
+}
+
+TEST_CASE("driver: a first run does not initialise while the sink cannot be read", "[unit][driver]") {
+    Rig r;
+    r.drv->set_gates(52060100, 52060000);
+    r.sink.unreadable = true;
+    const auto t = r.tick();
+    CHECK(t.wait.count() == 1000);
+    CHECK_FALSE(t.done);
+    CHECK(r.drv->status().state == PipelineState::Recovering);
+    CHECK(r.sink.init_calls == 0);
+    CHECK(r.sink.stored.safe == std::nullopt);
+
+    r.sink.unreadable = false;
+    CHECK(r.tick().wait.count() == 0);
+    CHECK(r.sink.init_calls == 1);
+    CHECK(r.drv->status().state == PipelineState::CatchingUp);
+}
+
+TEST_CASE("driver: recovery waits while the checkpoint cannot be read and then restores the cursors",
+          "[unit][driver]") {
+    Rig r;
+    r.seed(kAfterStart, kAfterStart);
+    r.sink.unreadable = true;
+    const auto t = r.tick();
+    CHECK(t.wait.count() == 1000);
+    CHECK_FALSE(t.done);
+    CHECK(r.drv->status().state == PipelineState::Recovering);
+    CHECK(r.sw->c_s() == 0);  // nothing was restored from an unavailable store
+
+    r.sink.unreadable = false;
+    CHECK(r.tick().wait.count() == 0);
+    CHECK(r.drv->status().state == PipelineState::CatchingUp);
+    CHECK(r.sw->c_s() == kAfterStart);
 }
 
 TEST_CASE("driver: a restart restores the cursors and rewrites nothing", "[unit][driver]") {
@@ -104,6 +141,42 @@ TEST_CASE("driver: a restart restores the cursors and rewrites nothing", "[unit]
     CHECK(r.sw->c_f() == kAfterStart - 50);
     CHECK(r.sink.checkpoints.empty());
     CHECK(r.sink.contract_writes == 0);
+    CHECK(r.sink.init_calls == 0);
+}
+
+TEST_CASE("driver: a restart with a released window reverifies it once; with no window it does not",
+          "[unit][driver]") {
+    Rig none;
+    none.start(100, 100);  // C_f == C_s: nothing is released above C_f
+    CHECK_FALSE(none.drv->status().reverify_pending);
+
+    Rig r;
+    r.start(kAfterStart, kAfterStart - 50);  // (C_f, C_s] may hold released logs, perhaps with a lost revert
+    CHECK(r.drv->status().reverify_pending);
+
+    CHECK(r.tick().wait.count() == 0);  // a still-canonical window changes nothing
+    const auto st = r.drv->status();
+    CHECK_FALSE(st.reverify_pending);
+    CHECK(st.safe_reorgs == 0);
+    CHECK(r.sink.emitted.empty());
+    CHECK(r.sw->c_s() == kAfterStart);
+    CHECK(r.sw->c_f() == kAfterStart - 50);
+}
+
+TEST_CASE("driver: an unreadable released set pauses the reverify and keeps it pending", "[unit][driver]") {
+    Rig r;
+    r.start(kAfterStart, kAfterStart - 50);
+    REQUIRE(r.drv->status().reverify_pending);
+
+    r.sink.unreadable = true;
+    const auto t = r.tick();
+    CHECK(t.wait.count() == 200);  // pause poll
+    CHECK(r.drv->status().reverify_pending);
+    CHECK(r.sink.emitted.empty());
+
+    r.sink.unreadable = false;
+    CHECK(r.tick().wait.count() == 0);
+    CHECK_FALSE(r.drv->status().reverify_pending);
 }
 
 TEST_CASE("driver: a partial checkpoint is fatal and terminal", "[unit][driver]") {
