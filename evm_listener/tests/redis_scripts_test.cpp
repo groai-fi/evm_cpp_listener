@@ -224,7 +224,7 @@ TEST_CASE("redis scripts: tracked emits, final_trim and released_range after a r
     CHECK(r.xlen(r.keys.events()) == 3);
     CHECK(r.zcard(r.keys.released()) == 3);
     CHECK(r.hlen(r.keys.released_data()) == 3);
-    CHECK(*r.hget(r.keys.released_data(), "e105") == pack_fields(e105.fields));
+    CHECK(*r.hget(r.keys.released_data(), "e105") == pack_released(e105.stream, e105.fields));
 
     CHECK(r.run(emit_call(r.keys, e105, params())) == "DUP");  // nothing changes
     CHECK(r.xlen(r.keys.events()) == 3);
@@ -244,7 +244,9 @@ TEST_CASE("redis scripts: tracked emits, final_trim and released_range after a r
     REQUIRE(ids == std::vector<std::string>{"e110"});
     const auto data = fresh.command<sw::redis::OptionalString>("HGET", r.keys.released_data(), ids[0]);
     REQUIRE(data.has_value());
-    CHECK(unpack_fields(*data) == e110.fields);
+    const auto image = unpack_released(*data);
+    CHECK(image.fields == e110.fields);
+    CHECK(image.stream == e110.stream);
 }
 
 // 17. BELOW_FINALIZED.
@@ -402,6 +404,19 @@ TEST_CASE("redis scripts: field and manifest codecs reject malformed input", "[u
     CHECK_THROWS_WITH(unpack_fields("{}"), ContainsSubstring("not a JSON array"));
     CHECK_THROWS_WITH(unpack_fields("[[\"a\"]]"), ContainsSubstring("[name, value] string pair"));
     CHECK_THROWS_WITH(unpack_fields("[[\"a\",1]]"), ContainsSubstring("[name, value] string pair"));
+
+    // released_data keeps the stream: it is not derivable from the fields, and a revert must go to the right one.
+    for (const auto stream : {evml::core::StreamKind::Events, evml::core::StreamKind::Registry}) {
+        const auto image = unpack_released(pack_released(stream, {{"a", "1"}, {"b", ""}}));
+        CHECK(image.stream == stream);
+        CHECK(image.fields == std::vector<Field>{{"a", "1"}, {"b", ""}});
+    }
+    CHECK_THROWS_WITH(unpack_released("[]"), ContainsSubstring("not a JSON object"));
+    CHECK_THROWS_WITH(unpack_released("{"), ContainsSubstring("invalid JSON"));
+    CHECK_THROWS_WITH(unpack_released(R"({"fields":[]})"), ContainsSubstring("needs a string `stream`"));
+    CHECK_THROWS_WITH(unpack_released(R"({"stream":"events"})"), ContainsSubstring("needs a string `stream`"));
+    CHECK_THROWS_WITH(unpack_released(R"({"stream":"nope","fields":[]})"), ContainsSubstring("unknown stream 'nope'"));
+    CHECK_THROWS_WITH(unpack_released(R"({"stream":"events","fields":[["a"]]})"), ContainsSubstring("[name, value] string pair"));
     CHECK(unpack_manifest(pack_manifest({"x", "y"})) == std::vector<std::string>{"x", "y"});
     CHECK_THROWS_WITH(unpack_manifest("[1]"), ContainsSubstring("not a string"));
     CHECK_THROWS_WITH(unpack_manifest("nope"), ContainsSubstring("invalid JSON"));

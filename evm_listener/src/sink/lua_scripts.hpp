@@ -53,9 +53,18 @@ ScriptCall lease_renew_call(const Keys& k, const std::string& token, std::uint32
 ScriptCall lease_release_call(const Keys& k, const std::string& token);
 
 // JSON codecs for the values stored in Redis. Malformed input throws core::DecodeError.
-std::string pack_fields(const std::vector<pipeline::Field>& fields);   // released_data value: [[k,v],...]
+std::string pack_fields(const std::vector<pipeline::Field>& fields);   // [[k,v],...]
 std::vector<pipeline::Field> unpack_fields(std::string_view json);
 std::string pack_manifest(const std::vector<std::string>& manifest);   // ckpt.contracts value: ["addr:start:class",...]
 std::vector<std::string> unpack_manifest(std::string_view json);
+
+// released_data value (the before image of a tracked emission): {"stream":"events","fields":[[k,v],...]}. The stream is
+// part of it because it is not derivable from the fields, and a revert must go to the stream of the log it retracts.
+std::string pack_released(core::StreamKind stream, const std::vector<pipeline::Field>& fields);
+struct ReleasedImage {
+    core::StreamKind stream{core::StreamKind::Events};
+    std::vector<pipeline::Field> fields;
+};
+ReleasedImage unpack_released(std::string_view json);
 
 }  // namespace evml::sink

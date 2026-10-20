@@ -128,6 +128,33 @@ return redis.error_reply('ERR lease: unknown mode')
 
 std::string num(std::uint64_t v) { return std::to_string(v); }
 
+boost::json::array fields_to_json(const std::vector<pipeline::Field>& fields) {
+    boost::json::array arr;
+    for (const auto& [name, value] : fields) arr.push_back(boost::json::array{name, value});
+    return arr;
+}
+
+// `what` names the caller in error messages; `raw` is the full stored value, quoted for diagnosis.
+std::vector<pipeline::Field> fields_from_json(const boost::json::value& v, const char* what, std::string_view raw) {
+    if (!v.is_array()) throw core::DecodeError(std::string(what) + ": not a JSON array: " + std::string(raw));
+
+    std::vector<pipeline::Field> out;
+    for (const auto& item : v.as_array()) {
+        if (!item.is_array() || item.as_array().size() != 2 || !item.as_array()[0].is_string() ||
+            !item.as_array()[1].is_string())
+            throw core::DecodeError(std::string(what) + ": element is not a [name, value] string pair: " + std::string(raw));
+        out.emplace_back(std::string(item.as_array()[0].as_string()), std::string(item.as_array()[1].as_string()));
+    }
+    return out;
+}
+
+boost::json::value parse_json(std::string_view json, const char* what) {
+    boost::system::error_code ec;
+    boost::json::value v = boost::json::parse(json, ec);
+    if (ec) throw core::DecodeError(std::string(what) + ": invalid JSON (" + ec.message() + "): " + std::string(json));
+    return v;
+}
+
 }  // namespace
 
 const char* script_name(Script s) {
@@ -163,7 +190,7 @@ ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParam
               pipeline::to_string(e.type),
               e.released_block ? num(*e.released_block) : std::string(),
               e.event_id,
-              e.released_block ? pack_fields(e.fields) : std::string(),
+              e.released_block ? pack_released(e.stream, e.fields) : std::string(),
               p.token};
     for (const auto& [name, value] : e.fields) {
         c.args.push_back(name);
@@ -202,24 +229,34 @@ ScriptCall lease_release_call(const Keys& k, const std::string& token) {
 }
 
 std::string pack_fields(const std::vector<pipeline::Field>& fields) {
-    boost::json::array arr;
-    for (const auto& [name, value] : fields) arr.push_back(boost::json::array{name, value});
-    return boost::json::serialize(arr);
+    return boost::json::serialize(fields_to_json(fields));
 }
 
 std::vector<pipeline::Field> unpack_fields(std::string_view json) {
-    boost::system::error_code ec;
-    const boost::json::value v = boost::json::parse(json, ec);
-    if (ec) throw core::DecodeError("unpack_fields: invalid JSON (" + ec.message() + "): " + std::string(json));
-    if (!v.is_array()) throw core::DecodeError("unpack_fields: not a JSON array: " + std::string(json));
+    return fields_from_json(parse_json(json, "unpack_fields"), "unpack_fields", json);
+}
 
-    std::vector<pipeline::Field> out;
-    for (const auto& item : v.as_array()) {
-        if (!item.is_array() || item.as_array().size() != 2 || !item.as_array()[0].is_string() ||
-            !item.as_array()[1].is_string())
-            throw core::DecodeError("unpack_fields: element is not a [name, value] string pair: " + std::string(json));
-        out.emplace_back(std::string(item.as_array()[0].as_string()), std::string(item.as_array()[1].as_string()));
-    }
+std::string pack_released(core::StreamKind stream, const std::vector<pipeline::Field>& fields) {
+    boost::json::object o;
+    o["stream"] = core::to_string(stream);
+    o["fields"] = fields_to_json(fields);
+    return boost::json::serialize(o);
+}
+
+ReleasedImage unpack_released(std::string_view json) {
+    const boost::json::value v = parse_json(json, "unpack_released");
+    if (!v.is_object()) throw core::DecodeError("unpack_released: not a JSON object: " + std::string(json));
+    const auto& o = v.as_object();
+    const auto* stream = o.if_contains("stream");
+    const auto* fields = o.if_contains("fields");
+    if (!stream || !stream->is_string() || !fields)
+        throw core::DecodeError("unpack_released: needs a string `stream` and a `fields` array: " + std::string(json));
+
+    ReleasedImage out;
+    if (stream->as_string() == core::to_string(core::StreamKind::Events)) out.stream = core::StreamKind::Events;
+    else if (stream->as_string() == core::to_string(core::StreamKind::Registry)) out.stream = core::StreamKind::Registry;
+    else throw core::DecodeError("unpack_released: unknown stream '" + std::string(stream->as_string()) + "': " + std::string(json));
+    out.fields = fields_from_json(*fields, "unpack_released", json);
     return out;
 }
 
