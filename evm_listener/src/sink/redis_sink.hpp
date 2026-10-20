@@ -51,6 +51,18 @@ struct RedisSinkOptions {
     std::function<Clock::time_point()> steady_now;    // empty = Clock::now; tests inject a fake clock
     std::function<std::uint64_t()> wall_ms;           // empty = system clock; the listener clock for XADD MINID
 
+    // Heartbeat (plan 4.7): `SET hb:<host_id> <payload> EX heartbeat_ttl_s` every heartbeat_ms on the lease connection,
+    // once set_heartbeat() gave it a payload. 0 = disabled. from_config() leaves these at their defaults: the host wires
+    // them from [ops].heartbeat_s and [shard].host_id.
+    std::string host_id;
+    std::uint32_t heartbeat_ms{0};
+    std::uint32_t heartbeat_ttl_s{30};
+
+    // Consumer-group lag probe (plan 4.10): leader only, on the lease connection, every consumer_lag_interval_ms.
+    // Empty groups = disabled. from_config() copies the groups.
+    std::vector<core::ConsumerGroupCfg> consumer_groups;
+    std::uint32_t consumer_lag_interval_ms{60000};
+
     // Copies the [sink] and [lease] settings. `token` must be kNoFence exactly when `lease.enabled` is false.
     static RedisSinkOptions from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token);
 };
@@ -65,6 +77,8 @@ struct SinkStatus {
     std::uint64_t below_finalized_total{};  // emit.lua refused a tracked emit at or below ckpt.finalized (SinkInvariant)
     std::uint64_t discarded_total{};      // evml_spill_discarded_records_total: items dropped on Fenced / Failed
     std::uint64_t renew_failures_total{};
+    std::uint64_t heartbeat_failures_total{};
+    std::uint64_t consumer_lag_failures_total{};
     std::uint64_t reconnects_total{};
 };
 
@@ -133,6 +147,24 @@ public:
     void start();
     void stop();
 
+    // Publishes the heartbeat payload (the host's JSON state; the content comes from the io thread). Thread-safe. The sink
+    // thread writes the latest payload every heartbeat_ms.
+    void set_heartbeat(std::string payload);
+
+    // The latest consumer-group lag snapshot, one entry per configured group (empty before the first probe, or when the
+    // probe is disabled). Thread-safe. Phase 5 turns it into metrics and alerts.
+    std::vector<ConsumerLag> consumer_lag() const;
+
+    // Graceful shutdown (plan 4.8 "Draining"): waits up to `budget` for every accepted write to be acked, stops the sink
+    // thread, then releases the lease so a standby takes over without waiting for the TTL. If the flush did not finish
+    // it reports how many writes were left: the next leader re-sweeps from the Redis checkpoint, so that is allowed.
+    struct DrainResult {
+        bool flushed{false};
+        std::uint64_t unflushed{0};
+        bool lease_released{false};
+    };
+    DrainResult drain(std::chrono::milliseconds budget);
+
     // One iteration of the sink loop: lease renewal if due, then at most one batch (or one read, or one reconnect
     // probe). Returns true if it did something. Public for tests and for the loop thread only.
     bool pump();
@@ -165,6 +197,8 @@ private:
     TimePoint wake_time() const;
 
     bool service_lease();
+    bool service_heartbeat();
+    bool service_consumer_lag();
     LeaseResult renew_lease();
     bool drain_terminal();
     bool queue_to_spill();
@@ -200,6 +234,8 @@ private:
     // Sink thread only.
     std::deque<detail::WriteItem> held_;  // the current batch: popped from the spill or queue, not yet acked
     TimePoint next_renew_;
+    TimePoint next_heartbeat_;
+    TimePoint next_lag_probe_;
     TimePoint next_probe_;
     std::uint32_t probe_attempt_{0};
     std::uint32_t reload_streak_{0};  // consecutive NOSCRIPT batches (a flush racing every reload is not plausible)
@@ -217,10 +253,16 @@ private:
     std::atomic<std::uint64_t> below_finalized_total_{0};
     std::atomic<std::uint64_t> discarded_total_{0};
     std::atomic<std::uint64_t> renew_failures_total_{0};
+    std::atomic<std::uint64_t> heartbeat_failures_total_{0};
+    std::atomic<std::uint64_t> consumer_lag_failures_total_{0};
     std::atomic<std::uint64_t> reconnects_total_{0};
     std::atomic<std::uint64_t> heartbeat_ms_{0};
     mutable std::mutex fatal_mu_;
     std::string fatal_message_;
+    mutable std::mutex hb_mu_;
+    std::string hb_payload_;
+    mutable std::mutex lag_mu_;
+    std::vector<ConsumerLag> lag_snapshot_;
 };
 
 }  // namespace evml::sink

@@ -64,6 +64,39 @@ CallOutcome fail_outcome(const std::string& msg) {
     return ScriptFail{FailKind::Fatal, msg};
 }
 
+// ---- raw reply walking (XINFO / XPENDING / TIME answer arrays that mix integers, strings and nils) ----
+
+std::optional<std::string> reply_str(const redisReply& r) {
+    switch (r.type) {
+        case REDIS_REPLY_STRING:
+        case REDIS_REPLY_STATUS: return std::string(r.str, r.len);
+        case REDIS_REPLY_INTEGER: return std::to_string(r.integer);
+        case REDIS_REPLY_NIL: return std::nullopt;
+        default: throw std::runtime_error("redis: expected a scalar reply, got reply type " + std::to_string(r.type));
+    }
+}
+
+void require_array(const redisReply& r, const char* what) {
+    if (r.type != REDIS_REPLY_ARRAY)
+        throw std::runtime_error(std::string("redis: ") + what + " did not answer an array (reply type " +
+                                 std::to_string(r.type) + ")");
+}
+
+// The value after `key` in a flat [k1, v1, k2, v2, ...] array; nullptr when the key is absent.
+const redisReply* flat_get(const redisReply& arr, const std::string& key, const char* what) {
+    require_array(arr, what);
+    if (arr.elements % 2 != 0) throw std::runtime_error(std::string("redis: ") + what + " has an odd element count");
+    for (std::size_t i = 0; i < arr.elements; i += 2)
+        if (reply_str(*arr.element[i]) == key) return arr.element[i + 1];
+    return nullptr;
+}
+
+std::optional<std::string> flat_str(const redisReply& arr, const std::string& key, const char* what) {
+    const redisReply* v = flat_get(arr, key, what);
+    if (!v) throw std::runtime_error(std::string("redis: ") + what + " has no field '" + key + "'");
+    return reply_str(*v);
+}
+
 }  // namespace
 
 RedisppConn::RedisppConn(const std::string& url, const Keys& keys, std::chrono::milliseconds io_timeout)
@@ -76,6 +109,13 @@ void RedisppConn::load_scripts() {
         return 0;
     });
     loaded_ = true;
+}
+
+void RedisppConn::set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) {
+    guarded([&] {
+        redis_.set(key, value, std::chrono::seconds(ttl_s));
+        return 0;
+    });
 }
 
 std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& calls) {
@@ -152,6 +192,63 @@ std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t fr
         }
     }
     return out;
+}
+
+GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const std::string& group) {
+    const auto run = [this](std::vector<std::string> argv) -> sw::redis::ReplyUPtr {
+        return guarded([&] { return redis_.command(argv.begin(), argv.end()); });
+    };
+    GroupFacts f;
+
+    sw::redis::ReplyUPtr groups;
+    try {
+        groups = run({"XINFO", "GROUPS", stream_key});
+    } catch (const sw::redis::ReplyError& e) {
+        if (std::string(e.what()).find("no such key") != std::string::npos) return f;  // the stream does not exist yet
+        throw;
+    }
+    f.stream_exists = true;
+    require_array(*groups, "XINFO GROUPS");
+    const redisReply* mine = nullptr;
+    for (std::size_t i = 0; i < groups->elements && !mine; ++i)
+        if (flat_str(*groups->element[i], "name", "XINFO GROUPS entry") == group) mine = groups->element[i];
+    if (!mine) return f;
+    f.group_found = true;
+    f.last_delivered_id = flat_str(*mine, "last-delivered-id", "XINFO GROUPS entry").value();
+    if (const auto lag = flat_str(*mine, "lag", "XINFO GROUPS entry")) f.lag = parse_u64(*lag, "group lag");
+    if (const auto read = flat_str(*mine, "entries-read", "XINFO GROUPS entry"))
+        f.entries_read = parse_u64(*read, "group entries-read");
+
+    const auto info = run({"XINFO", "STREAM", stream_key});
+    f.max_deleted_id = flat_str(*info, "max-deleted-entry-id", "XINFO STREAM").value_or("");
+    if (const auto added = flat_str(*info, "entries-added", "XINFO STREAM"))
+        f.entries_added = parse_u64(*added, "stream entries-added");
+    if (const redisReply* first = flat_get(*info, "first-entry", "XINFO STREAM"); first && first->type != REDIS_REPLY_NIL) {
+        require_array(*first, "XINFO STREAM first-entry");
+        if (first->elements < 1) throw std::runtime_error("redis: XINFO STREAM first-entry is empty");
+        f.first_entry_id = reply_str(*first->element[0]);
+    }
+
+    const auto next = run({"XRANGE", stream_key, "(" + f.last_delivered_id, "+", "COUNT", "1"});
+    require_array(*next, "XRANGE");
+    if (next->elements > 0) {
+        require_array(*next->element[0], "XRANGE entry");
+        if (next->element[0]->elements < 1) throw std::runtime_error("redis: XRANGE entry has no id");
+        f.first_undelivered_id = reply_str(*next->element[0]->element[0]);
+    }
+
+    // Summary form: [count, smallest id | nil, largest id | nil, consumers | nil]
+    const auto pending = run({"XPENDING", stream_key, group});
+    require_array(*pending, "XPENDING");
+    if (pending->elements < 2) throw std::runtime_error("redis: XPENDING summary is too short");
+    f.smallest_pending_id = reply_str(*pending->element[1]);
+
+    const auto time = run({"TIME"});
+    require_array(*time, "TIME");
+    if (time->elements != 2) throw std::runtime_error("redis: TIME did not answer [seconds, microseconds]");
+    f.now_ms = parse_u64(reply_str(*time->element[0]).value(), "TIME seconds") * 1000 +
+               parse_u64(reply_str(*time->element[1]).value(), "TIME microseconds") / 1000;
+    return f;
 }
 
 }  // namespace evml::sink

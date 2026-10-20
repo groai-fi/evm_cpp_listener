@@ -469,7 +469,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
     {
         const Section s(table_of(root, origin, "sink"), origin, "[sink]",
                         {"redis_url_env", "retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir", "spill_max_bytes",
-                         "require_noeviction"});
+                         "require_noeviction", "consumer_groups", "consumer_lag_warn_s", "consumer_lag_crit_s"});
         auto& k = cfg.sink;
         k.redis_url_env = s.str("redis_url_env");
         k.retention_ms = s.uint<std::uint64_t>("retention_ms", 1);
@@ -478,6 +478,34 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         k.spill_dir = s.str("spill_dir");
         k.spill_max_bytes = s.uint<std::uint64_t>("spill_max_bytes", 1);
         k.require_noeviction = s.boolean("require_noeviction");
+
+        // Consumer-group lag probe (plan 4.10): 0 < warn < crit < retention, so an alert fires while data is still safe.
+        k.consumer_lag_warn_s = s.opt_uint<std::uint32_t>("consumer_lag_warn_s", k.consumer_lag_warn_s, 1);
+        k.consumer_lag_crit_s = s.opt_uint<std::uint32_t>("consumer_lag_crit_s", k.consumer_lag_crit_s, 1);
+        if (k.consumer_lag_warn_s >= k.consumer_lag_crit_s) s.fail("consumer_lag_warn_s", "must be < consumer_lag_crit_s");
+        if (k.consumer_lag_crit_s >= k.retention_ms / 1000)
+            s.fail("consumer_lag_crit_s", "must be < retention_ms / 1000: an alert after the data was trimmed is too late");
+
+        if (const toml::node* n = s.node("consumer_groups")) {
+            const toml::array* a = n->as_array();
+            if (!a) s.fail("consumer_groups", "expected an array of { stream, group } tables");
+            std::set<std::pair<int, std::string>> seen;
+            for (std::size_t i = 0; i < a->size(); ++i) {
+                const toml::table* t = (*a)[i].as_table();
+                if (!t) s.fail("consumer_groups", "entries must be { stream, group } tables");
+                const Section g(*t, origin, "[sink].consumer_groups[" + std::to_string(i) + "]", {"stream", "group"});
+                ConsumerGroupCfg c;
+                const std::string stream = g.str("stream");
+                if (stream == "events") c.stream = StreamKind::Events;
+                else if (stream == "registry") c.stream = StreamKind::Registry;
+                else g.fail("stream", "must be events|registry, got \"" + stream + "\"");
+                c.group = g.str("group");
+                if (c.group.empty()) g.fail("group", "must not be empty");
+                if (!seen.emplace(static_cast<int>(c.stream), c.group).second)
+                    g.fail("group", "duplicate group \"" + c.group + "\" on stream " + stream);
+                k.consumer_groups.push_back(std::move(c));
+            }
+        }
     }
 
     // [ops]

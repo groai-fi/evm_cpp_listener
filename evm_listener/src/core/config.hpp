@@ -86,6 +86,12 @@ struct WatchdogCfg {
     std::uint32_t process_stall_ms{};
 };
 
+// A consumer group the downstream bots created; the listener only watches it (plan 4.10).
+struct ConsumerGroupCfg {
+    StreamKind stream{StreamKind::Events};
+    std::string group;
+};
+
 struct SinkCfg {
     std::string redis_url_env;
     std::uint64_t retention_ms{};
@@ -94,6 +100,9 @@ struct SinkCfg {
     std::string spill_dir;
     std::uint64_t spill_max_bytes{};
     bool require_noeviction{};
+    std::vector<ConsumerGroupCfg> consumer_groups;  // empty = lag probe disabled
+    std::uint32_t consumer_lag_warn_s{43200};
+    std::uint32_t consumer_lag_crit_s{86400};
 };
 
 struct OpsCfg {

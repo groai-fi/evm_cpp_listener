@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -14,6 +15,8 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -28,9 +31,14 @@
 #include <sw/redis++/redis++.h>
 
 #include "core/log.hpp"
+#include "pipeline/coverage.hpp"
+#include "pipeline/pipeline_driver.hpp"
+#include "pipeline/sweeper.hpp"
+#include "sink/lease.hpp"
 #include "sink/redis_sink.hpp"
 #include "sink/redispp_conn.hpp"
 #include "sink/script_runner.hpp"
+#include "sweep_fakes.hpp"
 #include "toxiproxy.hpp"
 
 using namespace evml::sink;
@@ -396,4 +404,428 @@ TEST_CASE("redis sink integration 16: replaying 50k spilled items never lets the
     REQUIRE(L.sink->mode() != SinkMode::Failed);
     CHECK(L.sink->status().discarded_total == 0);
     L.expect_exactly(kTotal);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Slice 4e: consumer-group lag probe (19), lease-disabled mode (18), standby takeover and fencing (9)
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+sw::redis::ReplyUPtr redis_cmd(sw::redis::Redis& r, std::vector<std::string> argv) {
+    return r.command(argv.begin(), argv.end());  // the iterator overload: no ambiguity with a trailing string literal
+}
+
+std::vector<std::string> entry_ids(Live& L, StreamKind stream) {
+    using Attrs = std::unordered_map<std::string, std::string>;
+    using Item = std::pair<std::string, sw::redis::Optional<Attrs>>;
+    std::vector<Item> items;
+    L.admin.xrange(L.keys.stream(stream), "-", "+", std::back_inserter(items));
+    std::vector<std::string> ids;
+    for (const auto& item : items) ids.push_back(item.first);
+    return ids;
+}
+
+std::uint64_t system_now_ms() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
+
+// Scenario 19: the probe reads real XINFO GROUPS / XINFO STREAM / XRANGE / XPENDING / TIME replies and judges them.
+TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis replies", "[integration][sink]") {
+    Live L;
+    const std::string stream = L.keys.events();
+    const evml::core::ConsumerGroupCfg cfg{StreamKind::Events, "bot"};
+    RedisppConn probe(L.direct_url, L.keys);
+
+    // No stream key yet: reported as missing, not an error.
+    CHECK(evaluate_consumer_lag(cfg, probe.read_group_facts(stream, "bot")).missing);
+
+    L.start();
+    for (int i = 0; i < 5; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    REQUIRE(L.sink->wait_idle(30s));
+    const auto ids = entry_ids(L, StreamKind::Events);
+    REQUIRE(ids.size() == 5);
+
+    {  // the stream exists, the group does not
+        const auto f = probe.read_group_facts(stream, "bot");
+        CHECK(f.stream_exists);
+        CHECK_FALSE(f.group_found);
+        CHECK(evaluate_consumer_lag(cfg, f).missing);
+    }
+
+    redis_cmd(L.admin, {"XGROUP", "CREATE", stream, "bot", "0"});
+    redis_cmd(L.admin, {"XGROUP", "CREATE", stream, "bot2", "0"});  // never reads: nothing pending, nothing delivered
+    {  // a new group at 0: nothing delivered yet
+        const auto f = probe.read_group_facts(stream, "bot");
+        REQUIRE(f.group_found);
+        CHECK(f.last_delivered_id == "0-0");
+        CHECK(f.lag == 5);
+        CHECK(f.first_undelivered_id == ids[0]);
+        CHECK(f.first_entry_id == ids[0]);
+        CHECK_FALSE(f.smallest_pending_id.has_value());
+        CHECK(f.now_ms >= StreamId::parse(ids[4]).ms);
+        CHECK_FALSE(evaluate_consumer_lag(cfg, f).trimmed_unread);
+    }
+
+    // Deliver three, ack the first: ids[1] and ids[2] stay pending, ids[3] is the oldest unread.
+    redis_cmd(L.admin, {"XREADGROUP", "GROUP", "bot", "c1", "COUNT", "3", "STREAMS", stream, ">"});
+    redis_cmd(L.admin, {"XACK", stream, "bot", ids[0]});
+    {
+        const auto f = probe.read_group_facts(stream, "bot");
+        CHECK(f.last_delivered_id == ids[2]);
+        CHECK(f.lag == 2);
+        CHECK(f.first_undelivered_id == ids[3]);
+        CHECK(f.smallest_pending_id == ids[1]);
+        CHECK_FALSE(evaluate_consumer_lag(cfg, f).trimmed_unread);
+    }
+
+    // Ages come from the entry ids and Redis TIME.
+    std::this_thread::sleep_for(2100ms);
+    {
+        const auto r = evaluate_consumer_lag(cfg, probe.read_group_facts(stream, "bot"));
+        CHECK(r.undelivered_age_s >= 2);
+        CHECK(r.undelivered_age_s < 60);
+        CHECK(r.pending_age_s >= 2);
+        CHECK(r.pending_age_s < 60);
+        CHECK(r.lag == 2);
+    }
+
+    // Retention trims past the group: ids[1..3] (pending and unread) are gone before the bot acked or read them.
+    redis_cmd(L.admin, {"XTRIM", stream, "MINID", ids[4]});
+    {
+        const auto f = probe.read_group_facts(stream, "bot");
+        CHECK(f.first_entry_id == ids[4]);
+        INFO("max-deleted-entry-id after XTRIM MINID: '" << f.max_deleted_id << "', smallest pending: "
+                                                         << f.smallest_pending_id.value_or("<nil>"));
+        CHECK(evaluate_consumer_lag(cfg, f).trimmed_unread);
+    }
+    {  // A group with nothing pending lost unread entries: MINID trim leaves max-deleted-entry-id at 0-0, the counters show it.
+        const auto f = probe.read_group_facts(stream, "bot2");
+        CHECK_FALSE(f.smallest_pending_id.has_value());
+        CHECK(f.max_deleted_id == "0-0");
+        CHECK_FALSE(f.entries_read.has_value());  // Redis keeps entries-read nil for a group created at 0 that never read
+        CHECK(f.entries_added == 5);
+        CHECK(f.lag == 1);  // only ids[4] is left to read
+        CHECK(evaluate_consumer_lag(evml::core::ConsumerGroupCfg{StreamKind::Events, "bot2"}, f).trimmed_unread);
+    }
+
+    // The same through the sink thread: one known group (trimmed), one unknown group (missing).
+    L.sink.reset();
+    L.start([&](RedisSinkOptions& o) {
+        o.consumer_groups = {cfg, evml::core::ConsumerGroupCfg{StreamKind::Events, "ghost"}};
+        o.consumer_lag_interval_ms = 200;
+    });
+    REQUIRE(wait_for([&] { return L.sink->consumer_lag().size() == 2; }, 10s));
+    const auto snap = L.sink->consumer_lag();
+    CHECK(snap[0].group == "bot");
+    CHECK(snap[0].trimmed_unread);
+    CHECK_FALSE(snap[0].missing);
+    CHECK(snap[1].group == "ghost");
+    CHECK(snap[1].missing);
+    CHECK(L.sink->mode() == SinkMode::Connected);
+    CHECK(L.sink->status().consumer_lag_failures_total == 0);
+
+    // The probe is read-only: it never touched the stream or the group.
+    CHECK(L.xlen(StreamKind::Events) == 1);
+}
+
+// Scenario 18: lease disabled (token "0"). An outage replays exactly; no leader key is ever created; a restart on the
+// same spill directory wipes the spill and the re-sweep lands the missing events through dedup.
+TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[integration][sink]") {
+    Live L;
+    L.admin.del(L.keys.leader());  // Live acquired a lease for the other tests; this one runs without any
+    L.admin.del(L.keys.epoch());
+    L.token = kNoFence;
+    L.start();
+
+    for (int i = 0; i < 50; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    REQUIRE(L.sink->wait_idle(30s));
+
+    L.px.disable();
+    for (int i = 50; i < 100; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
+    L.px.enable();
+    REQUIRE(L.sink->wait_idle(60s));
+    INFO("fatal: " << L.sink->fatal_message());
+    REQUIRE(L.sink->mode() == SinkMode::Connected);
+    L.expect_exactly(100);
+    CHECK(L.sink->status().renew_failures_total == 0);
+    CHECK(L.sink->status().discarded_total == 0);
+
+    // Crash with a non-empty spill: the spill dies with the process.
+    L.px.disable();
+    for (int i = 100; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
+    L.sink.reset();
+    L.px.enable();
+
+    L.start();  // same spill_dir
+    CHECK(L.sink->status().spill_records == 0);
+    for (int i = 90; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000 + i));  // the re-sweep re-emits an overlap
+    REQUIRE(L.sink->wait_idle(60s));
+    L.expect_exactly(120);  // 90..99 were already there: dedup; 100..119 land now, in order
+    CHECK(L.sink->status().dup_total >= 10);
+    CHECK(L.sink->status().renew_failures_total == 0);
+
+    CHECK(L.admin.exists(L.keys.leader()) == 0);  // no leader key was ever created
+    CHECK(L.admin.exists(L.keys.epoch()) == 0);
+}
+
+// Scenario 9: two standbys race; exactly one leads. When the leader stops renewing, the other takes over within
+// ttl + poll, with a higher term, and the old token is fenced out of the write scripts.
+TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old token fenced", "[integration][sink]") {
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin{url};
+    const Keys keys{random_shard()};
+    struct Cleanup {
+        sw::redis::Redis& admin;
+        const Keys& keys;
+        ~Cleanup() {
+            try {
+                std::vector<std::string> mine;
+                admin.keys(keys.pattern(), std::back_inserter(mine));
+                if (!mine.empty()) admin.del(mine.begin(), mine.end());
+            } catch (const std::exception& e) {
+                std::cerr << "scenario 9 cleanup failed: " << e.what() << "\n";
+            }
+        }
+    } cleanup{admin, keys};
+    evml::core::log::init("info");
+
+    constexpr std::uint32_t kTtlMs = 2000;
+    constexpr auto kPoll = 200ms;
+    std::atomic<bool> stop{false};
+    struct Result {
+        std::atomic<bool> done{false};
+        std::string token;
+    };
+    Result ra, rb;
+    const auto standby = [&](const std::string& host, Result& out) {
+        RedisppConn conn(url, keys);
+        AcquireOptions o;
+        o.host_id = host;
+        o.ttl_ms = kTtlMs;
+        o.poll = kPoll;
+        o.stop = [&] { return stop.load(); };
+        if (auto token = acquire_lease_blocking(conn, keys, o)) {
+            out.token = *token;
+            out.done.store(true);
+        }
+    };
+    Worker wa([&] { standby("hostA", ra); });
+    Worker wb([&] { standby("hostB", rb); });
+    struct StopGuard {  // destroyed before the workers: a failing REQUIRE must not leave a standby polling forever
+        std::atomic<bool>& stop;
+        ~StopGuard() { stop.store(true); }
+    } guard{stop};
+
+    REQUIRE(wait_for([&] { return ra.done.load() || rb.done.load(); }, 5s));
+    const auto acquired_at = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(600ms);  // three polls of the loser: it must still be waiting
+    REQUIRE(ra.done.load() != rb.done.load());  // exactly one leader
+    Result& winner = ra.done.load() ? ra : rb;
+    Result& loser = ra.done.load() ? rb : ra;
+    CHECK(admin.get(keys.leader()) == std::optional<std::string>(winner.token));
+    CHECK(winner.token.rfind("1|", 0) == 0);
+
+    // The leader never renews (no sink behind it): the key expires and the standby takes over.
+    REQUIRE(wait_for([&] { return loser.done.load(); }, 10s));
+    const auto takeover_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - acquired_at).count();
+    INFO("takeover took " << takeover_ms << " ms after the first acquire");
+    CHECK(takeover_ms < kTtlMs + 200 + 1500);  // ttl + poll + scheduling slack
+    CHECK(loser.token.rfind("2|", 0) == 0);    // a higher term
+    CHECK(admin.get(keys.leader()) == std::optional<std::string>(loser.token));
+
+    ScriptRunner runner(admin);
+    const auto emit_with = [&](const std::string& token) {
+        return runner.run(emit_call(keys, mk("late", 1000), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, token}));
+    };
+    CHECK(emit_with(winner.token) == std::optional<std::string>("FENCED"));  // the old term can no longer write
+    CHECK(emit_with(loser.token) != std::optional<std::string>("FENCED"));
+
+    wa.join();
+    wb.join();
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Slice 4e: crash while Degraded (3) and FLUSHALL runbook (6), with the real driver + sweeper on the real sink
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+using evml::pipeline::PipelineDriver;
+using evml::pipeline::PipelineState;
+using evml::pipeline::Sweeper;
+using EventIds = std::map<StreamKind, std::vector<std::string>>;
+
+// A canonical chain with ten logs of the first configured contract in blocks 101..110, behind a checkpoint at 100.
+struct Chain {
+    evml::core::Config cfg = evml::test::load_base_config();
+    evml::test::FakeSource src;
+
+    Chain() {
+        for (std::uint64_t b = 101; b <= 110; ++b) {
+            const auto h = static_cast<std::uint8_t>(b - 100);  // one hash per block: (blockHash, logIndex) must be unique
+            src.logs.push_back(evml::test::mklog(cfg, 0, b, h, 0));
+            src.blocks[b] = evml::test::binfo(h);
+        }
+    }
+    std::vector<std::string> manifest() const { return evml::pipeline::contract_manifest(cfg); }
+};
+
+// One "process": a sweeper and a driver on a sink.
+struct Process {
+    std::unique_ptr<Sweeper> sw;
+    std::unique_ptr<PipelineDriver> drv;
+
+    Process(Chain& ch, evml::pipeline::Sink& sink) {
+        const auto now = [] { return std::uint64_t{0}; };
+        sw = std::make_unique<Sweeper>(ch.cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, ch.src, sink,
+                                       now);
+        drv = std::make_unique<PipelineDriver>(ch.cfg, *sw, sink, ch.src, now);
+        drv->set_gates(110, 108);
+    }
+    evml::pipeline::TickResult tick() { return evml::test::run(drv->tick()); }
+    void drive_to_live() {
+        for (int i = 0; i < 500; ++i) {
+            const auto t = tick();
+            REQUIRE_FALSE(t.done);
+            if (sw->c_s() >= 110 && sw->c_f() >= 108 && drv->status().state == PipelineState::Live && t.wait.count() > 0) return;
+            if (t.wait.count() > 0) std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(t.wait, 50ms));
+        }
+        const auto st = drv->status();
+        FAIL("the pipeline never reached Live: state=" << evml::pipeline::to_string(st.state) << " c_s=" << sw->c_s() << " c_f="
+                                                      << sw->c_f() << " stalled=" << st.stalled << " (" << st.stall_detail
+                                                      << ") fatal='" << st.fatal << "' frozen=" << st.frozen);
+    }
+};
+
+// What an in-memory sink receives for the same chain: the canonical set, per stream (sorted).
+EventIds canonical_ids(Chain& ch) {
+    evml::test::MemorySink mem;
+    mem.stored.safe = 100;
+    mem.stored.finalized = 100;
+    mem.stored.contracts = ch.manifest();
+    Process p(ch, mem);
+    p.drive_to_live();
+    EventIds ids;
+    for (const auto& e : mem.emitted) {
+        REQUIRE(e.type == EventType::Log);
+        ids[e.stream].push_back(e.event_id);
+    }
+    for (auto& [kind, v] : ids) std::sort(v.begin(), v.end());
+    REQUIRE_FALSE(ids.empty());
+    return ids;
+}
+
+void expect_streams_equal(Live& L, const EventIds& expected) {
+    for (const StreamKind kind : {StreamKind::Events, StreamKind::Registry}) {
+        auto got = L.event_ids(kind);
+        std::sort(got.begin(), got.end());
+        const auto it = expected.find(kind);
+        const std::vector<std::string> want = it == expected.end() ? std::vector<std::string>{} : it->second;
+        INFO("stream " << L.keys.stream(kind));
+        REQUIRE(got == want);  // exactly the canonical set: no loss, no duplicates
+    }
+}
+
+}  // namespace
+
+// Scenario 3: the process dies while the sink is Degraded. The spill dies with it; the restart re-sweeps from the Redis
+// checkpoint (which never got ahead of the lost events) and the stream ends up with exactly the canonical set.
+TEST_CASE("redis sink integration 3: crash while Degraded, restart re-sweeps to the exact canonical set", "[integration][sink]") {
+    Chain ch;
+    const EventIds expected = canonical_ids(ch);
+
+    Live L;
+    L.start();
+    L.sink->init_checkpoint(100, ch.manifest());
+    REQUIRE(L.sink->wait_idle(30s));
+    REQUIRE(L.ckpt_field("safe") == std::optional<std::string>("100"));
+
+    auto first = std::make_unique<Process>(ch, *L.sink);
+    {
+        const auto recover = first->tick();  // recovery reads the checkpoint through the sink
+        REQUIRE(recover.wait.count() == 0);
+        REQUIRE(first->drv->status().state == PipelineState::CatchingUp);
+    }
+
+    L.px.disable();
+    first->tick();  // the safe sweep queues the ten events and a checkpoint; the sink cannot deliver them
+    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
+    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
+    CHECK(L.event_ids(StreamKind::Events).empty());  // nothing landed
+    CHECK(L.event_ids(StreamKind::Registry).empty());
+    CHECK(L.ckpt_field("safe") == std::optional<std::string>("100"));  // and the checkpoint did not move
+
+    // The process dies: sweeper, driver, sink and the spill's owner are gone.
+    first.reset();
+    L.sink.reset();
+    L.px.enable();
+
+    L.start();  // a new process on the same spill directory
+    CHECK(L.sink->status().spill_records == 0);  // the old spill was wiped, never replayed
+    Process second(ch, *L.sink);
+    second.drive_to_live();
+    REQUIRE(L.sink->wait_idle(30s));
+    INFO("fatal: " << L.sink->fatal_message());
+    REQUIRE(L.sink->mode() == SinkMode::Connected);
+    expect_streams_equal(L, expected);
+    CHECK(L.ckpt_field("safe") == std::optional<std::string>("110"));
+}
+
+// Scenario 6: Redis is wiped (FLUSHALL). The running sink must never write again with its old token. The runbook (a new
+// lease and a checkpoint re-initialised at contract_start - 1; here 100) re-sweeps and repopulates the stream. The
+// `--backfill-contract` command that performs the runbook step is Phase 5; this test drives the same library calls.
+TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfill repopulates the stream",
+          "[integration][sink][redis_serial]") {
+    Chain ch;
+    const EventIds expected = canonical_ids(ch);
+
+    Live L;
+    const std::string old_token = L.token;
+    L.start();
+    L.sink->init_checkpoint(100, ch.manifest());
+    REQUIRE(L.sink->wait_idle(30s));
+    {
+        Process p(ch, *L.sink);
+        p.drive_to_live();
+    }
+    REQUIRE(L.sink->wait_idle(30s));
+    expect_streams_equal(L, expected);
+
+    L.admin.flushall();
+    L.sink->emit(mk("after_flush", 111));  // the old sink's next write
+    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Fenced; }, 30s));  // renew answers FENCED: epoch is gone too
+    CHECK(L.sink->status().discarded_total >= 1);
+    CHECK(L.event_ids(StreamKind::Events).empty());  // the old token wrote nothing after the wipe
+    CHECK(L.event_ids(StreamKind::Registry).empty());
+    CHECK(L.admin.exists(L.keys.ckpt()) == 0);
+
+    // Runbook: a new process takes a new lease (fresh nonce) and re-initialises the checkpoint below contract_start.
+    L.sink.reset();
+    {
+        RedisppConn conn(L.direct_url, L.keys);
+        const auto token = try_acquire_lease(conn, L.keys, "hostA", "n2", L.lease_ttl_ms);
+        REQUIRE(token.has_value());
+        CHECK(*token != old_token);
+        L.token = *token;
+    }
+    ScriptRunner runner(L.admin);
+    CHECK(runner.run(emit_call(L.keys, mk("zombie", 112), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, old_token})) ==
+          std::optional<std::string>("FENCED"));  // an old token never resumes, even though the lease key exists again
+
+    L.start();
+    L.sink->init_checkpoint(100, ch.manifest());
+    REQUIRE(L.sink->wait_idle(30s));
+    Process again(ch, *L.sink);
+    again.drive_to_live();
+    REQUIRE(L.sink->wait_idle(30s));
+    INFO("fatal: " << L.sink->fatal_message());
+    REQUIRE(L.sink->mode() == SinkMode::Connected);
+    expect_streams_equal(L, expected);
 }

@@ -64,6 +64,9 @@ add_library(evml_core STATIC
     src/sink/script_runner.cpp
     src/sink/redis_sink.cpp
     src/sink/redispp_conn.cpp
+    src/sink/redis_startup.cpp
+    src/sink/lease.cpp
+    src/sink/consumer_lag.cpp
     src/app/pool_config.cpp
     src/app/tools.cpp
 )

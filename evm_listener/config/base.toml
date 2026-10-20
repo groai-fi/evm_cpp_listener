@@ -136,6 +136,11 @@ queue_capacity     = 100000
 spill_dir          = "/tmp/evml-spill"   # ephemeral; wiped at process start
 spill_max_bytes    = 536870912
 require_noeviction = true
+# Consumer groups the downstream bots created on our streams (the listener only watches them, plan 4.10).
+# MINID retention trims entries whether or not they were read, so a stalled bot would lose data silently.
+consumer_groups     = [{ stream = "events", group = "strat:aero_eurcusdc:botB_v1" }]
+consumer_lag_warn_s = 43200   # 12 h = 25% of the 48 h retention
+consumer_lag_crit_s = 86400   # 24 h = 50%: half the safety margin is gone
 
 [ops]
 http_listen             = "[::]:9464"

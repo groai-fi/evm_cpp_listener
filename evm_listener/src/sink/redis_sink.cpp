@@ -12,6 +12,7 @@
 
 #include "core/error.hpp"
 #include "core/log.hpp"
+#include "sink/lease.hpp"
 
 namespace evml::sink {
 
@@ -174,6 +175,9 @@ RedisSinkOptions validated(RedisSinkOptions o) {
         if (o.lease_ttl_ms == 0 || o.renew_ms == 0) bad("lease_ttl_ms and renew_ms must be > 0 when a lease token is used");
         if (o.renew_ms >= o.lease_ttl_ms) bad("renew_ms must be below lease_ttl_ms");
     }
+    if (o.heartbeat_ms > 0 && o.host_id.empty()) bad("host_id must not be empty when heartbeat_ms > 0");
+    if (!o.consumer_groups.empty() && o.consumer_lag_interval_ms == 0)
+        bad("consumer_lag_interval_ms must be > 0 when consumer_groups is not empty");
     if (!o.steady_now) o.steady_now = [] { return RedisSinkOptions::Clock::now(); };
     if (!o.wall_ms) {
         o.wall_ms = [] {
@@ -211,6 +215,7 @@ RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const 
     o.spill_max_bytes = sink.spill_max_bytes;
     o.lease_ttl_ms = lease.ttl_ms;
     o.renew_ms = lease.renew_ms;
+    o.consumer_groups = sink.consumer_groups;
     return o;
 }
 
@@ -229,6 +234,8 @@ RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn
     if (!data_ || !lease_) throw std::invalid_argument("RedisSink: both connections are required");
     next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);  // the lease was acquired just now
     next_probe_ = now();
+    next_heartbeat_ = now();
+    next_lag_probe_ = now();
 }
 
 RedisSink::~RedisSink() { stop(); }
@@ -326,10 +333,38 @@ void RedisSink::stop() {
     for (auto& r : reads) r.abandon();
 }
 
+void RedisSink::set_heartbeat(std::string payload) {
+    std::lock_guard lk(hb_mu_);
+    hb_payload_ = std::move(payload);
+}
+
+RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
+    wait_idle(budget);
+    stop();  // joins the sink thread: from here the lease connection is ours alone
+    DrainResult r;
+    r.unflushed = pending_.load();
+    r.flushed = r.unflushed == 0;
+    if (r.unflushed != 0)
+        core::log::warn("sink", "drain budget ended with writes unflushed, the next leader re-sweeps",
+                        {{"unflushed", std::to_string(r.unflushed)}});
+    if (leasing() && mode_.load() != SinkMode::Fenced) {
+        try {
+            r.lease_released = release_lease(*lease_, keys_, opts_.token);
+        } catch (const ConnError& e) {
+            core::log::warn("sink", "lease release failed, a standby waits for the TTL", {{"error", e.what()}});
+        } catch (const std::exception& e) {
+            core::log::error("sink", "lease release failed", {{"error", e.what()}});
+        }
+    }
+    return r;
+}
+
 RedisSink::TimePoint RedisSink::wake_time() const {
     TimePoint t = now() + std::chrono::milliseconds(100);  // upper bound, so stop() and the heartbeat never wait long
     if (leasing()) t = std::min(t, next_renew_);
     if (mode_.load() == SinkMode::Degraded) t = std::min(t, next_probe_);
+    if (opts_.heartbeat_ms > 0) t = std::min(t, next_heartbeat_);
+    if (leasing() && !opts_.consumer_groups.empty()) t = std::min(t, next_lag_probe_);
     return t;
 }
 
@@ -364,6 +399,8 @@ SinkStatus RedisSink::status() const {
     s.discarded_total = discarded_total_.load();
     s.renew_failures_total = renew_failures_total_.load();
     s.reconnects_total = reconnects_total_.load();
+    s.heartbeat_failures_total = heartbeat_failures_total_.load();
+    s.consumer_lag_failures_total = consumer_lag_failures_total_.load();
     return s;
 }
 
@@ -380,6 +417,8 @@ bool RedisSink::pump() {
 
         bool worked = service_lease();
         if (is_terminal(mode_.load())) return drain_terminal() || worked;
+        worked |= service_heartbeat();
+        worked |= service_consumer_lag();
 
         // While anything older sits outside the queue (Degraded: unsent; Replaying: spilled), the queue is not allowed
         // to be sent around it: it joins the spill, in order (plan 4.4). Reads in it resolve to nullopt.
@@ -673,6 +712,51 @@ bool RedisSink::service_lease() {
         // asks again (RESUMED when nobody took over).
         ++renew_failures_total_;
         core::log::warn("sink", "lease renew failed", {{"error", e.what()}});
+    }
+    return true;
+}
+
+std::vector<ConsumerLag> RedisSink::consumer_lag() const {
+    std::lock_guard lk(lag_mu_);
+    return lag_snapshot_;
+}
+
+bool RedisSink::service_consumer_lag() {
+    // Plan 4.10: the leader only; a lease-less host has no leader election, so the probe is off there.
+    if (!leasing() || opts_.consumer_groups.empty() || now() < next_lag_probe_) return false;
+    // Advance first, like the heartbeat: wake_time() includes this deadline.
+    next_lag_probe_ = now() + std::chrono::milliseconds(opts_.consumer_lag_interval_ms);
+    if (mode_.load() == SinkMode::Degraded) return false;  // Redis is known to be down
+    try {
+        std::vector<ConsumerLag> snapshot;
+        snapshot.reserve(opts_.consumer_groups.size());
+        for (const auto& g : opts_.consumer_groups)
+            snapshot.push_back(evaluate_consumer_lag(g, lease_->read_group_facts(keys_.stream(g.stream), g.group)));
+        std::lock_guard lk(lag_mu_);
+        lag_snapshot_ = std::move(snapshot);
+    } catch (const ConnError& e) {
+        ++consumer_lag_failures_total_;  // the previous snapshot stays; its staleness is visible to the host
+        core::log::warn("sink", "consumer lag probe failed", {{"error", e.what()}});
+    }
+    return true;
+}
+
+bool RedisSink::service_heartbeat() {
+    if (opts_.heartbeat_ms == 0 || now() < next_heartbeat_) return false;
+    // Advance first: wake_time() includes this deadline, so every early return below must leave it in the future.
+    next_heartbeat_ = now() + std::chrono::milliseconds(opts_.heartbeat_ms);
+    if (mode_.load() == SinkMode::Degraded) return false;  // Redis is known to be down; the probe handles recovery
+    std::string payload;
+    {
+        std::lock_guard lk(hb_mu_);
+        payload = hb_payload_;
+    }
+    if (payload.empty()) return false;
+    try {
+        lease_->set_with_ttl(keys_.hb(opts_.host_id), payload, opts_.heartbeat_ttl_s);
+    } catch (const ConnError& e) {
+        ++heartbeat_failures_total_;
+        core::log::warn("sink", "heartbeat write failed", {{"error", e.what()}});
     }
     return true;
 }

@@ -25,6 +25,7 @@
 #include <boost/asio/use_future.hpp>
 
 #include "core/log.hpp"
+#include "sink/lease.hpp"
 #include "sink/redis_sink.hpp"
 
 using namespace evml::sink;
@@ -57,6 +58,10 @@ struct FakeServer {
     std::optional<std::string> contracts;
     std::vector<std::string> applied;  // every applied write, in order: "emit:<id>:<type>", "ckpt:safe:5", "trim:5", ...
     std::uint64_t next_id{0};
+    std::map<std::string, std::pair<std::string, std::uint32_t>> kv;  // SET key value EX ttl: key -> (value, ttl_s)
+    std::uint64_t kv_writes{0};
+    std::map<std::string, GroupFacts> group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
+    std::uint64_t group_reads{0};
 
     explicit FakeServer(Keys k) : keys(std::move(k)) {}
 
@@ -236,6 +241,19 @@ public:
         if (load_fixes_cache) server.scripts_valid = true;
     }
 
+    void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override {
+        if (down) throw ConnError("fake: connection down");
+        server.kv[key] = {value, ttl_s};
+        ++server.kv_writes;
+    }
+
+    GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override {
+        if (down) throw ConnError("fake: connection down");
+        ++server.group_reads;
+        const auto it = server.group_facts.find(stream_key + "|" + group);
+        return it == server.group_facts.end() ? GroupFacts{} : it->second;
+    }
+
     Checkpoint read_checkpoint() override {
         if (down) throw ConnError("fake: connection down");
         Checkpoint ck;
@@ -269,6 +287,8 @@ struct RigCfg {
     std::uint64_t spill_max_bytes{1ull << 30};
     std::size_t max_batch{256};
     bool lease{true};
+    std::uint32_t heartbeat_ms{0};
+    std::vector<evml::core::ConsumerGroupCfg> groups{};
 };
 
 struct Rig {
@@ -298,6 +318,9 @@ struct Rig {
 
         RedisSinkOptions o;
         o.token = token;
+        o.host_id = "hostA";
+        o.heartbeat_ms = cfg.heartbeat_ms;
+        o.consumer_groups = cfg.groups;
         o.retention_ms = 48ull * 3600 * 1000;
         o.dedup_ttl_s = 604800;
         o.queue_capacity = cfg.queue_capacity;
@@ -1053,4 +1076,346 @@ TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token
     lease.enabled = false;
     CHECK_THROWS_WITH(RedisSinkOptions::from_config(sink, lease, "1|a|n"), ContainsSubstring("disabled but a lease token"));
     CHECK(RedisSinkOptions::from_config(sink, lease, kNoFence).token == kNoFence);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Heartbeat (plan 4.7), drain and lease lifecycle (plan 4.8)
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_CASE("redis sink heartbeat: written on the lease connection at the interval, not before it is due", "[unit][sink]") {
+    Rig r(RigCfg{.heartbeat_ms = 1000});
+    r.sink->set_heartbeat("{\"state\":\"ok\"}");
+
+    r.sink->pump();
+    REQUIRE(r.server.kv_writes == 1);
+    const auto it = r.server.kv.find(r.keys.hb("hostA"));
+    REQUIRE(it != r.server.kv.end());
+    CHECK(it->second.first == "{\"state\":\"ok\"}");
+    CHECK(it->second.second == 30);
+
+    r.advance(milliseconds(999));
+    r.sink->pump();
+    CHECK(r.server.kv_writes == 1);  // not due yet
+    r.advance(milliseconds(1));
+    r.sink->pump();
+    CHECK(r.server.kv_writes == 2);
+
+    r.sink->set_heartbeat("{\"state\":\"newer\"}");
+    r.advance(milliseconds(1000));
+    r.sink->pump();
+    CHECK(r.server.kv[r.keys.hb("hostA")].first == "{\"state\":\"newer\"}");
+}
+
+TEST_CASE("redis sink heartbeat: nothing is written without a payload, with interval 0, or while Degraded", "[unit][sink]") {
+    SECTION("no payload yet") {
+        Rig r(RigCfg{.heartbeat_ms = 1000});
+        r.sink->pump();
+        CHECK(r.server.kv_writes == 0);
+    }
+    SECTION("interval 0 disables it") {
+        Rig r;
+        r.sink->set_heartbeat("x");
+        r.advance(milliseconds(10000));
+        r.sink->pump();
+        CHECK(r.server.kv_writes == 0);
+    }
+    SECTION("Degraded") {
+        Rig r(RigCfg{.heartbeat_ms = 1000});
+        r.sink->emit(mk(id_of(0)));
+        r.data->down = true;
+        r.advance(milliseconds(1));
+        r.sink->pump();  // the first failure degrades (no payload yet: the due heartbeat writes nothing)
+        REQUIRE(r.sink->mode() == SinkMode::Degraded);
+        r.sink->set_heartbeat("x");
+        r.advance(milliseconds(1000));
+        r.sink->pump();
+        CHECK(r.server.kv_writes == 0);
+    }
+}
+
+TEST_CASE("redis sink heartbeat: a failed write is counted, not fatal", "[unit][sink]") {
+    Rig r(RigCfg{.heartbeat_ms = 1000});
+    r.sink->set_heartbeat("x");
+    r.lease->down = true;
+    r.sink->pump();
+    CHECK(r.sink->status().heartbeat_failures_total == 1);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+
+    r.lease->down = false;
+    r.advance(milliseconds(1000));
+    r.sink->pump();
+    CHECK(r.server.kv_writes == 1);
+    CHECK(r.sink->status().heartbeat_failures_total == 1);
+}
+
+TEST_CASE("redis sink drain: flushed writes then the lease is released for the standby", "[unit][sink]") {
+    Rig r;
+    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    REQUIRE(r.settle());
+    REQUIRE(r.server.leader == r.token);
+
+    const auto d = r.sink->drain(milliseconds(0));
+    CHECK(d.flushed);
+    CHECK(d.unflushed == 0);
+    CHECK(d.lease_released);
+    CHECK_FALSE(r.server.leader.has_value());
+}
+
+TEST_CASE("redis sink drain: with Redis down it reports what was left; the lease is still released", "[unit][sink]") {
+    Rig r;
+    r.sink->emit(mk(id_of(0)));
+    r.sink->emit(mk(id_of(1)));
+    r.data->down = true;
+    r.sink->pump();
+    REQUIRE(r.sink->mode() == SinkMode::Degraded);
+
+    const auto d = r.sink->drain(milliseconds(0));
+    CHECK_FALSE(d.flushed);
+    CHECK(d.unflushed == 2);
+    CHECK(d.lease_released);  // the lease connection is separate and still works
+}
+
+TEST_CASE("redis sink drain: a lease that was lost is not released", "[unit][sink]") {
+    Rig r;
+    r.server.leader = "2|hostB|n2";
+    r.server.epoch = "2|hostB|n2";
+    r.sink->emit(mk(id_of(0)));
+    r.sink->pump();
+    REQUIRE(r.sink->mode() == SinkMode::Fenced);
+
+    const auto d = r.sink->drain(milliseconds(0));
+    CHECK_FALSE(d.lease_released);
+    CHECK(r.server.leader == "2|hostB|n2");  // hostB keeps its lease
+}
+
+TEST_CASE("redis sink drain: with the lease disabled there is nothing to release", "[unit][sink]") {
+    Rig r(RigCfg{.lease = false});
+    r.sink->emit(mk(id_of(0)));
+    REQUIRE(r.settle());
+    const auto d = r.sink->drain(milliseconds(0));
+    CHECK(d.flushed);
+    CHECK_FALSE(d.lease_released);
+}
+
+TEST_CASE("redis sink options: a heartbeat needs a host id", "[unit][sink]") {
+    RedisSinkOptions o;
+    o.token = kNoFence;
+    o.retention_ms = 1000;
+    o.dedup_ttl_s = 10;
+    o.queue_capacity = 10;
+    o.heartbeat_ms = 1000;
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    CHECK_THROWS_WITH(RedisSink(o, keys, std::make_unique<FakeConn>(server), std::make_unique<FakeConn>(server)),
+                      ContainsSubstring("host_id"));
+}
+
+TEST_CASE("lease: try_acquire answers a token, or nullopt while another host leads", "[unit][sink]") {
+    evml::core::log::init("info");
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    FakeConn conn{server};
+
+    CHECK(try_acquire_lease(conn, keys, "hostA", "n1", 15000) == "1|hostA|n1");
+    CHECK_FALSE(try_acquire_lease(conn, keys, "hostB", "n2", 15000).has_value());
+    server.leader.reset();  // hostA's key expired
+    CHECK(try_acquire_lease(conn, keys, "hostB", "n2", 15000) == "2|hostB|n2");
+}
+
+TEST_CASE("lease: a flushed script cache is reloaded once; a down connection throws", "[unit][sink]") {
+    evml::core::log::init("info");
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    FakeConn conn{server};
+
+    server.scripts_valid = false;
+    CHECK(try_acquire_lease(conn, keys, "hostA", "n1", 15000) == "1|hostA|n1");
+    CHECK(conn.loads == 1);
+
+    conn.down = true;
+    CHECK_THROWS_AS(try_acquire_lease(conn, keys, "hostB", "n2", 15000), ConnError);
+    CHECK_THROWS_AS(release_lease(conn, keys, "1|hostA|n1"), ConnError);
+}
+
+TEST_CASE("lease: release answers true once, then false (it is no longer ours)", "[unit][sink]") {
+    evml::core::log::init("info");
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    FakeConn conn{server};
+    const auto token = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(token.has_value());
+
+    CHECK(release_lease(conn, keys, *token));
+    CHECK_FALSE(server.leader.has_value());
+    CHECK_FALSE(release_lease(conn, keys, *token));
+}
+
+TEST_CASE("lease: the standby asks again until the leader lets go, and never writes", "[unit][sink]") {
+    evml::core::log::init("info");
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    FakeConn conn{server};
+    server.leader = "1|hostA|n1";
+    server.epoch = "1|hostA|n1";
+
+    int sleeps = 0;
+    AcquireOptions o;
+    o.host_id = "hostB";
+    o.ttl_ms = 15000;
+    o.poll = milliseconds(1000);
+    o.nonce = [] { return std::string("n2"); };
+    o.sleep = [&](milliseconds d) {
+        CHECK(d == milliseconds(1000));
+        if (++sleeps == 3) server.leader.reset();
+    };
+
+    CHECK(acquire_lease_blocking(conn, keys, o) == "2|hostB|n2");
+    CHECK(sleeps == 3);
+}
+
+TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreachable Redis is retried", "[unit][sink]") {
+    evml::core::log::init("info");
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    FakeConn conn{server};
+    server.leader = "1|hostA|n1";
+    server.epoch = "1|hostA|n1";
+
+    int sleeps = 0;
+    AcquireOptions o;
+    o.host_id = "hostB";
+    o.ttl_ms = 15000;
+    o.probe_min = milliseconds(0);
+    o.probe_max = milliseconds(0);
+    o.sleep = [&](milliseconds) {
+        if (++sleeps == 2) conn.down = true;
+    };
+    o.stop = [&] { return sleeps >= 4; };
+
+    CHECK_FALSE(acquire_lease_blocking(conn, keys, o).has_value());
+    CHECK(sleeps == 4);
+
+    AcquireOptions bad;
+    bad.host_id = "";
+    bad.ttl_ms = 1;
+    CHECK_THROWS_AS(acquire_lease_blocking(conn, keys, bad), std::invalid_argument);
+}
+
+TEST_CASE("lease: disabled mode hands out the no-fence token", "[unit][sink]") {
+    evml::core::log::init("info");
+    CHECK(lease_disabled_token() == kNoFence);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Consumer-group lag probe (plan 4.10)
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+const evml::core::ConsumerGroupCfg kBot{StreamKind::Events, "bot"};
+
+GroupFacts lag_facts(const char* first_undelivered, std::uint64_t now_ms) {
+    GroupFacts f;
+    f.stream_exists = true;
+    f.group_found = true;
+    f.last_delivered_id = "1700000000000-0";
+    f.lag = 3;
+    f.max_deleted_id = "0-0";
+    f.first_undelivered_id = first_undelivered;
+    f.now_ms = now_ms;
+    return f;
+}
+}  // namespace
+
+TEST_CASE("redis sink lag probe: the leader probes on the lease connection every interval", "[unit][sink]") {
+    Rig r(RigCfg{.groups = {kBot}});
+    r.server.group_facts[r.keys.events() + "|bot"] = lag_facts("1700000000200-0", 1700000100000);
+
+    CHECK(r.sink->consumer_lag().empty());  // nothing before the first probe
+    r.sink->pump();
+    REQUIRE(r.server.group_reads == 1);
+    const auto snap = r.sink->consumer_lag();
+    REQUIRE(snap.size() == 1);
+    CHECK(snap[0].group == "bot");
+    CHECK(snap[0].undelivered_age_s == 99);
+    CHECK(snap[0].lag == 3);
+
+    r.advance(milliseconds(59999));
+    r.sink->pump();
+    CHECK(r.server.group_reads == 1);  // not due yet
+    r.advance(milliseconds(1));
+    r.sink->pump();
+    CHECK(r.server.group_reads == 2);
+}
+
+TEST_CASE("redis sink lag probe: an unknown group is reported as missing, not an error", "[unit][sink]") {
+    Rig r(RigCfg{.groups = {kBot}});
+    r.sink->pump();
+    const auto snap = r.sink->consumer_lag();
+    REQUIRE(snap.size() == 1);
+    CHECK(snap[0].missing);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+}
+
+TEST_CASE("redis sink lag probe: disabled with no groups, without a lease, and while Degraded", "[unit][sink]") {
+    SECTION("no groups") {
+        Rig r;
+        r.sink->pump();
+        CHECK(r.server.group_reads == 0);
+        CHECK(r.sink->consumer_lag().empty());
+    }
+    SECTION("lease disabled") {
+        Rig r(RigCfg{.lease = false, .groups = {kBot}});
+        r.sink->pump();
+        CHECK(r.server.group_reads == 0);
+    }
+    SECTION("Degraded") {
+        Rig r(RigCfg{.groups = {kBot}});
+        r.sink->pump();  // first probe while Connected
+        REQUIRE(r.server.group_reads == 1);
+        r.sink->emit(mk(id_of(0)));
+        r.data->down = true;
+        r.sink->pump();
+        REQUIRE(r.sink->mode() == SinkMode::Degraded);
+        r.advance(milliseconds(60000));
+        r.sink->pump();
+        CHECK(r.server.group_reads == 1);
+    }
+}
+
+TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot stays", "[unit][sink]") {
+    Rig r(RigCfg{.groups = {kBot}});
+    r.server.group_facts[r.keys.events() + "|bot"] = lag_facts("1700000000200-0", 1700000100000);
+    r.sink->pump();
+    REQUIRE(r.sink->consumer_lag().size() == 1);
+
+    r.lease->down = true;
+    r.advance(milliseconds(60000));
+    r.sink->pump();
+    CHECK(r.sink->status().consumer_lag_failures_total == 1);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+    const auto snap = r.sink->consumer_lag();
+    REQUIRE(snap.size() == 1);
+    CHECK(snap[0].undelivered_age_s == 99);
+}
+
+TEST_CASE("redis sink options: consumer groups need a positive probe interval; from_config copies them", "[unit][sink]") {
+    Keys keys{"shard"};
+    FakeServer server{keys};
+    RedisSinkOptions o;
+    o.token = kNoFence;
+    o.retention_ms = 1000;
+    o.dedup_ttl_s = 10;
+    o.queue_capacity = 10;
+    o.consumer_groups = {kBot};
+    o.consumer_lag_interval_ms = 0;
+    CHECK_THROWS_WITH(RedisSink(o, keys, std::make_unique<FakeConn>(server), std::make_unique<FakeConn>(server)),
+                      ContainsSubstring("consumer_lag_interval_ms"));
+
+    evml::core::SinkCfg sink;
+    sink.consumer_groups = {kBot};
+    evml::core::LeaseCfg lease;
+    lease.enabled = false;
+    const auto copied = RedisSinkOptions::from_config(sink, lease, kNoFence);
+    REQUIRE(copied.consumer_groups.size() == 1);
+    CHECK(copied.consumer_groups[0].group == "bot");
 }

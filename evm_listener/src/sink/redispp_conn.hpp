@@ -30,6 +30,8 @@ public:
     void load_scripts() override;
     pipeline::Checkpoint read_checkpoint() override;
     std::vector<pipeline::ReleasedEntry> read_released(std::uint64_t from, std::uint64_t to) override;
+    void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override;
+    GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override;
 
 private:
     sw::redis::Redis redis_;

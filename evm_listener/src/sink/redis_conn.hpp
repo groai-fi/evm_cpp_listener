@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "pipeline/sink.hpp"
+#include "sink/consumer_lag.hpp"
 #include "sink/lua_scripts.hpp"
 
 namespace evml::sink {
@@ -58,6 +59,13 @@ public:
     // Released members with score in [from, to], with their before images. A member without its before image is a
     // contract violation (std::runtime_error), never skipped. Throws ConnError on transport failure.
     virtual std::vector<pipeline::ReleasedEntry> read_released(std::uint64_t from, std::uint64_t to) = 0;
+
+    // SET key value EX ttl_s (the heartbeat, plan 4.7). Throws ConnError on transport failure.
+    virtual void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) = 0;
+
+    // Read-only facts about one consumer group of a stream (plan 4.10; XINFO / XRANGE / XPENDING / TIME). A missing
+    // stream or group is reported in the result, not thrown. Throws ConnError on transport failure.
+    virtual GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) = 0;
 };
 
 }  // namespace evml::sink
