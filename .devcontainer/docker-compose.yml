@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     command: sleep infinity
+    working_dir: /workspaces/evm_cpp_listener
     volumes:
       - ..:/workspaces/evm_cpp_listener:cached
     # SYS_PTRACE and seccomp=unconfined are required for C++ debuggers (gdb/lldb) inside Docker
@@ -14,8 +15,11 @@ services:
     ipc: host
     environment:
       REDIS_URL: redis://redis:6379/0
+      # Toxiproxy admin API (Redis outage tests). Integration tests fail, not skip, when it is unreachable.
+      TOXIPROXY_URL: http://toxiproxy:8474
     depends_on:
       - redis
+      - toxiproxy
 
   redis:
     # Pinned to Railway prod (8.4.x). Not published to the host: the host may already run Redis on 6379.
@@ -24,6 +28,14 @@ services:
     command: redis-server --appendonly yes --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
+
+  toxiproxy:
+    # Chaos proxy in front of Redis for the outage tests (disable the link, reset_peer, latency). Pinned 2.x tag.
+    # Not published to the host: tests reach the admin API (8474) and the proxy ports over the compose network.
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    container_name: evm_cpp_listener_toxiproxy
+    depends_on:
+      - redis
 
 volumes:
   redis-data:
