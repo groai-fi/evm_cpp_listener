@@ -62,6 +62,8 @@ add_library(evml_core STATIC
     src/sink/spill.cpp
     src/sink/lua_scripts.cpp
     src/sink/script_runner.cpp
+    src/sink/redis_sink.cpp
+    src/sink/redispp_conn.cpp
     src/app/pool_config.cpp
     src/app/tools.cpp
 )
