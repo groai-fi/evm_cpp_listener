@@ -43,6 +43,7 @@ class MemorySink : public pipeline::Sink {
 public:
     bool saturated_flag{false};
     bool unreadable{false};  // reads return nullopt, like a degraded or replaying sink (rev 6, A/C)
+    bool readable_flag{true};  // what readable() reports; false makes the sweeps skip their fetch (rev 6, 4d)
     std::vector<pipeline::Emission> emitted;
     std::vector<std::pair<pipeline::CheckpointKind, std::uint64_t>> checkpoints;
     std::vector<std::uint64_t> trims;
@@ -52,6 +53,7 @@ public:
     std::map<std::string, pipeline::ReleasedEntry> released;
 
     bool saturated() const override { return saturated_flag; }
+    bool readable() const override { return readable_flag; }
 
     void emit(pipeline::Emission e) override {
         if (e.released_block) released[e.event_id] = pipeline::to_released_entry(e);

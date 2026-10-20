@@ -613,3 +613,41 @@ TEST_CASE("reverify: an unavailable released set is a pause, not a reorg", "[uni
     CHECK(again.status == StepStatus::Advanced);
     CHECK_FALSE(again.reorg);
 }
+
+TEST_CASE("sweep: a sink that is not readable pauses the final step without fetching", "[unit][sweep]") {
+    Rig r;
+    r.add(mklog(r.cfg, kGauge, 106, 2, 0), 2);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    r.src.calls.clear();
+
+    r.sink.readable_flag = false;
+    for (int i = 0; i < 3; ++i) CHECK(run(r.sw->final_step(108)).status == StepStatus::Paused);
+    CHECK(r.src.calls.empty());  // no getLogs while the released set could not be read anyway
+    CHECK(r.sw->c_f() == 100);
+
+    r.sink.readable_flag = true;
+    CHECK(run(r.sw->final_step(108)).status == StepStatus::Advanced);
+    CHECK(r.sw->c_f() == 108);
+}
+
+TEST_CASE("sweep: with nothing to do, a sink that is not readable is not reported as a pause", "[unit][sweep]") {
+    Rig r;
+    r.sink.readable_flag = false;
+    CHECK(run(r.sw->final_step(100)).status == StepStatus::NoWork);  // C_f already at the ceiling
+}
+
+TEST_CASE("reverify: a sink that is not readable pauses it without fetching", "[unit][reverify]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    r.src.calls.clear();
+
+    r.sink.readable_flag = false;
+    const auto res = run(r.sw->reverify_released());
+    CHECK(res.status == StepStatus::Paused);
+    CHECK_FALSE(res.reorg);
+    CHECK(r.src.calls.empty());
+
+    r.sink.readable_flag = true;
+    CHECK(run(r.sw->reverify_released()).status == StepStatus::Advanced);
+}

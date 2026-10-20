@@ -222,6 +222,8 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
     if (sink_.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
     const std::uint64_t ceiling = std::min(g_f, c_s_);  // I2: never past what the safe sweep covered
     if (c_f_ >= ceiling) co_return StepResult{};
+    // The diff needs the released set: without it the fetch below would be wasted (rev 6, 4d). Nothing is done.
+    if (!sink_.readable()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink not readable", false};
 
     auto f = co_await fetch_page(c_f_, ceiling, cfg_.filter(), std::nullopt);
     if (f.status != StepStatus::Advanced) co_return StepResult{f.status, std::nullopt, std::move(f.detail), false};
@@ -283,6 +285,7 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released() {
 
     while (cursor < ceiling) {
         if (sink_.saturated()) co_return ReverifyResult{StepStatus::Paused, "sink saturated", false, std::nullopt};
+        if (!sink_.readable()) co_return ReverifyResult{StepStatus::Paused, "sink not readable", false, std::nullopt};
 
         auto f = co_await fetch_page(cursor, ceiling, cfg_.filter(core::Finality::Safe), core::Finality::Safe);
         if (f.status != StepStatus::Advanced)

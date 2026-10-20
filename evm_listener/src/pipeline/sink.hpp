@@ -54,6 +54,11 @@ public:
     // Backpressure (plan 4.6): when true the pipeline must not release or advance a checkpoint.
     virtual bool saturated() const = 0;
 
+    // False while a read would resolve to nullopt (sink degraded, replaying, fenced or failed). Lets the final sweep
+    // and reverify skip the getLogs fetch whose result they could not use, instead of paying one RPC per pause poll
+    // for the whole outage. A true answer is not a promise: the sink can degrade before the read is served.
+    virtual bool readable() const = 0;
+
     virtual void emit(Emission e) = 0;
     virtual void checkpoint(CheckpointKind kind, std::uint64_t block) = 0;
     // First run only (rev 6, E): writes safe = finalized = c0 and the contracts manifest in one atomic step, so a crash
