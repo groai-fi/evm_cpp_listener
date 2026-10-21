@@ -30,9 +30,19 @@ namespace evml::sink {
 // Plan 4.4 / 4.8. Connected -> Degraded (Redis unreachable: items go to the spill) -> Replaying (reconnected, spill
 // drains in order) -> Connected. Fenced and Failed are terminal: the host must build a new sink (after re-acquiring the
 // lease) or restart the process.
+/// @brief State machine modes governing sink connection and fallback behavior.
+/// Invariants:
+/// - Connected: Primary mode; writes pipeline directly to Redis, reads execute against data connection.
+/// - Degraded: Redis unreachable; pipeline writes divert to local spill WAL; reconnect probes back off with jitter.
+/// - Replaying: Reconnected; held batch and spill WAL are drained in strict FIFO order before accepting queue writes.
+/// - Fenced / Failed: Terminal states. Fenced drops queued items to avoid dual-writer split-brain; Failed halts on unrecoverable error.
 enum class SinkMode : int { Connected, Degraded, Replaying, Fenced, Failed };
 const char* to_string(SinkMode m);
 
+/// @brief Configuration settings controlling Redis batching, leasing, dedup, and disk spill.
+/// Watch out:
+/// - `renew_ms` must be strictly smaller than `lease_ttl_ms` to provide time for retries before expiration.
+/// - `queue_capacity` acts as a soft threshold triggering `saturated()` backpressure, but does not drop elements.
 struct RedisSinkOptions {
     using Clock = std::chrono::steady_clock;
 
@@ -63,10 +73,12 @@ struct RedisSinkOptions {
     std::vector<core::ConsumerGroupCfg> consumer_groups;
     std::uint32_t consumer_lag_interval_ms{60000};
 
-    // Copies the [sink] and [lease] settings. `token` must be kNoFence exactly when `lease.enabled` is false.
+    /// @brief Constructs and validates RedisSinkOptions from configuration sections.
+    /// @throws std::invalid_argument If configuration violates fencing consistency or timeout constraints.
     static RedisSinkOptions from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token);
 };
 
+/// @brief Telemetry snapshot capturing sink state, backpressure, and error counters.
 struct SinkStatus {
     SinkMode mode{SinkMode::Connected};
     std::uint64_t queue_depth{};
@@ -121,38 +133,61 @@ using QueueItem = std::variant<WriteItem, ReadItem>;
 //
 // Thread model: emit/checkpoint/... and the status getters are called from other threads. Everything else is private to
 // the sink thread, which runs `pump()` in a loop (start()). Unit tests do not start the thread; they call pump() directly.
+/// @brief Multi-threaded Redis stream sink with atomic Lua dedup, dual TCP connections, and disk spill WAL.
+///
+/// Invariants & Guarantees:
+/// - Invariant I3 (Monotonic Checkpoints): Checkpoint writes (`CkptItem`) only move forward via Lua scripts.
+/// - Invariant I4 (Atomic Deduplication): `emit.lua` checks dedup key, writes stream with `XADD MINID`, and sets dedup TTL.
+/// - Invariant P1 (Ordered Delivery): Checkpoints and trims act as barriers; emits pipeline up to `max_batch`.
+/// - Dual TCP Connections: `lease_` connection runs lease renewals and heartbeats independently so slow event pipelines cannot starve renewals.
 class RedisSink final : public pipeline::Sink {
 public:
-    // `data` carries events/reads, `lease` carries renewals (a second connection, so a slow batch never starves a
-    // renewal; P4). `keys` is the shard's key schema.
+    /// @brief Constructs RedisSink with dedicated data and lease connections.
+    /// @param opts Configuration options for batching, leasing, dedup, and spill.
+    /// @param keys Key schema for Redis streams, sets, and checkpoints.
+    /// @param data Dedicated connection for pipelined event writes and state reads.
+    /// @param lease Dedicated connection for leader lease renewal and heartbeat.
     RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn> data, std::unique_ptr<RedisConn> lease);
     ~RedisSink() override;
     RedisSink(const RedisSink&) = delete;
     RedisSink& operator=(const RedisSink&) = delete;
 
     // pipeline::Sink
+    /// @brief Returns true if queue depth or spill exceeds soft cap, or if sink entered a terminal state.
     bool saturated() const override;
+    /// @brief Returns true only when connected and running, permitting read operations.
     bool readable() const override;
+    /// @brief Enqueues an event emission to the sink queue; non-blocking for callers.
     void emit(pipeline::Emission e) override;
+    /// @brief Enqueues a checkpoint update; acts as an execution barrier behind pending emits.
     void checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) override;
+    /// @brief Enqueues initial checkpoint write if no checkpoint exists yet.
     void init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) override;
+    /// @brief Enqueues registered contracts manifest update.
     void set_contracts(std::vector<std::string> manifest) override;
+    /// @brief Enqueues release of finalized blocks and stream trims.
     void final_trim(std::uint64_t block) override;
+    /// @brief Coroutine reading current checkpoint from Redis; flushes earlier writes first.
     boost::asio::awaitable<std::optional<pipeline::Checkpoint>> load_checkpoint() override;
+    /// @brief Coroutine reading released block records within [from, to] range.
     boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> released_range(std::uint64_t from,
                                                                                                std::uint64_t to) override;
 
     // Starts / stops the sink thread. stop() resolves queued reads to nullopt; writes still queued are left (the next
     // leader re-sweeps from the Redis checkpoint). The destructor stops.
+    /// @brief Spawns background worker thread running pump() loop.
     void start();
+    /// @brief Signals worker thread to stop, abandons pending reads, and joins worker thread.
     void stop();
 
     // Publishes the heartbeat payload (the host's JSON state; the content comes from the io thread). Thread-safe. The sink
     // thread writes the latest payload every heartbeat_ms.
+    /// @brief Updates latest JSON heartbeat payload to write to Redis.
     void set_heartbeat(std::string payload);
 
     // The latest consumer-group lag snapshot, one entry per configured group (empty before the first probe, or when the
     // probe is disabled). Thread-safe. Phase 5 turns it into metrics and alerts.
+    /// @brief Returns cached consumer lag metrics for configured consumer groups.
     std::vector<ConsumerLag> consumer_lag() const;
 
     // Graceful shutdown (plan 4.8 "Draining"): waits up to `budget` for every accepted write to be acked, stops the sink
@@ -163,21 +198,29 @@ public:
         std::uint64_t unflushed{0};
         bool lease_released{false};
     };
+    /// @brief Flushes pending writes up to budget timeout, joins thread, and releases leader lease.
     DrainResult drain(std::chrono::milliseconds budget);
 
     // One iteration of the sink loop: lease renewal if due, then at most one batch (or one read, or one reconnect
     // probe). Returns true if it did something. Public for tests and for the loop thread only.
+    /// @brief Performs one iteration of the sink event loop (lease check, heartbeat, spill flush, batch emit).
+    /// @return True if progress was made during this iteration.
     bool pump();
 
     // True once nothing is pending (every accepted write acked or discarded), or the sink is Fenced / Failed. False on
     // timeout. For tests and for the drain on SIGTERM.
+    /// @brief Blocks until pending write queue is empty or sink enters terminal state.
     bool wait_idle(std::chrono::milliseconds timeout) const;
 
+    /// @brief Returns current sink status and queue/spill metrics snapshot.
     SinkStatus status() const;
+    /// @brief Returns current operational mode atomically.
     SinkMode mode() const { return mode_.load(); }
     // The reason of the Failed state (empty otherwise).
+    /// @brief Returns error description if sink entered Failed mode.
     std::string fatal_message() const;
     // Steady-clock ms of the last sink-loop iteration; the process watchdog compares it with now (plan 4.4).
+    /// @brief Timestamp of most recent pump() pass for watchdog liveness monitoring.
     std::uint64_t loop_heartbeat_ms() const { return heartbeat_ms_.load(); }
 
 private:

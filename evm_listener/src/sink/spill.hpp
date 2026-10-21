@@ -14,16 +14,19 @@ namespace evml::sink {
 
 // Raised for any spill I/O failure or on-disk inconsistency (CRC mismatch, short read, bad length). Never swallowed:
 // a spill that cannot be trusted must stop the sink loudly, not be skipped over (plan 4.5).
+/// @brief Exception indicating fatal disk spill corruption or unrecoverable disk I/O error.
 struct SpillError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+/// @brief In-memory representation of a single spill record.
 struct SpillRecord {
     std::uint8_t kind{};
     std::string payload;
 };
 
 // CRC-32C (Castagnoli), exposed for tests.
+/// @brief Computes 32-bit Castagnoli CRC over memory buffer for corruption detection.
 std::uint32_t crc32c(const void* data, std::size_t len);
 
 // Process-scoped FIFO on ephemeral disk (plan 4.5, rev 6 D1). Items the sink could not hand to Redis wait here and
@@ -35,12 +38,19 @@ std::uint32_t crc32c(const void* data, std::size_t len);
 // torn-tail handling and no ack-cursor file: nothing here has to survive the process.
 //
 // NOT thread-safe: owned and used by the sink thread only.
+/// @brief Ephemeral rolling disk WAL storing un-acked sink items during Redis outages.
+/// Invariants & Guarantees:
+/// - Process-Scoped: Existing segments in spill_dir are wiped at startup; crash recovery re-sweeps from Redis checkpoint.
+/// - Integrity: Each record is guarded by a 32-bit CRC32C checksum; corrupted records fail fast via SpillError.
+/// - FIFO Ordering: Records are peeked and popped strictly in write sequence; consumed segment files are unlinked.
+/// - Concurrency: Single-threaded; manipulated solely by the RedisSink background pump thread.
 class Spill {
 public:
     static constexpr std::uint64_t kDefaultSegmentBytes = 64ull * 1024 * 1024;
 
     // Creates `dir` if needed and deletes any `seg-*.spill` files left by an earlier process. Other files in `dir` are
     // never touched (a mis-set spill_dir must not delete unrelated data). Throws SpillError on an empty path or I/O error.
+    /// @brief Initializes disk spill directory and purges stale segments from previous runs.
     Spill(std::filesystem::path dir, std::uint64_t max_bytes, std::uint64_t segment_bytes = kDefaultSegmentBytes);
     ~Spill();
     Spill(const Spill&) = delete;
@@ -48,18 +58,26 @@ public:
 
     // Appends at the tail. Never refuses: an item the sink already accepted must not be dropped; `saturated()` is how
     // the pipeline is told to stop producing (plan 4.6).
+    /// @brief Serializes kind discriminator and payload with CRC32C, appending to active tail segment.
     void append(std::uint8_t kind, std::string_view payload);
 
     // The oldest unconsumed record; nullopt when empty. Does not consume: call pop() once it was delivered.
+    /// @brief Reads and validates CRC32C of the oldest unconsumed record without advancing read cursor.
     std::optional<SpillRecord> peek();
+    /// @brief Advances read cursor past the current peeked record, deleting fully drained segment files.
     void pop();
 
+    /// @brief Returns true if no unconsumed records remain in the WAL.
     bool empty() const { return records_ == 0; }
+    /// @brief Total count of unconsumed records stored on disk.
     std::uint64_t records() const { return records_; }
+    /// @brief Total byte size of unconsumed records on disk.
     std::uint64_t bytes() const { return bytes_; }
+    /// @brief Returns true if stored bytes exceed configured soft threshold max_bytes.
     bool saturated() const { return bytes_ >= max_bytes_; }
 
     // Drops everything unconsumed and returns how many records were discarded (SinkFenced path, plan 4.8).
+    /// @brief Discards all unconsumed segments on fenced demotion, deleting underlying files.
     std::uint64_t discard_all();
 
 private:

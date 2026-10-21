@@ -121,6 +121,7 @@ void RedisppConn::set_with_ttl(const std::string& key, const std::string& value,
 std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& calls) {
     if (!loaded_) load_scripts();
     return guarded([&] {
+        // Build and dispatch non-transactional Redis pipeline containing all script invocations.
         auto pipe = redis_.pipeline(false);
         for (const auto& c : calls)
             pipe.evalsha(shas_[static_cast<std::size_t>(c.script)], c.keys.begin(), c.keys.end(), c.args.begin(),
@@ -133,6 +134,7 @@ std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& ca
             try {
                 out.push_back(ScriptOk{replies.get<sw::redis::OptionalString>(i)});
             } catch (const sw::redis::OomError& e) {
+                // Server rejected script due to maxmemory before execution; classified as transient.
                 out.push_back(ScriptFail{FailKind::Transient, e.what()});  // refused before it ran: nothing was written
             } catch (const sw::redis::ReplyError& e) {
                 out.push_back(fail_outcome(e.what()));
@@ -145,6 +147,7 @@ std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& ca
 pipeline::Checkpoint RedisppConn::read_checkpoint() {
     std::unordered_map<std::string, std::string> h;
     guarded([&] {
+        // Fetch all fields of the checkpoint hash (safe, finalized, contracts).
         redis_.hgetall(keys_.ckpt(), std::inserter(h, h.end()));
         return 0;
     });
@@ -161,6 +164,7 @@ pipeline::Checkpoint RedisppConn::read_checkpoint() {
 
 std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t from, std::uint64_t to) {
     // Flat [member, score, member, score, ...], ordered by score then member.
+    // Query sorted set for released log entries within requested block range [from, to].
     const auto flat = guarded([&] {
         return redis_.command<std::vector<std::string>>("ZRANGEBYSCORE", keys_.released(), std::to_string(from),
                                                         std::to_string(to), "WITHSCORES");
@@ -170,6 +174,7 @@ std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t fr
     std::vector<pipeline::ReleasedEntry> out;
     out.reserve(flat.size() / 2);
     constexpr std::size_t kChunk = 1000;
+    // Chunked HMGET prevents overwhelming Redis memory when fetching many before-images.
     for (std::size_t first = 0; first < flat.size(); first += 2 * kChunk) {
         const std::size_t last = std::min(flat.size(), first + 2 * kChunk);
         std::vector<std::string> ids;
@@ -183,6 +188,7 @@ std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t fr
         if (images.size() != ids.size()) throw std::runtime_error("redis: HMGET returned the wrong number of values");
 
         for (std::size_t k = 0; k < ids.size(); ++k) {
+            // Missing before-image violates revert contract and indicates corrupt database state.
             if (!images[k])
                 throw std::runtime_error("redis: released member '" + ids[k] + "' has no before image in " +
                                          keys_.released_data());

@@ -21,16 +21,25 @@ namespace evml::sink {
 //
 // Both timeouts default to 2 s: redis++'s own default is "wait forever", which would wedge the sink thread on a
 // half-open TCP connection.
+/// @brief Concrete RedisConn implementation wrapping a single redis++ connection with bounded timeouts.
+/// Watch out: Connection timeouts are enforced to prevent half-open TCP hangs.
 class RedisppConn final : public RedisConn {
 public:
+    /// @brief Constructs RedisppConn configured with URL and bounded I/O timeouts.
     RedisppConn(const std::string& url, const Keys& keys,
                 std::chrono::milliseconds io_timeout = std::chrono::milliseconds(2000));
 
+    /// @brief Executes batch of ScriptCalls via EVALSHA on redis++ pipeline.
     std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>& calls) override;
+    /// @brief Pre-loads embedded Lua scripts into Redis and records SHA1 digests.
     void load_scripts() override;
+    /// @brief Reads checkpoint hash fields (safe, finalized, contracts) via HGETALL.
     pipeline::Checkpoint read_checkpoint() override;
+    /// @brief Queries released members by block range via ZRANGEBYSCORE and batches HMGET for before-images.
     std::vector<pipeline::ReleasedEntry> read_released(std::uint64_t from, std::uint64_t to) override;
+    /// @brief Sets key with TTL seconds using redis.set EX.
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override;
+    /// @brief Queries stream consumer group statistics using XINFO, XRANGE, XPENDING, and TIME.
     GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override;
 
 private:

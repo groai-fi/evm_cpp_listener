@@ -100,15 +100,18 @@ void Spill::append(std::uint8_t kind, std::string_view payload) {
         throw SpillError("spill: payload of " + std::to_string(payload.size()) + " bytes exceeds the u32 length field");
 
     const std::uint64_t rec = kHeaderBytes + payload.size();
+    // Roll over to new segment file if current segment exceeds segment_bytes_.
     if (segments_.empty() || (segments_.back().size > 0 && segments_.back().size + rec > segment_bytes_))
         open_tail_segment();
 
     std::string buf;
     buf.reserve(rec);
+    // On-disk format: [u32 len][u32 crc32c][u8 kind][payload]
     put_u32(buf, static_cast<std::uint32_t>(payload.size()));
     put_u32(buf, 0);  // crc placeholder
     buf.push_back(static_cast<char>(kind));
     buf.append(payload);
+    // Compute Castagnoli CRC32C over [kind + payload] and backfill into header.
     const std::uint32_t crc = crc32c(buf.data() + 8, 1 + payload.size());
     for (int i = 0; i < 4; ++i) buf[4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFFu);
 
@@ -157,6 +160,7 @@ std::optional<SpillRecord> Spill::peek() {
         if (reader_.gcount() != static_cast<std::streamsize>(len))
             throw SpillError("spill: short payload read in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
     }
+    // Verify CRC32C checksum over kind discriminator byte and payload string.
     if (crc32c(body.data(), body.size()) != crc)
         throw SpillError("spill: CRC mismatch in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
 
@@ -178,6 +182,7 @@ void Spill::pop() {
     if (s.read_off < s.size) return;
 
     // Fully consumed: delete it. If it is also the writer's segment the writer closes; the next append starts afresh.
+    // Unlink exhausted segment file from filesystem to release disk space.
     const std::uint64_t id = s.id;
     if (segments_.size() == 1) writer_.close();
     if (reader_id_ == id) {

@@ -11,12 +11,17 @@ namespace evml::sink {
 // Consumer-group lag probe (plan 4.10). MINID retention trims entries whether or not a consumer read them, so the
 // listener watches the groups the downstream bots created.
 
+// Consumer-group lag probe (plan 4.10). MINID retention trims entries whether or not a consumer read them, so the
+// listener watches the groups the downstream bots created.
+
 // "<ms>-<seq>", the id of a stream entry. Redis assigns ids from its own clock, so `ms` is Redis arrival time.
+/// @brief Parses and compares Redis stream entry identifiers format "<millisecond_timestamp>-<sequence>".
 struct StreamId {
     std::uint64_t ms{};
     std::uint64_t seq{};
 
     // Throws std::runtime_error on anything that is not "<digits>-<digits>" (never defaulted).
+    /// @brief Parses stream ID string; throws std::runtime_error if format is invalid.
     static StreamId parse(const std::string& s);
 
     friend bool operator==(const StreamId&, const StreamId&) = default;
@@ -25,6 +30,7 @@ struct StreamId {
 };
 
 // What the probe read from Redis for one {stream, group}, before any judgement (so the judgement is a pure function).
+/// @brief Raw telemetry facts collected from Redis commands (XINFO GROUPS, XINFO STREAM, XPENDING).
 struct GroupFacts {
     bool stream_exists{false};  // false: no such key yet
     bool group_found{false};
@@ -39,6 +45,8 @@ struct GroupFacts {
     std::uint64_t now_ms{};                          // Redis TIME in ms
 };
 
+/// @brief Processed lag evaluation snapshot for one stream consumer group.
+/// Watch out: `trimmed_unread == true` indicates downstream data loss caused by retention trim overtaking consumers.
 struct ConsumerLag {
     core::StreamKind stream{core::StreamKind::Events};
     std::string group;
@@ -50,6 +58,7 @@ struct ConsumerLag {
     std::uint64_t probed_at_ms{0};          // listener wall clock when the probe ran (set by the sink): age of this snapshot
 };
 
+/// @brief Evaluates consumer group health, computing lag ages and detecting retention trims.
 ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const GroupFacts& facts);
 
 }  // namespace evml::sink

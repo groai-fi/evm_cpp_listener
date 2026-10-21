@@ -62,6 +62,7 @@ StartupFacts gather(sw::redis::Redis& redis) {
 
 }  // namespace
 
+/// @brief Parses semver string from Redis INFO server output.
 RedisVersion parse_redis_version(std::string_view info) {
     constexpr std::string_view key = "redis_version:";
     const auto pos = info.find(key);
@@ -88,10 +89,12 @@ RedisVersion parse_redis_version(std::string_view info) {
     return v;
 }
 
+/// @brief Validates version >= 7.0 (for #!lua shebang) and noeviction policy.
 StartupReport evaluate_startup(const StartupFacts& facts, bool require_noeviction) {
     StartupReport r;
     r.version = parse_redis_version(facts.info_server);
     const std::string ver = std::to_string(r.version.major) + "." + std::to_string(r.version.minor) + "." + std::to_string(r.version.patch);
+    // Lua scripts use the `#!lua` shebang without allow-oom, which requires Redis >= 7.0 to reject on OOM.
     if (r.version.major < 7)
         throw StartupFatal("redis_version " + ver + " < 7.0: the embedded Lua scripts need the #!lua shebang (Redis >= 7.0)");
 
@@ -99,6 +102,7 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
         r.config_denied = true;
         r.warnings.push_back("CONFIG GET maxmemory-policy refused: cannot verify noeviction");
     } else if (*facts.maxmemory_policy != "noeviction") {
+        // Eviction enabled: Redis may silently drop stream entries or checkpoint records under memory pressure.
         const std::string what = "maxmemory-policy is '" + *facts.maxmemory_policy + "', not 'noeviction': Redis may evict our streams or checkpoint";
         if (require_noeviction) throw StartupFatal(what);
         r.warnings.push_back(what);
@@ -113,6 +117,7 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
     return r;
 }
 
+/// @brief Connects to Redis and loops until server is ready and validated.
 std::optional<StartupReport> await_redis_ready(const std::string& redis_url, const StartupOptions& opts) {
     sw::redis::ConnectionOptions copts;
     try {
@@ -135,10 +140,12 @@ std::optional<StartupReport> await_redis_ready(const std::string& redis_url, con
         std::string error;
         try {
             sw::redis::Redis redis(copts, pool);
+            // Verify server response and evaluate version/config constraints.
             return evaluate_startup(gather(redis), opts.require_noeviction);
         } catch (const StartupFatal&) {
             throw;
         } catch (const sw::redis::ReplyError& e) {
+            // Authentication errors are non-recoverable: fail fast with StartupFatal.
             if (is_auth_error(e.what())) throw StartupFatal(std::string("AUTH rejected: ") + e.what());
             if (!is_transient_reply(e.what())) throw StartupFatal(std::string("unexpected Redis error at startup: ") + e.what());
             error = e.what();
@@ -147,9 +154,11 @@ std::optional<StartupReport> await_redis_ready(const std::string& redis_url, con
         }
 
         if (opts.on_waiting) {
+            // Diagnostic callback reporting network address family (IPv4 vs IPv6) and elapsed wait time.
             opts.on_waiting(error, address_family(copts.host, copts.port),
                             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0));
         }
+        // Exponential backoff with random full jitter while awaiting Redis startup.
         const auto ceiling = std::min<std::chrono::milliseconds::rep>(
             opts.probe_max.count(), opts.probe_min.count() << std::min<std::uint32_t>(attempt, 20));
         sleep(std::chrono::milliseconds(ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % (ceiling + 1)) : 0));

@@ -250,10 +250,12 @@ bool RedisSink::saturated() const {
 
 bool RedisSink::readable() const { return mode_.load() == SinkMode::Connected && !stop_.load(); }
 
+/// @brief Enqueues write item into thread-safe buffer; drops writes if already terminal.
 void RedisSink::enqueue(WriteItem item) {
     {
         std::lock_guard lk(mu_);
         // Terminal: the pipeline is being told to stop (saturated()); whatever it still hands over is counted, not hidden.
+        // Drops write immediately in terminal state so callers see backpressure without hiding pipeline state.
         if (is_terminal(mode_.load())) {
             ++discarded_total_;
             return;
@@ -273,12 +275,13 @@ void RedisSink::init_checkpoint(std::uint64_t c0, std::vector<std::string> manif
 void RedisSink::set_contracts(std::vector<std::string> manifest) { enqueue(ContractsItem{std::move(manifest)}); }
 void RedisSink::final_trim(std::uint64_t block) { enqueue(FinalTrimItem{block}); }
 
+/// @brief Dispatches read operation as a queue barrier, guaranteeing earlier writes are acked first.
 template <class T, class Op>
 boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
     if (!readable()) co_return std::nullopt;  // degraded / replaying / terminal: nothing to wait for (rev 6, A)
 
     using Channel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, std::optional<T>)>;
-    // Capacity 1: the sink thread's try_send never blocks and never needs the receiver to be waiting yet.
+    // Capacity 1 channel allows sink thread to deliver read result without blocking either thread.
     auto channel = std::make_shared<Channel>(co_await boost::asio::this_coro::executor, 1);
 
     ReadItem item;
@@ -289,6 +292,7 @@ boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
 
     {
         std::lock_guard lk(mu_);
+        // Invalidate read if sink entered terminal mode or stopped before enqueueing.
         if (is_terminal(mode_.load()) || stop_.load()) co_return std::nullopt;
         queue_.emplace_back(std::move(item));
     }
@@ -340,7 +344,9 @@ void RedisSink::set_heartbeat(std::string payload) {
     hb_payload_ = std::move(payload);
 }
 
+/// @brief Flushes pending items up to timeout, joins sink worker, and releases leadership lease.
 RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
+    // Wait for in-flight batches and spill items to finish writing to Redis.
     wait_idle(budget);
     stop();  // joins the sink thread: from here the lease connection is ours alone
     DrainResult r;
@@ -349,6 +355,7 @@ RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
     if (r.unflushed != 0)
         core::log::warn("sink", "drain budget ended with writes unflushed, the next leader re-sweeps",
                         {{"unflushed", std::to_string(r.unflushed)}});
+    // Explicitly release leader lease so standby replica takes over immediately without waiting for TTL.
     if (leasing() && mode_.load() != SinkMode::Fenced) {
         try {
             r.lease_released = release_lease(*lease_, keys_, opts_.token);
@@ -413,10 +420,12 @@ std::string RedisSink::fatal_message() const {
 
 // ---- sink thread ----
 
+/// @brief Advances sink state machine: services lease, heartbeats, lag probes, and batch writes.
 bool RedisSink::pump() {
     try {
         if (is_terminal(mode_.load())) return drain_terminal();
 
+        // Renew leader lease before doing any write work to ensure fencing token remains valid.
         bool worked = service_lease();
         if (is_terminal(mode_.load())) return drain_terminal() || worked;
         worked |= service_heartbeat();
@@ -424,11 +433,13 @@ bool RedisSink::pump() {
 
         // While anything older sits outside the queue (Degraded: unsent; Replaying: spilled), the queue is not allowed
         // to be sent around it: it joins the spill, in order (plan 4.4). Reads in it resolve to nullopt.
+        // Diverts all in-memory writes to local disk spill WAL while degraded or replaying.
         if (mode_.load() != SinkMode::Connected) worked |= queue_to_spill();
 
         switch (mode_.load()) {
             case SinkMode::Degraded: worked |= try_reconnect(); break;
             case SinkMode::Replaying:
+                // Replay disk spill records in strict FIFO order until empty.
                 if (held_.empty()) refill_from_spill();
                 if (!held_.empty()) worked |= send_held();
                 if (mode_.load() == SinkMode::Replaying && held_.empty() && spill_.empty()) {
@@ -476,6 +487,7 @@ std::uint64_t RedisSink::discard_queue() {
     return writes;
 }
 
+/// @brief Spills pending in-memory write queue to disk WAL during Redis outage or replaying mode.
 bool RedisSink::queue_to_spill() {
     std::deque<QueueItem> taken;
     {
@@ -492,6 +504,7 @@ bool RedisSink::queue_to_spill() {
                 r->abandon();
                 continue;
             }
+            // Encodes write item into JSON and writes sequentially to disk spill WAL with CRC32C checksum.
             const auto [kind, payload] = encode(std::get<WriteItem>(qi));
             spill_.append(kind, payload);
             --queue_depth_;
@@ -513,6 +526,7 @@ bool RedisSink::queue_to_spill() {
     return true;
 }
 
+/// @brief Fills held_ batch from in-memory queue; enforces barrier isolation for checkpoints and trims.
 bool RedisSink::refill_from_queue() {
     std::unique_lock lk(mu_);
     if (queue_.empty()) return false;
@@ -528,6 +542,7 @@ bool RedisSink::refill_from_queue() {
     while (!queue_.empty() && held_.size() < opts_.max_batch) {
         auto* w = std::get_if<WriteItem>(&queue_.front());
         if (!w) break;  // a read ends the batch: it is a barrier
+        // Non-emit items (checkpoints, manifest, trims) are barriers: they break batching and run alone.
         const bool barrier = !std::holds_alternative<EmitItem>(*w);
         if (barrier && !held_.empty()) break;  // a barrier is sent alone
         held_.push_back(std::move(*w));
@@ -538,11 +553,13 @@ bool RedisSink::refill_from_queue() {
     return !held_.empty();
 }
 
+/// @brief Fills held_ batch from disk spill WAL in strict FIFO order, respecting barrier boundaries.
 bool RedisSink::refill_from_spill() {
     while (held_.size() < opts_.max_batch) {
         const auto rec = spill_.peek();
         if (!rec) break;
         WriteItem item = decode(*rec);
+        // Non-emit items in spill also act as barriers and must be processed singly.
         const bool barrier = !std::holds_alternative<EmitItem>(item);
         if (barrier && !held_.empty()) break;
         spill_.pop();
@@ -565,8 +582,10 @@ void RedisSink::execute_read(ReadItem& item) {
     }
 }
 
+/// @brief Converts high-level WriteItem to corresponding Lua ScriptCall with fencing token and MINID.
 ScriptCall RedisSink::to_call(const WriteItem& item) const {
     const std::uint64_t wall = opts_.wall_ms();
+    // Calculates sliding retention MINID timestamp to prune expired stream entries on XADD.
     const std::uint64_t minid = wall > opts_.retention_ms ? wall - opts_.retention_ms : 0;
     return std::visit(
         overloaded{[&](const EmitItem& i) {
@@ -579,6 +598,7 @@ ScriptCall RedisSink::to_call(const WriteItem& item) const {
         item);
 }
 
+/// @brief Classifies Lua execution response into Ack, Fenced, Transient, NoScript, or Fatal.
 RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome& outcome) {
     using K = Verdict::Kind;
     if (const auto* f = std::get_if<ScriptFail>(&outcome)) {
@@ -597,10 +617,12 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
     return std::visit(
         overloaded{[&](const EmitItem& i) -> Verdict {
                        if (r == "DUP") {
+                           // Deduplication hit (DUP): event was already committed in Redis; safely skip re-emission.
                            ++dup_total_;
                        } else if (r == "BELOW_FINALIZED") {
                            // The final sweep already covered this block; dropping it is correct (plan 4.2). Normal
                            // operation never produces it, so it is loud.
+                           // Refuse emit below finalized block checkpoint to preserve monotonic finality invariant.
                            ++below_finalized_total_;
                            const std::string block = i.e.released_block ? std::to_string(*i.e.released_block) : "";
                            core::log::error("sink", "SinkInvariant: BELOW_FINALIZED, emit dropped",
@@ -614,6 +636,7 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
                    [&](const CkptInitItem&) -> Verdict {
                        if (r == "EXISTS") {
                            // A checkpoint appeared between load and init: the fence, not the driver, resolves races.
+                           // Checkpoint exists already; leader election fence ensures no overwrites occur.
                            core::log::warn("sink", "init_checkpoint found an existing checkpoint, left untouched");
                            return {};
                        }
@@ -624,6 +647,7 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
         item);
 }
 
+/// @brief Sends held batch over Redis pipeline, acknowledges in-order prefix, and manages script reloads/fences.
 bool RedisSink::send_held() {
     std::vector<ScriptCall> calls;
     calls.reserve(held_.size());
@@ -631,6 +655,7 @@ bool RedisSink::send_held() {
 
     std::vector<CallOutcome> outcomes;
     try {
+        // Dispatches entire batch over data connection in a single network round-trip.
         outcomes = data_->pipeline(calls);
     } catch (const ConnError& e) {
         // The outcome of every call is unknown: the whole batch stays held and is re-sent (dedup makes that safe).
@@ -642,6 +667,7 @@ bool RedisSink::send_held() {
                                std::to_string(calls.size()) + " calls");
 
     // Everything from the first non-success on is unacked, even if Redis ran some of it (plan 4.4, P1).
+    // Acks only contiguous prefix of successful replies; stops at first non-Ack to preserve sequence.
     std::size_t acked = 0;
     std::optional<Verdict> stop;
     for (; acked < outcomes.size(); ++acked) {
@@ -651,6 +677,7 @@ bool RedisSink::send_held() {
             break;
         }
     }
+    // Erase acked prefix from held_ queue and decrement pending write counter.
     held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(acked));
     pending_ -= acked;
     if (acked > 0) {
@@ -667,6 +694,7 @@ bool RedisSink::send_held() {
                 break;
             }
             try {
+                // Redis flushed script cache; reload all SHA1 Lua scripts and retry on next pump.
                 data_->load_scripts();  // the next pump re-sends from the failed item
             } catch (const ConnError& e) {
                 go_degraded(std::string("script reload failed: ") + e.what());
@@ -681,14 +709,17 @@ bool RedisSink::send_held() {
 
 // ---- lease ----
 
+/// @brief Sends lease renewal script on lease connection; retries once if script needs reloading.
 RedisSink::LeaseResult RedisSink::renew_lease() {
     const ScriptCall call = lease_renew_call(keys_, opts_.token, opts_.lease_ttl_ms);
     for (int attempt = 0; attempt < 2; ++attempt) {
+        // Dispatches renewal over dedicated lease connection so high event load never starves renewal.
         const std::vector<CallOutcome> outcomes = lease_->pipeline({call});
         if (outcomes.size() != 1) throw std::logic_error("RedisConn::pipeline returned the wrong number of outcomes for renew");
 
         if (const auto* f = std::get_if<ScriptFail>(&outcomes.front())) {
             if (f->kind == FailKind::NoScript && attempt == 0) {
+                // Redis script cache flushed; reload script on lease connection and retry immediately.
                 lease_->load_scripts();
                 continue;
             }
@@ -774,11 +805,13 @@ bool RedisSink::service_heartbeat() {
     return true;
 }
 
+/// @brief Handles FENCED response from write script by verifying leadership lease status.
 void RedisSink::handle_fenced() {
     if (!leasing()) throw std::runtime_error("a write script answered FENCED, but fencing is disabled (token 0 never fences)");
     if (++fence_streak_ > 1)
         throw std::runtime_error("a write was fenced again right after renew accepted the token: lease state is inconsistent");
     try {
+        // Immediate renewal query verifies whether another host took leadership or token expired.
         const LeaseResult r = renew_lease();
         next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
         if (r == LeaseResult::Fenced) enter_fenced();
@@ -788,7 +821,9 @@ void RedisSink::handle_fenced() {
     }
 }
 
+/// @brief Transitions to terminal Fenced mode, discarding queue and disk spill to avoid stale dual writes.
 void RedisSink::enter_fenced() {
+    // Drop all held batches, local disk spill WAL, and unhandled queue items to prevent split-brain writes.
     std::uint64_t dropped = held_.size();
     held_.clear();
     dropped += spill_.discard_all();
@@ -818,7 +853,9 @@ void RedisSink::go_degraded(const std::string& reason) {
     core::log::warn("sink", "redis unavailable, spilling", {{"reason", reason}});
 }
 
+/// @brief Computes exponential backoff interval with full jitter for next reconnect probe.
 void RedisSink::schedule_next_probe() {
+    // Calculates exponential backoff capped at probe_max with full random jitter in [0, cap_ms].
     const double cap_ms = std::min<double>(static_cast<double>(opts_.probe_max.count()),
                                            static_cast<double>(opts_.probe_min.count()) * std::pow(2.0, std::min(probe_attempt_, 20u)));
     std::uniform_int_distribution<std::int64_t> jitter(0, static_cast<std::int64_t>(cap_ms));  // full jitter
@@ -826,10 +863,12 @@ void RedisSink::schedule_next_probe() {
     ++probe_attempt_;
 }
 
+/// @brief Attempts reconnect by verifying lease renewal first, reloading scripts, and transitioning to Replaying.
 bool RedisSink::try_reconnect() {
     if (now() < next_probe_) return false;
     try {
         // First op after an outage is a renewal (plan 4.8): it detects a takeover before any write is attempted.
+        // Verifies leader fencing status before attempting data writes to prevent writing under expired term.
         if (leasing()) {
             const LeaseResult r = renew_lease();
             next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
@@ -838,6 +877,7 @@ bool RedisSink::try_reconnect() {
                 return true;
             }
         }
+        // Loads SHA1 Lua scripts into Redis script cache to confirm data connection health.
         data_->load_scripts();  // proves the data connection works, and restores scripts after a Redis restart
     } catch (const ConnError& e) {
         go_degraded(e.what());
@@ -845,6 +885,7 @@ bool RedisSink::try_reconnect() {
     }
     ++reconnects_total_;
     probe_attempt_ = 0;
+    // Enter Replaying mode if backlog exists in held batch or disk spill WAL; else Connected.
     const bool backlog = !held_.empty() || !spill_.empty();
     mode_.store(backlog ? SinkMode::Replaying : SinkMode::Connected);
     core::log::info("sink", backlog ? "redis reachable again, replaying the spill" : "redis reachable again");

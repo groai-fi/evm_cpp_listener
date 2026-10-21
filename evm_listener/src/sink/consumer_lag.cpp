@@ -28,20 +28,25 @@ StreamId StreamId::parse(const std::string& s) {
     return StreamId{parse_part(s, 0, dash, s), parse_part(s, dash + 1, s.size(), s)};
 }
 
+/// @brief Evaluates consumer lag metrics and flags data loss if entries were trimmed before consumption.
 ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const GroupFacts& f) {
     ConsumerLag out;
     out.stream = cfg.stream;
     out.group = cfg.group;
     if (!f.stream_exists || !f.group_found) {
+        // Group or stream does not exist in Redis yet (consumer hasn't started or name mismatched).
         out.missing = true;
         return out;
     }
     out.lag = f.lag;
+    // Calculate waiting age in seconds from entry arrival timestamp in Redis.
     if (f.first_undelivered_id) out.undelivered_age_s = age_s(*f.first_undelivered_id, f.now_ms);
     if (f.smallest_pending_id) out.pending_age_s = age_s(*f.smallest_pending_id, f.now_ms);
 
     const StreamId last_delivered = StreamId::parse(f.last_delivered_id);
+    // Flag data loss if deleted/trimmed entry ID is higher than last delivered ID.
     if (!f.max_deleted_id.empty() && StreamId::parse(f.max_deleted_id) > last_delivered) out.trimmed_unread = true;
+    // Flag data loss if pending unacked entry was purged from the stream head.
     if (f.smallest_pending_id && f.first_entry_id &&
         StreamId::parse(*f.smallest_pending_id) < StreamId::parse(*f.first_entry_id))
         out.trimmed_unread = true;
@@ -51,6 +56,7 @@ ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const Group
     // read zero entries even though Redis reports entries-read as nil for it; otherwise an unknown entries-read is not flagged.
     std::optional<std::uint64_t> read = f.entries_read;
     if (!read && last_delivered == StreamId{0, 0}) read = 0;
+    // Arithmetic check: if total appended exceeds read + lag, intermediate entries were evicted by retention.
     if (f.entries_added && read && f.lag && *f.entries_added > *read + *f.lag) out.trimmed_unread = true;
     return out;
 }

@@ -62,6 +62,7 @@ const char* script_source(Script s) {
     throw std::logic_error("script_source: unknown script");
 }
 
+/// @brief Builds Redis EVALSHA call payload for emit.lua atomically executing deduplication and stream append.
 ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParams& p) {
     if (e.fields.empty()) throw std::invalid_argument("emit_call: emission " + e.event_id + " has no fields");
     if (e.dedup_key.rfind("dedup:", 0) != 0)
@@ -69,7 +70,9 @@ ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParam
 
     ScriptCall c;
     c.script = Script::Emit;
+    // Keys array: dedup key, stream, released set, released before-data hash, leader lease, checkpoint hash.
     c.keys = {k.dedup(e.dedup_key), k.stream(e.stream), k.released(), k.released_data(), k.leader(), k.ckpt()};
+    // Args array: dedup TTL, minid retention, event type, released block, event id, before-image JSON, fencing token.
     c.args = {num(p.dedup_ttl_s),
               num(p.minid_ms),
               pipeline::to_string(e.type),
@@ -77,6 +80,7 @@ ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParam
               e.event_id,
               e.released_block ? pack_released(e.stream, e.fields) : std::string(),
               p.token};
+    // Append alternating field names and values for Redis stream payload.
     for (const auto& [name, value] : e.fields) {
         c.args.push_back(name);
         c.args.push_back(value);
@@ -84,31 +88,39 @@ ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParam
     return c;
 }
 
+/// @brief Builds call to advance safe or finalized checkpoint hash field.
 ScriptCall ckpt_advance_call(const Keys& k, const std::string& token, pipeline::CheckpointKind kind, std::uint64_t block) {
     const char* field = kind == pipeline::CheckpointKind::Safe ? "safe" : "finalized";
+    // Checkpoint script verifies fencing token and enforces monotonic advancement.
     return {Script::Ckpt, {k.ckpt(), k.leader()}, {token, "advance", field, num(block)}};
 }
 
+/// @brief Builds call to initialize checkpoint with starting block c0 and tracked contract manifest.
 ScriptCall ckpt_init_call(const Keys& k, const std::string& token, std::uint64_t c0, const std::vector<std::string>& manifest) {
     return {Script::Ckpt, {k.ckpt(), k.leader()}, {token, "init", num(c0), pack_manifest(manifest)}};
 }
 
+/// @brief Builds call to update contract manifest list in checkpoint hash.
 ScriptCall ckpt_contracts_call(const Keys& k, const std::string& token, const std::vector<std::string>& manifest) {
     return {Script::Ckpt, {k.ckpt(), k.leader()}, {token, "contracts", pack_manifest(manifest)}};
 }
 
+/// @brief Builds call to trim released zset and associated before-image data below finalized block g_f.
 ScriptCall final_trim_call(const Keys& k, const std::string& token, std::uint64_t g_f) {
     return {Script::FinalTrim, {k.released(), k.released_data(), k.leader()}, {token, num(g_f)}};
 }
 
+/// @brief Builds call to acquire leader lease token using random nonce and TTL.
 ScriptCall lease_acquire_call(const Keys& k, const std::string& host, const std::string& nonce, std::uint32_t ttl_ms) {
     return {Script::Lease, {k.leader(), k.epoch()}, {"acquire", host, nonce, num(ttl_ms)}};
 }
 
+/// @brief Builds call to extend existing leader lease token TTL.
 ScriptCall lease_renew_call(const Keys& k, const std::string& token, std::uint32_t ttl_ms) {
     return {Script::Lease, {k.leader(), k.epoch()}, {"renew", token, num(ttl_ms)}};
 }
 
+/// @brief Builds call to release leader lease token voluntarily on graceful shutdown.
 ScriptCall lease_release_call(const Keys& k, const std::string& token) {
     return {Script::Lease, {k.leader(), k.epoch()}, {"release", token}};
 }
