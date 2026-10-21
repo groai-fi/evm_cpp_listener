@@ -19,41 +19,54 @@ namespace detail {
 struct HttpConn;  // one live TCP or TLS connection (defined in the .cpp)
 }
 
+/// @brief Configuration options for HttpRpcClient.
 struct HttpRpcClientConfig {
-    std::string name;  // provider name, used in error messages
-    std::string url;   // http:// (tests/local nodes) or https://
-    std::string user_agent;
-    std::chrono::milliseconds timeout{10000};  // applied to each phase: connect, TLS, write, read
+    std::string name;                          // Provider name (e.g., "primary_alchemy", "backup_infura")
+    std::string url;                           // Endpoint URL (http:// for tests/local nodes, https:// for production)
+    std::string user_agent;                    // HTTP User-Agent header
+    std::chrono::milliseconds timeout{10000};  // Per-phase deadline: connect, TLS handshake, write, read
 };
 
+/// @brief Result payload of an HTTP exchange.
 struct HttpResult {
-    int status{};
-    std::string body;
-    std::optional<std::chrono::seconds> retry_after;  // from a delta-seconds Retry-After header
+    int status{};                                     // HTTP status code (200, 429, 500, etc.)
+    std::string body;                                 // Response body string (up to 64 MiB)
+    std::optional<std::chrono::seconds> retry_after;  // Parsed delta-seconds from Retry-After header
 };
 
-// Builds the classifier input from a non-2xx (or JSON-RPC error) HTTP result.
+/// @brief Dissects an HTTP response into ErrorInfo suitable for the failure classifier.
+/// @param r HTTP exchange result.
+/// @param decoder JSON-RPC decoder used to probe body for error objects.
+/// @return Extracted ErrorInfo.
 ErrorInfo error_info_from_http(const HttpResult& r, Decoder& decoder);
 
-// Async JSON-RPC-over-HTTP client for ONE provider. Single-threaded: every member must be used from the executor
-// it was constructed with.
-//  - One persistent keep-alive connection; requests are serialised (FIFO, one in flight).
-//  - A reused connection that turns out to be dead (idle-closed by the server/LB) is replaced and the request is
-//    retried exactly once; timeouts are never retried here (the pool decides).
-//  - Sends `Accept-Encoding: identity` (Beast does not gunzip) and the configured User-Agent.
-//  - Throws TransportError for network/TLS/timeout failures. Any HTTP status is returned as a result.
+/// @brief Asynchronous HTTP 1.1 client for a single JSON-RPC provider with connection pooling and FIFO serialization.
+/// Concurrency & Threading:
+/// - Single-threaded coroutine actor: all methods MUST execute on the configured executor.
+/// - Requests are serialized FIFO (one request in flight on the persistent TCP/TLS stream).
+/// Failure & Retry Invariants:
+/// - Dead Connection Healing: If a previously established keep-alive connection was closed idle by the server/LB,
+///   it is replaced and retried exactly once.
+/// - Fail-Fast on Timeout: Phase timeouts are never retried locally; they propagate immediately to ProviderPool.
+/// - Credential Protection: Error messages always redact tokens and secrets from URLs.
 class HttpRpcClient {
 public:
+    /// @brief Constructs client bound to the specified executor and configuration.
     HttpRpcClient(boost::asio::any_io_executor executor, HttpRpcClientConfig cfg);
     ~HttpRpcClient();
     HttpRpcClient(const HttpRpcClient&) = delete;
     HttpRpcClient& operator=(const HttpRpcClient&) = delete;
 
+    /// @brief Sends a serialized JSON-RPC payload asynchronously.
+    /// @param json_body Complete request JSON string.
+    /// @return HttpResult with status code and body.
+    /// @warning Throws TransportError on unrecoverable transport or TLS errors.
     boost::asio::awaitable<HttpResult> call(std::string json_body);
 
-    // Drops the connection (next call reconnects). Safe to call at any time.
+    /// @brief Closes the active socket connection if open (safe to call at any time).
     void close();
 
+    /// @brief Provider identifier name.
     const std::string& name() const { return cfg_.name; }
 
 private:

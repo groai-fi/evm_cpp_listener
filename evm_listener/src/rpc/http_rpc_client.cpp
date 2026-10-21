@@ -23,31 +23,37 @@ namespace {
 
 constexpr std::size_t kMaxBodyBytes = 64u << 20;  // 64 MiB: a 10k-block getLogs page can be large
 
-// TransportError that says whether it was a deadline (never retried) or a dead connection (retried once).
+/// @brief TransportError subtype capturing whether the phase failed on timeout vs socket disconnect.
 struct PhaseError : TransportError {
     PhaseError(const std::string& m, bool is_timeout) : TransportError(m), timeout(is_timeout) {}
-    bool timeout;
+    bool timeout;  // True if phase failed due to timeout deadline
 };
 
+/// @brief Executes a single coroutine phase, converting Boost timeouts to PhaseError(..., true).
 template <class Awaitable>
 net::awaitable<void> phase(const std::string& who, const char* name, Awaitable&& a) {
     try {
         co_await std::forward<Awaitable>(a);
     } catch (const boost::system::system_error& e) {
         const bool to = e.code() == beast::error::timeout;
+        // Include provider identifier and phase name in error description
         throw PhaseError(std::string(name) + " failed for " + who + ": " + (to ? "timeout" : e.code().message()), to);
     }
 }
 
+/// @brief Sends request and reads full HTTP response body over active socket stream.
 template <class Stream>
 net::awaitable<http::response<http::string_body>> exchange(Stream& stream, http::request<http::string_body>& req,
                                                            std::chrono::milliseconds timeout, const std::string& who) {
+    // Set socket write timeout deadline
     beast::get_lowest_layer(stream).expires_after(timeout);
     co_await phase(who, "write", http::async_write(stream, req, net::use_awaitable));
 
     beast::flat_buffer buf;
     http::response_parser<http::string_body> parser;
+    // Permit up to 64 MiB response bodies for heavy historical event queries
     parser.body_limit(kMaxBodyBytes);
+    // Set socket read timeout deadline
     beast::get_lowest_layer(stream).expires_after(timeout);
     co_await phase(who, "read", http::async_read(stream, buf, parser, net::use_awaitable));
     co_return parser.release();
@@ -57,6 +63,7 @@ net::awaitable<http::response<http::string_body>> exchange(Stream& stream, http:
 
 namespace detail {
 
+/// @brief Abstract connection handle representing either a plain TCP or TLS stream.
 struct HttpConn {
     virtual ~HttpConn() = default;
     virtual net::awaitable<http::response<http::string_body>> roundtrip(http::request<http::string_body>& req,
@@ -67,6 +74,7 @@ struct HttpConn {
 
 namespace {
 
+/// @brief Plain unencrypted TCP connection implementation for local test environments.
 struct PlainConn final : HttpConn {
     explicit PlainConn(const net::any_io_executor& ex) : stream(ex) {}
     net::awaitable<http::response<http::string_body>> roundtrip(http::request<http::string_body>& req,
@@ -76,12 +84,14 @@ struct PlainConn final : HttpConn {
     }
     void close() noexcept override {
         beast::error_code ec;
+        // Graceful shutdown before close
         stream.socket().shutdown(tcp::socket::shutdown_both, ec);
         stream.socket().close(ec);
     }
     beast::tcp_stream stream;
 };
 
+/// @brief TLS-encrypted connection implementation for production RPC endpoints.
 struct TlsConn final : HttpConn {
     TlsConn(const net::any_io_executor& ex, ssl::context& ctx) : stream(ex, ctx) {}
     net::awaitable<http::response<http::string_body>> roundtrip(http::request<http::string_body>& req,
@@ -90,7 +100,7 @@ struct TlsConn final : HttpConn {
         co_return co_await exchange(stream, req, timeout, who);
     }
     void close() noexcept override {
-        // No async close_notify: this path is used for dead/failed connections or shutdown.
+        // Direct socket shutdown without async close_notify (for dead connections or process exit)
         beast::error_code ec;
         beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
         beast::get_lowest_layer(stream).socket().close(ec);
@@ -101,19 +111,23 @@ struct TlsConn final : HttpConn {
 }  // namespace
 }  // namespace detail
 
+/// @brief Dissects an HTTP response into ErrorInfo for failure classification.
 ErrorInfo error_info_from_http(const HttpResult& r, Decoder& decoder) {
     ErrorInfo e;
     e.http_status = r.status;
     e.retry_after = r.retry_after;
+    // Attempt parsing JSON-RPC error format from response body
     if (const auto err = decoder.try_parse_error_body(r.body)) {
         e.rpc_code = err->code;
         e.message = err->message;
     } else {
+        // Truncate raw HTML/text error body to avoid unbounded memory in error structures
         e.message = r.body.substr(0, 120);
     }
     return e;
 }
 
+/// @brief Initializes client configuration, URL parsing, and FIFO concurrency lock timer.
 HttpRpcClient::HttpRpcClient(net::any_io_executor executor, HttpRpcClientConfig cfg)
     : exec_(std::move(executor)),
       cfg_(std::move(cfg)),
@@ -121,24 +135,30 @@ HttpRpcClient::HttpRpcClient(net::any_io_executor executor, HttpRpcClientConfig 
       redacted_(core::env::redact(cfg_.url)),
       lock_timer_(exec_, net::steady_timer::time_point::max()) {}
 
+/// @brief Cleans up socket connections on destruction.
 HttpRpcClient::~HttpRpcClient() { close(); }
 
+/// @brief Explicitly shuts down and resets the active socket connection.
 void HttpRpcClient::close() {
     if (conn_) {
+        // Shutdown and close underlying socket
         conn_->close();
         conn_.reset();
     }
 }
 
+/// @brief Asynchronously resolves DNS and opens either plain TCP or verified TLS connection.
 net::awaitable<std::unique_ptr<detail::HttpConn>> HttpRpcClient::open() {
     tcp::resolver resolver(exec_);
     tcp::resolver::results_type endpoints;
     try {
+        // Resolve host to IP endpoints
         endpoints = co_await resolver.async_resolve(url_.host, url_.port, net::use_awaitable);
     } catch (const boost::system::system_error& e) {
         throw TransportError(cfg_.name + ": resolve failed for " + redacted_ + ": " + e.code().message());
     }
 
+    // Unencrypted HTTP path (for anvil / hardhat local testing)
     if (!url_.tls) {
         auto c = std::make_unique<detail::PlainConn>(exec_);
         c->stream.expires_after(cfg_.timeout);
@@ -146,23 +166,29 @@ net::awaitable<std::unique_ptr<detail::HttpConn>> HttpRpcClient::open() {
         co_return std::move(c);
     }
 
+    // TLS 1.2/1.3 client context with system trust store and peer verification
     // One context per connection: cheap relative to the handshake, and keeps this class free of shared state.
     auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
     ctx->set_default_verify_paths();
     ctx->set_verify_mode(ssl::verify_peer);
     auto c = std::make_unique<detail::TlsConn>(exec_, *ctx);
+    // Configure SNI extension for cloud proxy / CDN routing
     if (!SSL_set_tlsext_host_name(c->stream.native_handle(), url_.host.c_str())) {
         throw TransportError(cfg_.name + ": cannot set TLS SNI for " + redacted_);
     }
+    // Verify TLS certificate matches hostname
     c->stream.set_verify_callback(ssl::host_name_verification(url_.host));
     const std::string who = cfg_.name + " " + redacted_;
+    // Connect TCP socket with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);
     co_await phase(who, "connect", beast::get_lowest_layer(c->stream).async_connect(endpoints, net::use_awaitable));
+    // Complete TLS handshake with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);
     co_await phase(who, "TLS handshake", c->stream.async_handshake(ssl::stream_base::client, net::use_awaitable));
     co_return std::move(c);
 }
 
+/// @brief Sends a JSON-RPC request over the persistent connection, serializing callers FIFO.
 net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
     // FIFO lock: waiters park on lock_timer_ and are woken one at a time by cancel_one().
     while (locked_) {
@@ -170,6 +196,7 @@ net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
         co_await lock_timer_.async_wait(net::redirect_error(net::use_awaitable, ignored));
     }
     locked_ = true;
+    // RAII guard ensuring lock is released and next waiter woken on exit
     struct Unlock {
         HttpRpcClient& c;
         ~Unlock() {
@@ -178,11 +205,13 @@ net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
         }
     } unlock{*this};
 
+    // Construct HTTP 1.1 POST request
     http::request<http::string_body> req{http::verb::post, url_.target, 11};
     req.set(http::field::host, url_.host_header());
     req.set(http::field::user_agent, cfg_.user_agent);
     req.set(http::field::content_type, "application/json");
     req.set(http::field::accept, "application/json");
+    // Explicitly disable compression to avoid manual gunzip overhead
     req.set(http::field::accept_encoding, "identity");
     req.body() = std::move(json_body);
     req.prepare_payload();
@@ -191,15 +220,18 @@ net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
     for (int attempt = 0;; ++attempt) {
         const bool reused = conn_ != nullptr;
         try {
+            // Lazy connect or reconnect if connection dropped
             if (!conn_) conn_ = co_await open();
             auto res = co_await conn_->roundtrip(req, cfg_.timeout, who);
             const bool keep = res.keep_alive();
             HttpResult out;
             out.status = static_cast<int>(res.result_int());
+            // Extract optional Retry-After header for rate limit backoff
             if (const auto it = res.find(http::field::retry_after); it != res.end()) {
                 out.retry_after = parse_retry_after(std::string_view(it->value().data(), it->value().size()));
             }
             out.body = std::move(res.body());
+            // If server indicated close, drop connection immediately
             if (!keep) close();
             co_return out;
         } catch (const PhaseError& e) {

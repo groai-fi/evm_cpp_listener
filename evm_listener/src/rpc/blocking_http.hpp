@@ -6,20 +6,26 @@
 
 namespace evml::rpc {
 
-// Network/TLS/HTTP-level failure. Messages only ever contain the *redacted* URL.
+/// @brief Network-, TLS-, or protocol-level failure with guaranteed token redaction in error messages.
 struct TransportError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+/// @brief HTTP response payload carrying numeric status code and response body text.
 struct HttpResponse {
-    int status{};
-    std::string body;
+    int status{};          // HTTP status code (e.g. 200, 429, 500)
+    std::string body;      // Raw response body string
 };
 
-// One-shot blocking HTTPS (or plain HTTP, for local test nodes) POST of a JSON body, with a deadline per phase
-// (resolve/connect, TLS handshake, write, read). Certificates and host name are verified against the system
-// trust store. Intended for CLI tooling (--check-config, --find-deploy-block); the long-lived runtime uses the
-// async transport. Throws TransportError.
+/// @brief One-shot blocking HTTP/HTTPS POST for JSON-RPC payloads (used by CLI tools and startup checks).
+/// Executes coroutine pipeline on a private io_context with phase deadlines (DNS, connect, TLS, write, read).
+/// Enforces TLS certificate verification and SNI against the system trust store.
+/// @param url Target endpoint URL (may contain secret tokens; will be redacted on error).
+/// @param body Serialized JSON-RPC request body.
+/// @param timeout Per-phase timeout deadline.
+/// @param user_agent User-Agent string sent in request headers.
+/// @return HttpResponse containing status code and response body.
+/// @warning Throws TransportError on connection failure, timeout, or TLS verification failure.
 HttpResponse http_post_json(const std::string& url, const std::string& body, std::chrono::milliseconds timeout,
                             const std::string& user_agent);
 
