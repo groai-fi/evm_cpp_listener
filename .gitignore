@@ -129,7 +129,6 @@ build/
 .env.local
 !.env.example
 
-doc/
 # Conan-generated, WAL data, and other env variants the loader reads
 CMakeUserPresets.json
 *.wal
