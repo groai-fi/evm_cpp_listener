@@ -32,27 +32,31 @@ struct ReorgInfo {
     std::uint64_t depth{};       // old_top - F; 0 when the walk only filled a gap
 };
 
-// Hash ring `number -> {hash, parent}` (plan 3.6). Pure: no I/O, no clock. Single-threaded.
-// The caller (async) fetches ancestors that the walk asks for, so the detector never blocks.
+// Ring buffer storing up to `capacity` canonical block headers (number -> {hash, parent}) (plan 3.6).
+// Detects head forks, block gaps, and safe reorgs without performing blocking network I/O.
+// Concurrency model: Pure state machine; single-threaded execution.
 class ReorgDetector {
 public:
     explicit ReorgDetector(std::size_t capacity);
 
-    // Feed a head from the ACTIVE session. Extended/Seeded/Duplicate are applied immediately;
-    // NeedWalk leaves the ring untouched until apply() succeeds.
+    // Processes an incoming block header from the active WebSocket newHeads stream.
+    // Extended/Seeded/Duplicate are applied immediately; NeedWalk leaves ring untouched until resolved.
+    // Watch out: Returns NeedWalk on parent hash mismatch, block number gap, or alternative hash at known height.
     HeadKind on_head(const BlockRef& head);
 
-    // Begin resolving a NeedWalk head. Valid for any head, but only meaningful after NeedWalk.
+    // Begins an ancestral walk to locate the common ancestor fork point for a NeedWalk head.
     ForkWalk begin_walk(const BlockRef& head) const;
 
-    // Commit a successfully completed walk: drops ring entries above the fork point and inserts the new
-    // chain. Throws std::logic_error if the walk is not Done or the ring changed since begin_walk().
+    // Commits a successfully resolved ForkWalk to the ring buffer.
+    // Truncates orphaned blocks above fork point F and inserts the new canonical branch.
+    // Watch out: Throws std::logic_error if the ring mutated (version mismatch) while walk was in-flight.
     ReorgInfo apply(const ForkWalk& walk);
 
-    // Safe-reorg trigger: the fork point is at or below the last released block C_s (plan 3.6).
+    // Evaluates whether the detected fork crossed below the last released block cursor C_s.
+    // Watch out: Returns true if fork_point < C_s, requiring an immediate reverify_released() sweep.
     static bool crosses_safe(const ReorgInfo& info, std::uint64_t c_s) { return info.fork_point < c_s; }
 
-    // Drop everything (after a provider failover the ring is re-seeded from the new provider).
+    // Drops all ring entries; invoked upon provider failover to re-seed from new provider.
     void reset() { ring_.clear(); }
 
     std::optional<std::uint64_t> top() const;

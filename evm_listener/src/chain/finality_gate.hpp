@@ -24,16 +24,27 @@ const char* to_string(GateSignal s);
 // tags; that is not an anomaly (the sweeps simply wait until the tag passes their cursors, checkpoints never
 // regress). A `finalized` anomaly freezes the gate permanently (restart required): finalized data moving is a
 // provider fault or a catastrophic L1 event, and the pipeline must stop releasing and alert.
+// Pure state machine tracking consensus finality gates G_s (safe) and G_f (finalized) across providers (plan 3.3).
+// Evaluates tag regressions per-provider to distinguish benign failover gaps from genuine chain reorgs.
+// Invariants enforced: Invariant I2 (G_f <= G_s), Invariant I5 (freeze pipeline permanently on FinalizedAnomaly).
 class FinalityGate {
 public:
+    // Evaluates incoming safe block tag from the specified provider.
+    // Watch out: Returns SafeRegression or SafeHashMismatch if the same provider regresses; signals reorg.
     GateSignal on_safe(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
+
+    // Evaluates incoming finalized block tag from the specified provider.
+    // Watch out: Returns FinalizedAnomaly and permanently freezes release if finalized height or hash regresses.
     GateSignal on_finalized(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
 
-    // Latest observation (nullopt until the first one).
+    // Latest observed safe block height (nullopt until first tag received).
     std::optional<std::uint64_t> safe() const { return latest_safe_; }
-    // Latest observation, clamped to safe() so that G_f <= G_s always holds (I2).
+
+    // Latest observed finalized block height, clamped to safe() so that G_f <= G_s strictly holds (Invariant I2).
+    // Watch out: Finalized gate never advances beyond safe gate even if RPC reports higher finalized tag.
     std::optional<std::uint64_t> finalized() const;
 
+    // True if pipeline release is permanently frozen due to a FinalizedAnomaly.
     bool frozen() const { return frozen_; }
     const std::string& frozen_reason() const { return frozen_reason_; }
 
