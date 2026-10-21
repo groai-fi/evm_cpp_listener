@@ -21,8 +21,9 @@ This document details how to combine **Redis + Lua** with specialized open-sourc
 By pairing Redis + Lua with companion tools, you can match Kafka's primary superpowers:
 - **Disk-backed storage**: [Apache Kvrocks](https://kvrocks.apache.org/) (Redis protocol on top of RocksDB / NVMe).
 - **Declarative streaming pipelines (Kafka Connect equivalent)**: [Redpanda Connect / Benthos](https://docs.redpanda.com/redpanda-connect/).
+- **Zero-exfiltration local analytics (Hedge fund enclave pattern)**: Embedded [DuckDB](https://duckdb.org/) for in-process, on-prem NVMe Parquet archival without network egress.
 - **Automated consumer retries & dead-letter queues**: [BullMQ](https://bullmq.io/) or [Asynq](https://github.com/hibiken/asynq).
-- **Long-term analytical storage (OLAP)**: [ClickHouse](https://clickhouse.com/) or Parquet on S3.
+- **Long-term analytical storage (OLAP)**: [ClickHouse](https://clickhouse.com/), local encrypted Parquet, or private MinIO.
 
 ```mermaid
 flowchart LR
@@ -37,6 +38,12 @@ flowchart LR
         D -->|Micro-batch Sinks| E[(ClickHouse / S3 Parquet)]
         B -.->|Disk Replacement| F[(Apache Kvrocks)]
         B -.->|DLQ & Worker Management| G[BullMQ / Asynq]
+    end
+
+    subgraph Secure Enclave / Zero-Exfiltration Tier
+        B -->|XREADGROUP| H[Embedded DuckDB Worker]
+        H -->|Direct Zero-Copy Write| I[(Local Encrypted NVMe Parquet)]
+        I --> J[Quant Backtesting & Risk Models]
     end
 ```
 
@@ -113,6 +120,149 @@ output:
 
 ---
 
+## 2B. Layer 2 Alternative: Hedge Fund Zero-Exfiltration Archiver (Embedded DuckDB)
+
+### The Hedge Fund Security Constraint: Zero Data Egress
+In proprietary trading firms, market makers, and quantitative hedge funds, data security protocols enforce strict perimeter defense:
+1. **Zero Third-Party SaaS or Multi-Tenant Cloud Ingestion**: Proprietary trade signals, internal keeper triggers, DEX pool state transitions, and execution timestamps must not transit through public cloud message brokers (e.g., Confluent Cloud, AWS SQS) or multi-tenant database services.
+2. **Strict Network Layer Segmentation**: Production trading clusters run in isolated subnets (air-gapped VPCs or colocation bare-metal nodes) where outbound internet egress is strictly blocked to eliminate data leakage.
+3. **Minimal Attack Surface**: Running external database daemons with listening network ports (e.g., ClickHouse on port `9000` or Kafka on `9092`) introduces network-level vulnerabilities and lateral movement risk.
+
+### The Companion Tool: Embedded [DuckDB](https://duckdb.org/)
+- **What it is**: An in-process, zero-dependency, serverless vectorized SQL OLAP engine written in C++ with native bindings for Python, C++, and Rust (frequently characterized as the "SQLite for columnar analytics").
+- **Why it fits the Zero-Exfiltration Mandate**:
+  1. **Zero Open Ports / In-Process Execution**: DuckDB runs embedded inside your worker process memory space (`libduckdb`). It does not run a network daemon or expose any listening ports.
+  2. **Direct-to-Disk Columnar Parquet**: Consumes events directly from Redis Streams via `XREADGROUP`, buffers them in-memory, and writes compressed columnar `.parquet` files directly onto local LUKS/dm-crypt encrypted NVMe drives (or private on-premise MinIO clusters within the same isolated subnet).
+  3. **High-Ratio Columnar Compression**: Uses Zstandard or Snappy compression with dictionary encoding, achieving $10\times - 20\times$ storage compression relative to raw JSON on disk.
+  4. **Zero-Copy Analytical Queries**: Quantitative researchers and backtesters can query terabytes of local Parquet files using ANSI SQL with SIMD-vectorized execution, without transferring files across network layers or copying data into a separate database.
+
+### Production Worker Implementation (In-Process DuckDB Archiver)
+
+Below is a production-grade, self-contained Python worker that tails `evm_listener` events from Redis Streams and flushes micro-batches directly to compressed Parquet files on local encrypted storage:
+
+```python
+#!/usr/bin/env python3
+"""
+Zero-Exfiltration In-Process DuckDB Archiver.
+Consumes on-chain events from Redis Streams and writes compressed Parquet
+directly to a local encrypted NVMe volume within the secure enclave.
+"""
+
+import os
+import time
+import json
+import duckdb
+import redis
+
+# 1. Configuration loaded strictly from environment / secure local config
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+STREAM_KEY = os.getenv("STREAM_KEY", "evml:8453:events")
+CONSUMER_GROUP = "duckdb_secure_archiver"
+CONSUMER_NAME = f"archiver_{os.getpid()}"
+
+# Local encrypted volume mount (LUKS / host-isolated storage)
+ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "/mnt/secure_enclave/onchain_parquet")
+BATCH_SIZE = int(os.getenv("ARCHIVE_BATCH_SIZE", "5000"))
+FLUSH_INTERVAL_SEC = 30
+
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+# 2. In-process DuckDB instance (zero network ports, runs in-memory)
+con = duckdb.connect(database=":memory:")
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+# Ensure consumer group exists
+try:
+    r.xgroup_create(STREAM_KEY, CONSUMER_GROUP, id="0", mkstream=True)
+except redis.exceptions.ResponseError as e:
+    if "BUSYGROUP" not in str(e):
+        raise
+
+def flush_batch_to_parquet(records, msg_ids):
+    """Encodes in-memory JSON records into columnar compressed Parquet on local disk."""
+    if not records:
+        return
+    
+    timestamp_bucket = int(time.time() // 3600 * 3600)  # Hourly partition
+    filename = f"events_chain8453_{timestamp_bucket}_{int(time.time()*1000)}.parquet"
+    target_path = os.path.join(ARCHIVE_DIR, filename)
+
+    # DuckDB extracts JSON columns and transposes to columnar Parquet
+    con.execute("CREATE OR REPLACE TEMP TABLE batch_raw (payload VARCHAR);")
+    con.executemany("INSERT INTO batch_raw VALUES (?);", [[json.dumps(rec)] for rec in records])
+    
+    # Vectorized export to Zstandard-compressed Parquet on local disk
+    con.execute(f"""
+        COPY (
+            SELECT 
+                CAST(json_extract(payload, '$.chain_id') AS BIGINT) AS chain_id,
+                CAST(json_extract(payload, '$.block_number') AS BIGINT) AS block_number,
+                CAST(json_extract(payload, '$.tx_hash') AS VARCHAR) AS tx_hash,
+                CAST(json_extract(payload, '$.log_index') AS BIGINT) AS log_index,
+                CAST(json_extract(payload, '$.address') AS VARCHAR) AS address,
+                CAST(json_extract(payload, '$.topics[0]') AS VARCHAR) AS topic0,
+                CAST(json_extract(payload, '$.timestamp') AS TIMESTAMP) AS block_timestamp,
+                payload AS raw_json
+            FROM batch_raw
+        ) TO '{target_path}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);
+    """)
+
+    # Acknowledge processed messages in Redis Stream PEL
+    r.xack(STREAM_KEY, CONSUMER_GROUP, *msg_ids)
+    print(f"[ARCHIVER] Flushed {len(records)} events to {target_path}")
+
+def run_loop():
+    buffer_records = []
+    buffer_ids = []
+    last_flush = time.time()
+
+    while True:
+        # Read new stream messages via consumer group
+        resp = r.xreadgroup(CONSUMER_GROUP, CONSUMER_NAME, {STREAM_KEY: ">"}, count=1000, block=2000)
+        
+        if resp:
+            for stream_name, messages in resp:
+                for msg_id, fields in messages:
+                    raw_data = fields.get("data")
+                    if raw_data:
+                        buffer_records.append(json.loads(raw_data))
+                        buffer_ids.append(msg_id)
+
+        now = time.time()
+        time_elapsed = now - last_flush
+
+        if len(buffer_records) >= BATCH_SIZE or (buffer_records and time_elapsed >= FLUSH_INTERVAL_SEC):
+            flush_batch_to_parquet(buffer_records, buffer_ids)
+            buffer_records.clear()
+            buffer_ids.clear()
+            last_flush = now
+
+if __name__ == "__main__":
+    run_loop()
+```
+
+### Direct Quant Research Without Network Movement
+Because data resides on local NVMe drives in standard Apache Parquet format, quantitative researchers and risk engineers can query the dataset locally with zero network hops:
+
+```python
+import duckdb
+
+# Query across months of partitioned Parquet files instantly from the research node
+df = duckdb.query("""
+    SELECT 
+        date_trunc('hour', block_timestamp) AS hour,
+        address,
+        count(*) AS swap_count
+    FROM '/mnt/secure_enclave/onchain_parquet/*.parquet'
+    WHERE topic0 = '0xd78ad952c463e811d59473dcf4d7d0e15b6e6105b80701f28f8e00e0ec73b923'
+    GROUP BY 1, 2
+    ORDER BY hour DESC;
+""").to_df()
+```
+
+---
+
 ## 3. Layer 3: Dead-Letter Queues (DLQ) & Consumer Management
 
 ### The Kafka Advantage
@@ -161,22 +311,24 @@ Tools like Kafka Lag Exporter, Burrow, and Confluent Control Center provide real
 
 ## Summary: Architecture Comparison
 
-| Capability | Raw Redis + Lua | Redis + Tooling | Apache Kafka |
-| :--- | :--- | :--- | :--- |
-| **Write Latency** | $< 0.5\text{ ms}$ (RAM) | $< 1\text{ ms}$ (RAM) | $2 - 10\text{ ms}$ (Disk page cache) |
-| **Atomic Multi-Key Mutation** | ✅ Native Lua scripts | ✅ Native Lua scripts | ❌ Storage-only (requires Flink/KStreams) |
-| **Massive Historical Storage** | ❌ RAM-capped | ✅ **Apache Kvrocks** or **S3 Tiering** | ✅ Native tiered disk storage |
-| **ETL / Sink Connectors** | ❌ Custom code | ✅ **Redpanda Connect (Benthos)** | ✅ Kafka Connect ecosystem |
-| **Dead-Letter Queues (DLQ)** | ❌ Manual `XCLAIM` | ✅ **BullMQ / Asynq** | ✅ Dead-letter topics |
-| **Consumer Lag Monitoring** | ⚠️ Manual `XINFO` | ✅ **Redis Exporter** / [`consumer_lag.cpp`](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/sink/consumer_lag.cpp) | ✅ Kafka Lag Exporter / Burrow |
-| **Operational Overhead** | Minimal (single binary) | Low to Moderate | High (JVM, ZooKeeper/KRaft cluster) |
+| Capability | Raw Redis + Lua | Redis + Tooling (Standard) | Redis + DuckDB (Hedge Fund Enclave) | Apache Kafka |
+| :--- | :--- | :--- | :--- | :--- |
+| **Write Latency** | $< 0.5\text{ ms}$ (RAM) | $< 1\text{ ms}$ (RAM) | $< 1\text{ ms}$ (RAM) | $2 - 10\text{ ms}$ (Disk page cache) |
+| **Atomic Multi-Key Mutation** | ✅ Native Lua scripts | ✅ Native Lua scripts | ✅ Native Lua scripts | ❌ Storage-only (requires Flink/KStreams) |
+| **Massive Historical Storage** | ❌ RAM-capped | ✅ **Apache Kvrocks** or **S3 Tiering** | ✅ **Local Encrypted NVMe Parquet** | ✅ Native tiered disk storage |
+| **ETL / Sink Connectors** | ❌ Custom code | ✅ **Redpanda Connect (Benthos)** | ✅ **Embedded DuckDB Worker** | ✅ Kafka Connect ecosystem |
+| **Data Perimeter Defense** | ⚠️ Depends on downstream | ⚠️ External network hops (S3 / Cloud DB) | 🔒 **100% In-Process / Zero Egress** | ⚠️ Network broker cluster |
+| **Attack Surface / Open Ports** | Single Redis port (`6379`) | Redis + ClickHouse (`9000`) | **Zero extra ports** (in-process library) | Multi-node ports (`9092`, `2181`) |
+| **Dead-Letter Queues (DLQ)** | ❌ Manual `XCLAIM` | ✅ **BullMQ / Asynq** | ✅ In-process stream retry / DLQ | ✅ Dead-letter topics |
+| **Consumer Lag Monitoring** | ⚠️ Manual `XINFO` | ✅ **Redis Exporter** / [`consumer_lag.cpp`](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/sink/consumer_lag.cpp) | ✅ [`consumer_lag.cpp`](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/sink/consumer_lag.cpp) / Prometheus | ✅ Kafka Lag Exporter / Burrow |
+| **Operational Overhead** | Minimal (single binary) | Low to Moderate | **Low** (zero external daemons) | High (JVM, ZooKeeper/KRaft cluster) |
 
 ---
 
-## Recommended Production Blueprint for EVM Pipelines
+## Recommended Production Blueprints for EVM Pipelines
 
-For on-chain event listeners and automated trading infrastructure:
-
+### Blueprint A: Cloud & Multi-Tenant Scalable Pipeline (Redpanda Connect + S3 / ClickHouse)
+Best for public indexing, multi-cloud clusters, or open analytics platforms where data egress to managed cloud services is permitted:
 1. **L1 (Hot Buffer - In-Memory)**:
    - Deploy **Redis + Lua** as the immediate ingestion sink.
    - Use [`RedisSink`](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/sink/redis_sink.hpp) to perform sub-millisecond block deduplication and emit events via `XADD`.
@@ -190,3 +342,18 @@ For on-chain event listeners and automated trading infrastructure:
 3. **L3 (Cold Historical Archive - ClickHouse / S3)**:
    - Redpanda Connect flushes batches to **ClickHouse** or **S3 Parquet** files.
    - Backtesting engines, compliance auditors, and analytics dashboards query L3 without adding read load to the hot L1 Redis instance.
+
+### Blueprint B: Hedge Fund Secure Enclave Blueprint (Zero-Exfiltration via Embedded DuckDB)
+Best for proprietary trading firms, risk keepers, and quant research teams where alpha, transaction footprints, and market data cannot leave the private subnet or host machine:
+1. **L1 (Hot Buffer - Sub-Millisecond In-Memory Execution)**:
+   - Deploy **Redis + Lua** strictly bound to `127.0.0.1` or isolated UNIX domain sockets (`/var/run/redis/redis.sock`).
+   - High-frequency execution bots and risk keepers read directly from memory via consumer groups (`XREADGROUP`).
+
+2. **L2 (In-Process Stream Archiver - Zero Network Ports)**:
+   - Run the **Embedded DuckDB Archiver** as a local host service or sidecar container without opening any external network ports.
+   - Tail the Redis stream with an `XREADGROUP` consumer loop, buffering micro-batches (e.g., 5,000 events or 30 seconds).
+
+3. **L3 (Local Encrypted NVMe Storage - Columnar Parquet)**:
+   - DuckDB directly writes Zstandard-compressed Parquet files to a host-local, LUKS/dm-crypt encrypted NVMe volume (or an isolated, internal air-gapped MinIO instance).
+   - **Zero Data Egress**: No bytes leave the host boundary or secure VPC layer.
+   - **Quant Research Ready**: Quantitative researchers run SIMD-vectorized SQL backtests directly against local Parquet files via Python (`import duckdb`), R, or Julia with instantaneous query execution and zero cloud data egress fees.
