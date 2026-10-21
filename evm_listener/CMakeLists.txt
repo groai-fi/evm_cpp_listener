@@ -29,6 +29,29 @@ endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/core/version.hpp @ONLY)
 
+# Redis Lua scripts: src/sink/lua/<name>.lua are embedded into generated/sink/lua_sources.hpp (no runtime loading).
+# Editing a .lua re-runs configure (CMAKE_CONFIGURE_DEPENDS), which regenerates the header and rebuilds the binary.
+foreach(evml_lua emit ckpt final_trim lease)
+    set(evml_lua_path ${CMAKE_CURRENT_SOURCE_DIR}/src/sink/lua/${evml_lua}.lua)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${evml_lua_path})
+    file(READ ${evml_lua_path} evml_lua_src)
+    if(NOT evml_lua_src MATCHES "^#!lua\n")
+        message(FATAL_ERROR "${evml_lua_path}: must start with '#!lua' followed by LF (Redis runs it in legacy mode otherwise)")
+    endif()
+    string(FIND "${evml_lua_src}" ")lua\"" evml_lua_bad)
+    if(NOT evml_lua_bad EQUAL -1)
+        message(FATAL_ERROR "${evml_lua_path}: contains ')lua\"', which ends the C++ raw string it is embedded in")
+    endif()
+    string(FIND "${evml_lua_src}" "\r" evml_lua_cr)
+    if(NOT evml_lua_cr EQUAL -1)
+        message(FATAL_ERROR "${evml_lua_path}: contains a CR character; use LF line endings")
+    endif()
+    string(TOUPPER ${evml_lua} evml_lua_upper)
+    set(EVML_LUA_${evml_lua_upper} "${evml_lua_src}")
+endforeach()
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sink/lua_sources.hpp.in
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/sink/lua_sources.hpp @ONLY)
+
 option(EVML_SANITIZE "Build with ASan+UBSan" ON)
 
 find_package(Boost REQUIRED CONFIG COMPONENTS json)

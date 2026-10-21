@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Lints the Redis Lua scripts. Works for both layouts during the move to file-based scripts:
-#   - standalone files:  evm_listener/src/sink/lua/*.lua (target layout) and any other *.lua in the repo
-#   - embedded literals: R"lua(...)lua" in evm_listener/src/sink/lua_scripts.cpp (current layout)
+# Lints the Redis Lua scripts: evm_listener/src/sink/lua/*.lua (exactly the 4 Redis scripts) and any other *.lua in
+# the repo. CMake embeds the Redis scripts into the binary at build time (evm_listener/CMakeLists.txt).
 #
 # Checks per script:
 #   1. luacheck with the repo .luacheckrc (exact Redis sandbox globals; catches typos like ARVG, print, os.time)
@@ -36,9 +35,8 @@ import subprocess
 import sys
 
 LUACHECKRC = sys.argv[1]
-CPP_FILE = pathlib.Path("evm_listener/src/sink/lua_scripts.cpp")
 REDIS_LUA_DIR = pathlib.Path("evm_listener/src/sink/lua")
-EXPECTED_MIN_REDIS_SCRIPTS = 4
+EXPECTED_REDIS_SCRIPTS = {"emit.lua", "ckpt.lua", "final_trim.lua", "lease.lua"}
 SHEBANG_RE = re.compile(r"#!lua(?:[ \t]+([^\n]*))?\n")
 
 # (label, source, path for diagnostics, path line of Lua line 1, is_redis_script)
@@ -61,24 +59,11 @@ for name in sorted(set(filter(None, listed))):
         sys.exit(1)
     scripts.append((str(path), src, str(path), 1, path.parent == REDIS_LUA_DIR))
 
-# 2. Embedded literals in the C++ source (removed once the move to files is complete)
-if CPP_FILE.is_file():
-    content = CPP_FILE.read_text(encoding="utf-8")
-    pattern = re.compile(r"(\w+)\s*(?:\[\s*\])?\s*=\s*R\"lua\((.*?)\)lua\"", re.DOTALL)
-    matches = list(pattern.finditer(content))
-    # Every R"lua( literal must be parsed, otherwise a script would be silently skipped.
-    raw_count = content.count('R"lua(')
-    if raw_count != len(matches):
-        print(f"Error: found {raw_count} R\"lua( literals in {CPP_FILE} but parsed {len(matches)}; update the extraction regex.", file=sys.stderr)
-        sys.exit(1)
-    for m in matches:
-        base = content[:m.start(2)].count("\n") + 1
-        scripts.append((m.group(1), m.group(2), str(CPP_FILE), base, True))
-
 redis_count = sum(1 for s in scripts if s[4])
-if redis_count < EXPECTED_MIN_REDIS_SCRIPTS:
+found = {pathlib.Path(s[2]).name for s in scripts if s[4]}
+if found != EXPECTED_REDIS_SCRIPTS:
     print(
-        f"Error: expected at least {EXPECTED_MIN_REDIS_SCRIPTS} Redis scripts ({REDIS_LUA_DIR}/*.lua + embedded in {CPP_FILE}), found {redis_count}.",
+        f"Error: {REDIS_LUA_DIR}/ must hold exactly {sorted(EXPECTED_REDIS_SCRIPTS)}, found {sorted(found)}.",
         file=sys.stderr,
     )
     sys.exit(1)
