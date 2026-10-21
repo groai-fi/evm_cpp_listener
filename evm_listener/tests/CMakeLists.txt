@@ -40,7 +40,8 @@ add_executable(evml_tests
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
     EVML_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../config"
-    EVML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+    EVML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    EVML_EXPECTED_VERSION="${EVML_VERSION_STRING}")
 
 # Tests tagged [integration] use in-process mock servers on 127.0.0.1 or the compose Redis (REDIS_URL); everything
 # else is a pure unit test. [redis_serial] tests change server-wide Redis state (maxmemory, SCRIPT FLUSH) and run alone.

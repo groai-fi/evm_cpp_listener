@@ -71,6 +71,7 @@ TEST_CASE("redis++ and prometheus-cpp link", "[unit][toolchain]") {
 }
 
 TEST_CASE("version string is populated", "[unit][toolchain]") {
-    CHECK(std::string(evml::core::kSemver) == "0.1.0");
-    CHECK(std::string(evml::core::version_string()).find("evm_listener 0.1.0") == 0);
+    // EVML_EXPECTED_VERSION is the content of the root VERSION file (set in tests/CMakeLists.txt).
+    CHECK(std::string(evml::core::kSemver) == EVML_EXPECTED_VERSION);
+    CHECK(std::string(evml::core::version_string()).find(std::string("evm_listener ") + EVML_EXPECTED_VERSION) == 0);
 }
