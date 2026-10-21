@@ -34,11 +34,12 @@ using core::Address20;
 using core::Config;
 using core::Provider;
 
-// A provider answered, but with an error (HTTP non-200 or JSON-RPC error object).
+/// @brief Exception thrown when an RPC provider responds with an HTTP error or JSON-RPC error payload.
 struct RpcFailure : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+/// @brief Replaces `{version}` placeholder in template with compiled semver string.
 std::string user_agent(const Config& cfg) {
     std::string ua = cfg.ops.http_user_agent;
     const std::string token = "{version}";
@@ -49,14 +50,21 @@ std::string user_agent(const Config& cfg) {
     return ua;
 }
 
+/// @brief Truncates error messages to avoid console flooding on large response bodies.
 std::string clip(std::string_view s, std::size_t n = 120) {
     return std::string(s.substr(0, n));
 }
 
-// One JSON-RPC call over HTTP. Returns raw `result` JSON. Throws TransportError, RpcFailure, DecodeError.
+/// @brief Executes a single blocking JSON-RPC call over HTTP against a specific provider.
+/// @return Raw JSON result payload.
+/// @throws TransportError On network I/O or connect failure.
+/// @throws RpcFailure On non-200 HTTP code or JSON-RPC error object.
+/// @throws DecodeError On invalid JSON structure.
 std::string rpc_call(const Config& cfg, const Provider& p, const std::string& body, rpc::Decoder& dec) {
+    // Dispatch blocking HTTP POST with configured backfill timeout and evaluated user agent.
     const auto resp = rpc::http_post_json(p.http_url, body, std::chrono::milliseconds(cfg.backfill.request_timeout_ms),
                                           user_agent(cfg));
+    // Check HTTP status code; parse JSON-RPC error payload if provided in response body.
     if (resp.status != 200) {
         if (const auto err = dec.try_parse_error_body(resp.body)) {
             throw RpcFailure(p.name + ": HTTP " + std::to_string(resp.status) + " rpc error " +
@@ -64,6 +72,7 @@ std::string rpc_call(const Config& cfg, const Provider& p, const std::string& bo
         }
         throw RpcFailure(p.name + ": HTTP " + std::to_string(resp.status) + ": " + clip(resp.body));
     }
+    // Decode JSON-RPC message envelope.
     const auto msg = dec.decode(resp.body);
     const auto* r = std::get_if<rpc::Response>(&msg);
     if (!r) throw RpcFailure(p.name + ": unexpected notification in HTTP response");
@@ -71,15 +80,17 @@ std::string rpc_call(const Config& cfg, const Provider& p, const std::string& bo
     return r->result_raw;
 }
 
+/// @brief Determines whether bytecode exists based on the hex string length ("0x" means empty).
 bool has_code(const std::string& code_hex) {
     // "0x" = no code; anything longer must be 0x + hex.
     return code_hex.size() > 2;
 }
 
-// eth_getCode with failover across getlogs providers. Collects per-provider failures for the final error.
+/// @brief Queries eth_getCode for an address at a specified block with automatic provider failover.
 bool code_at(const Config& cfg, const Address20& addr, const std::string& block, rpc::Decoder& dec,
              std::uint64_t id) {
     std::string failures;
+    // Iterate through configured getLogs provider priority chain until one succeeds.
     for (const auto& p : cfg.getlogs_chain) {
         try {
             const auto raw = rpc_call(cfg, p, rpc::build_get_code(id, addr, block), dec);
@@ -93,12 +104,14 @@ bool code_at(const Config& cfg, const Address20& addr, const std::string& block,
 
 }  // namespace
 
+/// @brief Prints human-readable configuration summary with all secrets and endpoint tokens redacted.
 void print_config_summary(const Config& cfg) {
     std::cout << "shard:    " << cfg.shard.id << " (host " << cfg.shard.host_id << ")\n";
     std::cout << "chain:    " << cfg.chain.name << " id=" << cfg.chain.chain_id << " block_time_ms="
               << cfg.chain.block_time_ms << " start_policy="
               << (cfg.chain.start_policy == core::StartPolicy::Gate ? "gate" : "contract_start") << "\n";
     std::cout << "ws providers:\n";
+    // Redact tokens/credentials from printed provider URLs.
     for (const auto& p : cfg.ws_chain) std::cout << "  " << p.name << "  " << core::env::redact(p.ws_url) << "\n";
     std::cout << "getlogs providers:\n";
     for (const auto& p : cfg.getlogs_chain) {
@@ -118,16 +131,19 @@ void print_config_summary(const Config& cfg) {
     std::cout << "routes: " << cfg.routes.size() << "\n";
 }
 
+/// @brief Performs pre-flight live validation against configured RPC providers.
 int check_config_online(const Config& cfg) {
     rpc::Decoder dec;
     std::uint64_t id = 1;
     int working = 0;
     bool fatal = false;
 
+    // Verify eth_chainId across all declared getLogs providers.
     for (const auto& p : cfg.getlogs_chain) {
         try {
             const auto raw = rpc_call(cfg, p, rpc::build_chain_id(id++), dec);
             const auto got = dec.parse_quantity(raw);
+            // Invariant: Provider chain ID must strictly match configured chain ID to prevent cross-chain corruption.
             if (got != cfg.chain.chain_id) {
                 std::cerr << "FATAL " << p.name << ": eth_chainId=" << got << " but config chain_id="
                           << cfg.chain.chain_id << "\n";
@@ -147,6 +163,7 @@ int check_config_online(const Config& cfg) {
     }
 
     int missing = 0;
+    // Verify that every tracked contract exists (has non-empty bytecode) on the target network.
     for (const auto& c : cfg.contracts) {
         try {
             if (code_at(cfg, c.address, "latest", dec, id++)) {
@@ -163,6 +180,7 @@ int check_config_online(const Config& cfg) {
     return missing == 0 ? kExitOk : kExitFailure;
 }
 
+/// @brief Discovers the exact deployment block of a contract via binary search over eth_getCode.
 std::uint64_t find_deploy_block(const Config& cfg, const Address20& address) {
     rpc::Decoder dec;
     std::uint64_t id = 1;
@@ -171,6 +189,7 @@ std::uint64_t find_deploy_block(const Config& cfg, const Address20& address) {
     {
         std::string failures;
         bool got = false;
+        // Obtain current chain tip block number to establish upper search bound.
         for (const auto& p : cfg.getlogs_chain) {
             try {
                 head = dec.parse_quantity(rpc_call(cfg, p, rpc::build_block_number(id++), dec));
@@ -183,23 +202,27 @@ std::uint64_t find_deploy_block(const Config& cfg, const Address20& address) {
         if (!got) throw std::runtime_error("eth_blockNumber failed on every provider:" + failures);
     }
 
+    // Verify contract has code at head before commencing binary search.
     if (!code_at(cfg, address, core::to_hex_u64(head), dec, id++)) {
         throw std::runtime_error(address.to_hex() + " has no code at head block " + std::to_string(head));
     }
     // Invariant: no code at `lo` (block 0 is assumed codeless for any non-genesis contract), code at `hi`.
     std::uint64_t lo = 0, hi = head;
+    // Edge case: contract existed at genesis block 0.
     if (code_at(cfg, address, core::to_hex_u64(lo), dec, id++)) return 0;
+    // Binary search over block range [lo, hi] in O(log N) queries.
     while (hi - lo > 1) {
         const std::uint64_t mid = lo + (hi - lo) / 2;
         if (code_at(cfg, address, core::to_hex_u64(mid), dec, id++)) {
-            hi = mid;
+            hi = mid;  // Bytecode exists; deployment block is at or before mid.
         } else {
-            lo = mid;
+            lo = mid;  // No bytecode; deployment block is strictly after mid.
         }
     }
     return hi;
 }
 
+/// @brief Runs a live, end-to-end transport probe using real WebSocket and HTTP connections.
 int probe_transport(const Config& cfg, unsigned seconds) {
     namespace net = boost::asio;
     core::log::init("info");
@@ -212,6 +235,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     } st;
 
     provider::PoolHandlers h;
+    // Track streamed block heads and logging provider identity.
     h.on_head = [&st](const rpc::Head& x, const std::string& p) {
         ++st.heads;
         st.last_head = x.number;
@@ -233,6 +257,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     auto pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
     pool->start();
 
+    // Spawn coroutine to stream heads for `seconds` and issue post-stream verification queries.
     net::co_spawn(
         ioc,
         [&]() -> net::awaitable<void> {
@@ -243,6 +268,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
             std::cout << "streamed: " << st.heads << " heads (last " << st.last_head << " via " << st.head_from
                       << "), " << st.logs << " logs\n";
             bool good = st.heads > 0;
+            // Verify historical getLogs query across the 2 blocks preceding the latest streamed head.
             if (st.last_head >= 2) {
                 const auto from = st.last_head - 2, to = st.last_head;
                 const auto filter = cfg.filter();
@@ -257,6 +283,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
                               << o.error << "\n";
                     good = false;
                 }
+                // Verify that both safe and finalized block tags can be resolved.
                 for (const auto tag : {provider::Tag::Safe, provider::Tag::Finalized}) {
                     const auto who = pool->current_getlogs();
                     std::optional<provider::TagSnapshot> s;
@@ -273,6 +300,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
                 std::cout << "getLogs:   skipped (no head received)\n";
             }
             st.ok = good;
+            // Tear down pool resources and shut down Boost.Asio event loop.
             pool->stop();
             ioc.stop();
         },
@@ -281,6 +309,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     return st.ok ? kExitOk : kExitFailure;
 }
 
+/// @brief Command-line interface dispatcher for offline audits and pre-flight probes.
 int run_cli(int argc, char** argv) {
     const auto usage = [] {
         std::cerr << "usage: evm_listener --version\n"
@@ -293,6 +322,7 @@ int run_cli(int argc, char** argv) {
     std::optional<std::string> config_path, find_addr;
     std::optional<unsigned> probe_seconds;
     bool version = false, check = false;
+    // Parse command line arguments.
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--version") {
@@ -317,11 +347,13 @@ int run_cli(int argc, char** argv) {
         }
     }
 
+    // Handle --version flag.
     if (version) {
         if (argc != 2) return usage();
         std::cout << core::version_string() << '\n';
         return kExitOk;
     }
+    // Enforce mutual exclusivity: exactly one action must be requested.
     if (static_cast<int>(check) + static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value()) != 1) {
         return usage();  // need exactly one action
     }
@@ -331,7 +363,9 @@ int run_cli(int argc, char** argv) {
     }
 
     try {
+        // Resolve .env files walking parent directories.
         core::env::load_dotenv();
+        // Load and validate TOML configuration.
         const auto cfg = Config::load_file(*config_path);
         if (check) {
             print_config_summary(cfg);
