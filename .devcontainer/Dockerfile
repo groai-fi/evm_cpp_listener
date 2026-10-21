@@ -36,7 +36,7 @@ RUN git config --system --add safe.directory /workspaces/evm_cpp_listener
 
 # Pre-initialize Conan default profile for the non-root 'vscode' user
 USER vscode
-RUN conan profile detect --force
+RUN conan profile detect --force && mkdir -p /home/vscode/.conan2/p
 USER root
 
 EXPOSE 8080 9464

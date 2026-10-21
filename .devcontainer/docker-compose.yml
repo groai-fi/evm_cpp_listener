@@ -7,6 +7,8 @@ services:
     working_dir: /workspaces/evm_cpp_listener
     volumes:
       - ..:/workspaces/evm_cpp_listener:cached
+      # Conan package store only (not the whole ~/.conan2): keeps built deps across rebuilds while the profile still comes from the image.
+      - conan-cache:/home/vscode/.conan2/p
     # SYS_PTRACE and seccomp=unconfined are required for C++ debuggers (gdb/lldb) inside Docker
     cap_add:
       - SYS_PTRACE
@@ -39,3 +41,4 @@ services:
 
 volumes:
   redis-data:
+  conan-cache:
