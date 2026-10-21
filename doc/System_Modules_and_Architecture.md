@@ -85,7 +85,7 @@ Bypassing or miscalculating reorg depths allows "ghost transactions" to persist 
 Network partitions to Redis, database restarts, or latency spikes in downstream storage will either crash naive listeners or cause unbounded memory inflation (OOM crashes). Furthermore, in high-availability deployments with active-passive instances, two instances must never write concurrently (split-brain).
 
 #### 2. Architectural Mechanics
-- **Embedded Lua Scripting (`kEmitLua`, `kCkptLua`, `kFinalTrimLua`, `kLeaseLua` in `lua_scripts.cpp`)**: In one Redis round-trip, `kEmitLua` checks the per-event dedup key (`GET` + compare last type), appends to the stream (`XADD MINID ~ <minid_ms>`), and only then writes the dedup key (`SET ... EX <ttl_s>`). Writing dedup last means a failed script is retried and re-emitted, never silently lost.
+- **Embedded Lua Scripting (`kEmitLua`, `kCkptLua`, `kFinalTrimLua`, `kLeaseLua` embedded from `src/sink/lua/*.lua` via `lua_sources.hpp`)**: In one Redis round-trip, `kEmitLua` checks the per-event dedup key (`GET` + compare last type), appends to the stream (`XADD MINID ~ <minid_ms>`), and only then writes the dedup key (`SET ... EX <ttl_s>`). Writing dedup last means a failed script is retried and re-emitted, never silently lost.
 - **Dual Connections**: Uses two distinct TCP connections to Redis:
   * Connection A: Carries high-volume write batches (`held_`) and pipeline reads.
   * Connection B: Dedicated exclusively to lease renewal and host heartbeats, ensuring a slow write batch never starves a leader lease renewal.
@@ -98,6 +98,7 @@ A fault in deduplication or spill sequencing causes double processing of swaps, 
 #### 4. Files Involved
 * Header: [`redis_sink.hpp`](../evm_listener/src/sink/redis_sink.hpp) | Implementation: [`redis_sink.cpp`](../evm_listener/src/sink/redis_sink.cpp)
 * Header: [`lua_scripts.hpp`](../evm_listener/src/sink/lua_scripts.hpp) | Implementation: [`lua_scripts.cpp`](../evm_listener/src/sink/lua_scripts.cpp)
+* Scripts: [`lua/`](../evm_listener/src/sink/lua) | Generated Header: `lua_sources.hpp`
 * Header: [`lease.hpp`](../evm_listener/src/sink/lease.hpp) | Implementation: [`lease.cpp`](../evm_listener/src/sink/lease.cpp)
 * Header: [`spill.hpp`](../evm_listener/src/sink/spill.hpp) | Implementation: [`spill.cpp`](../evm_listener/src/sink/spill.cpp)
 * Header: [`script_runner.hpp`](../evm_listener/src/sink/script_runner.hpp) | Implementation: [`script_runner.cpp`](../evm_listener/src/sink/script_runner.cpp)
