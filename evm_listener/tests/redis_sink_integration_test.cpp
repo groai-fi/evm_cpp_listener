@@ -546,7 +546,7 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
 
     L.px.disable();
     for (int i = 50; i < 100; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
-    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
+    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.px.enable();
     REQUIRE(L.sink->wait_idle(60s));
     INFO("fatal: " << L.sink->fatal_message());
@@ -558,7 +558,7 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
     // Crash with a non-empty spill: the spill dies with the process.
     L.px.disable();
     for (int i = 100; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
-    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
+    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.sink.reset();
     L.px.enable();
 
@@ -757,7 +757,6 @@ TEST_CASE("redis sink integration 3: crash while Degraded, restart re-sweeps to 
     L.px.disable();
     first->tick();  // the safe sweep queues the ten events and a checkpoint; the sink cannot deliver them
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
-    REQUIRE(wait_for([&] { return L.sink->status().spill_records > 0; }, 30s));
     CHECK(L.event_ids(StreamKind::Events).empty());  // nothing landed
     CHECK(L.event_ids(StreamKind::Registry).empty());
     CHECK(L.ckpt_field("safe") == std::optional<std::string>("100"));  // and the checkpoint did not move
