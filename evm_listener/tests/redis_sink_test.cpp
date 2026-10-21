@@ -62,6 +62,7 @@ struct FakeServer {
     std::uint64_t kv_writes{0};
     std::map<std::string, GroupFacts> group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
     std::uint64_t group_reads{0};
+    std::vector<std::string> emit_minids;  // ARGV[2] (minid_ms) of every emit that passed the fence
 
     explicit FakeServer(Keys k) : keys(std::move(k)) {}
 
@@ -76,6 +77,7 @@ struct FakeServer {
         switch (c.script) {
             case Script::Emit: {
                 if (fenced(a[6])) return ok("FENCED");
+                emit_minids.push_back(a[1]);
                 const auto it = dedup.find(c.keys[0]);
                 const std::optional<std::string> last = it == dedup.end() ? std::nullopt : std::optional(it->second);
                 if (last && *last == a[2]) return ok("DUP");
@@ -205,6 +207,7 @@ public:
     FakeServer& server;
     bool down{false};
     bool load_fixes_cache{true};
+    bool aux_throws{false};  // set_with_ttl / read_group_facts throw a non-ConnError (e.g. an unreadable reply)
     std::deque<Fault> faults;
     std::vector<std::vector<Script>> pipelines;  // script kinds of every pipeline sent, recorded even when it throws
     int loads{0};
@@ -243,12 +246,14 @@ public:
 
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override {
         if (down) throw ConnError("fake: connection down");
+        if (aux_throws) throw std::runtime_error("fake: NOPERM this user has no permissions");
         server.kv[key] = {value, ttl_s};
         ++server.kv_writes;
     }
 
     GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override {
         if (down) throw ConnError("fake: connection down");
+        if (aux_throws) throw std::runtime_error("fake: XINFO answered a reply we cannot read");
         ++server.group_reads;
         const auto it = server.group_facts.find(stream_key + "|" + group);
         return it == server.group_facts.end() ? GroupFacts{} : it->second;
@@ -289,6 +294,7 @@ struct RigCfg {
     bool lease{true};
     std::uint32_t heartbeat_ms{0};
     std::vector<evml::core::ConsumerGroupCfg> groups{};
+    std::uint64_t wall_ms{1700000000000};
 };
 
 struct Rig {
@@ -333,7 +339,7 @@ struct Rig {
         o.probe_min = milliseconds(0);  // probe on every pump: tests drive time explicitly where it matters
         o.probe_max = milliseconds(0);
         o.steady_now = [this] { return t0 + elapsed; };
-        o.wall_ms = [] { return std::uint64_t{1700000000000}; };
+        o.wall_ms = [wall = cfg.wall_ms] { return wall; };
 
         auto d = std::make_unique<FakeConn>(server);
         auto l = std::make_unique<FakeConn>(server);
@@ -1048,6 +1054,23 @@ TEST_CASE("redis sink: options are validated", "[unit][sink]") {
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.dedup_ttl_s = 0; }), ContainsSubstring("dedup_ttl_s"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.token.clear(); }), ContainsSubstring("token"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.renew_ms = o.lease_ttl_ms; }), ContainsSubstring("renew_ms"));
+    CHECK_THROWS_WITH(make([](RedisSinkOptions& o) {
+                          o.host_id = "hostA";
+                          o.heartbeat_ms = 10000;
+                          o.heartbeat_ttl_s = 0;  // redis++ would set no expiry at all
+                      }),
+                      ContainsSubstring("heartbeat_ttl_s"));
+    CHECK_THROWS_WITH(make([](RedisSinkOptions& o) {
+                          o.host_id = "hostA";
+                          o.heartbeat_ms = 10000;
+                          o.heartbeat_ttl_s = 10;  // equal to the interval: the key would flap
+                      }),
+                      ContainsSubstring("heartbeat_ttl_s"));
+    CHECK_NOTHROW(make([](RedisSinkOptions& o) {
+        o.host_id = "hostA";
+        o.heartbeat_ms = 10000;
+        o.heartbeat_ttl_s = 30;
+    }));
 }
 
 TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token that contradicts [lease] enabled", "[unit][sink]") {
@@ -1146,6 +1169,36 @@ TEST_CASE("redis sink heartbeat: a failed write is counted, not fatal", "[unit][
     r.sink->pump();
     CHECK(r.server.kv_writes == 1);
     CHECK(r.sink->status().heartbeat_failures_total == 1);
+}
+
+TEST_CASE("redis sink heartbeat: an error that is not a connection error is counted, logged and never fails the sink", "[unit][sink]") {
+    Rig r(RigCfg{.heartbeat_ms = 1000});
+    r.sink->set_heartbeat("x");
+    r.lease->aux_throws = true;
+    r.sink->pump();
+    CHECK(r.sink->status().heartbeat_failures_total == 1);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+
+    r.sink->emit(mk(id_of(0)));  // the writer is unaffected
+    REQUIRE(r.settle());
+    CHECK(r.server.count_entries(StreamKind::Events, id_of(0)) == 1);
+}
+
+TEST_CASE("redis sink emit: MINID is the listener wall clock minus retention, and never below 0", "[unit][sink]") {
+    SECTION("normal") {
+        Rig r;  // wall 1700000000000, retention 48 h = 172800000 ms
+        r.sink->emit(mk(id_of(0)));
+        REQUIRE(r.settle());
+        REQUIRE(r.server.emit_minids.size() == 1);
+        CHECK(r.server.emit_minids[0] == "1699827200000");
+    }
+    SECTION("clock younger than the retention window clamps to 0") {
+        Rig r(RigCfg{.wall_ms = 1000});
+        r.sink->emit(mk(id_of(0)));
+        REQUIRE(r.settle());
+        REQUIRE(r.server.emit_minids.size() == 1);
+        CHECK(r.server.emit_minids[0] == "0");
+    }
 }
 
 TEST_CASE("redis sink drain: flushed writes then the lease is released for the standby", "[unit][sink]") {
@@ -1387,6 +1440,7 @@ TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot
     r.server.group_facts[r.keys.events() + "|bot"] = lag_facts("1700000000200-0", 1700000100000);
     r.sink->pump();
     REQUIRE(r.sink->consumer_lag().size() == 1);
+    CHECK(r.sink->consumer_lag()[0].probed_at_ms == 1700000000000);  // the listener wall clock of the probe
 
     r.lease->down = true;
     r.advance(milliseconds(60000));
@@ -1396,7 +1450,22 @@ TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot
     const auto snap = r.sink->consumer_lag();
     REQUIRE(snap.size() == 1);
     CHECK(snap[0].undelivered_age_s == 99);
+    CHECK(snap[0].probed_at_ms == 1700000000000);  // unchanged: the host can see how old the snapshot is
 }
+
+TEST_CASE("redis sink lag probe: an error that is not a connection error is counted and never fails the sink", "[unit][sink]") {
+    Rig r(RigCfg{.groups = {kBot}});
+    r.lease->aux_throws = true;
+    r.sink->pump();
+    CHECK(r.sink->status().consumer_lag_failures_total == 1);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+    CHECK(r.sink->consumer_lag().empty());
+
+    r.sink->emit(mk(id_of(0)));  // the writer is unaffected
+    REQUIRE(r.settle());
+    CHECK(r.server.count_entries(StreamKind::Events, id_of(0)) == 1);
+}
+
 
 TEST_CASE("redis sink options: consumer groups need a positive probe interval; from_config copies them", "[unit][sink]") {
     Keys keys{"shard"};

@@ -30,8 +30,8 @@ std::string address_family(const std::string& host, int port) {
 }
 
 bool is_auth_error(const std::string& msg) {
-    return starts_with(msg, "WRONGPASS") || starts_with(msg, "NOAUTH") || msg.find("invalid password") != std::string::npos ||
-           msg.find("AUTH") != std::string::npos;
+    return starts_with(msg, "WRONGPASS") || starts_with(msg, "NOAUTH") || starts_with(msg, "ERR AUTH") ||
+           starts_with(msg, "ERR Client sent AUTH") || starts_with(msg, "ERR invalid password");
 }
 
 bool is_transient_reply(const std::string& msg) {
@@ -45,7 +45,8 @@ std::optional<std::string> config_get(sw::redis::Redis& redis, const std::string
         if (reply.size() != 2 || reply[0] != name)
             throw StartupFatal("CONFIG GET " + name + " returned an unexpected reply of " + std::to_string(reply.size()) + " elements");
         return reply[1];
-    } catch (const sw::redis::ReplyError&) {
+    } catch (const sw::redis::ReplyError& e) {
+        if (is_transient_reply(e.what())) throw;  // not a denial: the wait loop retries
         return std::nullopt;
     }
 }

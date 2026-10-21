@@ -75,7 +75,7 @@ struct SinkStatus {
     std::uint64_t pending_writes{};       // accepted and neither acked nor discarded (queue + current batch + spill)
     std::uint64_t dup_total{};            // emit.lua answered DUP
     std::uint64_t below_finalized_total{};  // emit.lua refused a tracked emit at or below ckpt.finalized (SinkInvariant)
-    std::uint64_t discarded_total{};      // evml_spill_discarded_records_total: items dropped on Fenced / Failed
+    std::uint64_t discarded_total{};      // evml_spill_discarded_records_total: dropped on Fenced (queue, batch, spill); on Failed only queued items (the held batch and spill stay in pending_writes)
     std::uint64_t renew_failures_total{};
     std::uint64_t heartbeat_failures_total{};
     std::uint64_t consumer_lag_failures_total{};

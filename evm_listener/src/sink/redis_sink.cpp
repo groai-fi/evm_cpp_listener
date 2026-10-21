@@ -176,6 +176,8 @@ RedisSinkOptions validated(RedisSinkOptions o) {
         if (o.renew_ms >= o.lease_ttl_ms) bad("renew_ms must be below lease_ttl_ms");
     }
     if (o.heartbeat_ms > 0 && o.host_id.empty()) bad("host_id must not be empty when heartbeat_ms > 0");
+    if (o.heartbeat_ms > 0 && static_cast<std::uint64_t>(o.heartbeat_ttl_s) * 1000 <= o.heartbeat_ms)
+        bad("heartbeat_ttl_s must outlive heartbeat_ms (0 would never expire, a shorter TTL makes the key flap)");
     if (!o.consumer_groups.empty() && o.consumer_lag_interval_ms == 0)
         bad("consumer_lag_interval_ms must be > 0 when consumer_groups is not empty");
     if (!o.steady_now) o.steady_now = [] { return RedisSinkOptions::Clock::now(); };
@@ -730,13 +732,21 @@ bool RedisSink::service_consumer_lag() {
     try {
         std::vector<ConsumerLag> snapshot;
         snapshot.reserve(opts_.consumer_groups.size());
-        for (const auto& g : opts_.consumer_groups)
+        const std::uint64_t probed_at_ms = opts_.wall_ms();
+        for (const auto& g : opts_.consumer_groups) {
             snapshot.push_back(evaluate_consumer_lag(g, lease_->read_group_facts(keys_.stream(g.stream), g.group)));
+            snapshot.back().probed_at_ms = probed_at_ms;
+        }
         std::lock_guard lk(lag_mu_);
         lag_snapshot_ = std::move(snapshot);
     } catch (const ConnError& e) {
-        ++consumer_lag_failures_total_;  // the previous snapshot stays; its staleness is visible to the host
+        ++consumer_lag_failures_total_;  // the previous snapshot stays; probed_at_ms tells the host how old it is
         core::log::warn("sink", "consumer lag probe failed", {{"error", e.what()}});
+    } catch (const std::exception& e) {
+        // A reply we cannot read (permissions, wrong type, parse error). The probe is read-only and must never stop the
+        // writer, but it is not silent: counted, and logged at ERROR.
+        ++consumer_lag_failures_total_;
+        core::log::error("sink", "consumer lag probe failed, the sink keeps writing", {{"error", e.what()}});
     }
     return true;
 }
@@ -757,6 +767,9 @@ bool RedisSink::service_heartbeat() {
     } catch (const ConnError& e) {
         ++heartbeat_failures_total_;
         core::log::warn("sink", "heartbeat write failed", {{"error", e.what()}});
+    } catch (const std::exception& e) {
+        ++heartbeat_failures_total_;  // not silent, but a heartbeat must never stop the writer
+        core::log::error("sink", "heartbeat write failed, the sink keeps writing", {{"error", e.what()}});
     }
     return true;
 }
