@@ -1,0 +1,11 @@
+.git
+.github
+.devcontainer
+.agent
+.agents
+.claude
+build
+doc
+openspec
+*.md
+.luacheckrc

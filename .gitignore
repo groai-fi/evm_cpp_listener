@@ -55,10 +55,10 @@ Thumbs.db
 *.app
 
 # Build directories
-build/
-Build/
-build-*/
-cmake-build-*/
+/build/
+/Build/
+/build-*/
+/cmake-build-*/
 out/
 bin/
 *.ninja

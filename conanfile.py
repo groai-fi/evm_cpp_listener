@@ -1,8 +1,19 @@
+from pathlib import Path
+
 from conan import ConanFile
 from conan.tools.cmake import cmake_layout
 
 
+def _read_version() -> str:
+    version_file = Path(__file__).parent / "VERSION"
+    if version_file.exists():
+        return version_file.read_text().strip()
+    return "0.1.0"
+
+
 class EvmCppListenerConan(ConanFile):
+    name = "evm_cpp_listener"
+    version = _read_version()
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeDeps", "CMakeToolchain"
 

@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-project(evm_listener VERSION 0.1.0 LANGUAGES CXX)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" EVML_VERSION_RAW)
+    string(STRIP "${EVML_VERSION_RAW}" EVML_VERSION_STRING)
+elseif(DEFINED PROJECT_VERSION)
+    set(EVML_VERSION_STRING "${PROJECT_VERSION}")
+else()
+    set(EVML_VERSION_STRING "0.1.0")
+endif()
+
+project(evm_listener VERSION ${EVML_VERSION_STRING} LANGUAGES CXX)
 
 # Version string: `git describe`, overridable (e.g. Docker/Railway builds without .git) via -DEVML_GIT_DESCRIBE=...
 set(EVML_GIT_DESCRIBE "" CACHE STRING "Override for git describe output")
@@ -12,9 +21,10 @@ if(NOT EVML_GIT_DESCRIBE)
         RESULT_VARIABLE EVML_GIT_RC
         ERROR_VARIABLE EVML_GIT_ERR)
     if(NOT EVML_GIT_RC EQUAL 0 OR NOT EVML_GIT_DESCRIBE_OUT)
-        message(FATAL_ERROR "git describe failed (rc=${EVML_GIT_RC}): ${EVML_GIT_ERR}. Pass -DEVML_GIT_DESCRIBE=<version> explicitly.")
+        set(EVML_GIT_DESCRIBE "v${EVML_VERSION_STRING}")
+    else()
+        set(EVML_GIT_DESCRIBE "${EVML_GIT_DESCRIBE_OUT}")
     endif()
-    set(EVML_GIT_DESCRIBE "${EVML_GIT_DESCRIBE_OUT}")
 endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/core/version.hpp @ONLY)
