@@ -11,10 +11,10 @@
 
 namespace evml::pipeline {
 
-// Layer-1 dedup (plan 3.7, rev 5): bounded LRU map `event_id -> last emitted type`. An entry is emitted only when
-// its type differs from the last one emitted for that event_id, so `log, log` collapses but a log that becomes
-// canonical again after a revert (A->B->A) passes (I6). An id this process has not seen (or has evicted) is
-// always admitted: Redis (Phase 4 emit.lua, the same rule) is the authority across restarts and hosts.
+// Layer-1 dedup (plan 3.7, rev 5): bounded LRU map `event_id -> last emitted type`.
+// An entry is emitted only when its type differs from the last one emitted for that event_id, so `log, log`
+// collapses but a log that becomes canonical again after a revert (A->B->A) passes (I6).
+// Memory footprint is bounded by `capacity`; evicts oldest unseen entries via LRU policy.
 class LastTypeMap {
 public:
     // Throws std::invalid_argument for capacity == 0.
@@ -22,17 +22,20 @@ public:
         if (capacity == 0) throw std::invalid_argument("LastTypeMap: capacity must be > 0");
     }
 
-    // true = emit (and `type` is recorded as the last one); false = same type as the last emitted: duplicate.
+    // Evaluates whether an event emission should proceed based on its type relative to the prior emission.
+    // Returns true to admit emission; returns false if identical to the previous type (duplicate suppression).
+    // Watch out: Transitions between log and revert are admitted to allow reorg retractions and re-releases (Invariant I6).
     bool admit(const std::string& event_id, EventType type) {
         const auto it = index_.find(event_id);
         if (it != index_.end()) {
-            order_.splice(order_.begin(), order_, it->second);
-            if (it->second->second == type) return false;
-            it->second->second = type;
+            order_.splice(order_.begin(), order_, it->second); // Move to head of LRU list
+            if (it->second->second == type) return false;      // Duplicate detected: same type
+            it->second->second = type;                         // State transition (e.g. Log -> Revert)
             return true;
         }
         order_.emplace_front(event_id, type);
         index_.emplace(event_id, order_.begin());
+        // Evict oldest entry if capacity limit reached
         if (order_.size() > capacity_) {
             index_.erase(order_.back().first);
             order_.pop_back();

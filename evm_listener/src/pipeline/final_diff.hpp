@@ -15,10 +15,9 @@ struct FinalDiff {
     std::vector<ReleasedEntry> vanished;    // released only: no longer canonical -> revert (SafeReorg)
 };
 
-// Final-sweep diff for safe-class logs (plan 3.5): `released` are the members tracked for the swept range,
-// `sweep_logs` the safe-class logs the finalized sweep returned for the same range. Identity is the event_id
-// (chain:blockHash:logIndex), so a log that moved to another block hash shows up as vanished + late.
-// `late` keeps the sweep order; `vanished` is ordered by (block, event_id).
+// Reconciles previously released safe logs against canonical finalized sweep logs (plan 3.5).
+// Enforces Invariant I6 (Revert Fidelity): identifies vanished events requiring explicit retraction.
+// Watch out: An event whose blockHash changed across a reorg appears as both vanished and late.
 FinalDiff diff_released(std::uint64_t chain_id, const std::vector<ReleasedEntry>& released,
                         const std::vector<rpc::Log>& sweep_logs);
 

@@ -29,24 +29,26 @@ struct BlockInfo {
     std::uint64_t timestamp{};
 };
 
-// What the sweeps need from the provider layer. The production adapter wraps ProviderPool::call (Phase 5 wiring);
-// tests use a scripted fake. All calls are made from the io thread.
+// Abstract provider interface decoupling pipeline sweeps from JSON-RPC transport and failover logic.
+// All invocations execute sequentially within the Asio io thread.
 class LogSource {
 public:
     virtual ~LogSource() = default;
 
-    // eth_getLogs for the inclusive range with the given filter, over the getLogs provider chain.
+    // Queries logs across the inclusive block range with configured filter over the provider failover chain.
+    // Watch out: Returns rpc::FailKind::RangeTooLarge if provider query limits are exceeded.
     virtual boost::asio::awaitable<LogResult> get_logs(BlockRange range, const core::LogFilter& filter) = 0;
 
-    // Canonical hash and timestamp of block `number` (nullopt: could not be read, counts as a retry).
+    // Fetches canonical header hash and timestamp for block `number` to verify log canonicality.
+    // Watch out: Returns nullopt on read timeout or transport drop; treated as transient retry.
     virtual boost::asio::awaitable<std::optional<BlockInfo>> block(std::uint64_t number) = 0;
 
-    // The provider that the next get_logs will start on (sizes the first page); nullopt when none is usable.
+    // Returns active getLogs provider name; used to look up provider-specific AIMD pager bounds.
+    // Watch out: Returns nullopt when all providers in the chain are in cooldown or down.
     virtual std::optional<std::string> current_provider() const = 0;
 
-    // `provider` answered with data that failed validation or the canonical-hash check (rev 5, G2). The adapter
-    // counts it as a provider failure (provider_inconsistency_total{p}) so the next get_logs prefers another provider.
-    // `reason` carries no secrets.
+    // Reports that `provider` returned data failing validation or blockHash checks (rev 5, G2).
+    // Penalizes provider health score and steers subsequent queries to failover fallback.
     virtual void report_bad(const std::string& provider, const std::string& reason) = 0;
 };
 

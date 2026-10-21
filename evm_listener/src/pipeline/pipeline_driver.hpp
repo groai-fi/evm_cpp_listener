@@ -72,17 +72,29 @@ public:
     PipelineDriver(const core::Config& cfg, Sweeper& sweeper, Sink& sink, LogSource& source,
                    std::function<std::uint64_t()> now_ms, DriverOptions opt = {});
 
-    // Latest gates of the current getLogs provider (nullopt until observed).
+    // Updates latest gates reported by active RPC provider (nullopt until observed).
+    // Watch out: g_s_ (safe gate) advances independently of g_f_ (finalized gate).
     void set_gates(std::optional<std::uint64_t> g_s, std::optional<std::uint64_t> g_f);
-    // SafeRegression / SafeHashMismatch / a fork walk with crosses_safe: re-verify (C_f, C_s] on the next tick.
+
+    // Signals a chain reorg affecting safe-tier blocks; schedules reverification on the next tick.
+    // Watch out: safe-class logs emitted in (C_f, C_s] that vanished in the fork will be retracted as reverts.
     void on_safe_reorg_signal(std::string reason);
-    // FinalizedAnomaly: stop releasing; status() carries the reason (CRITICAL alert by the host).
+
+    // Freezes pipeline permanently when finalized blocks regress or mismatch hashes (FinalizedAnomaly).
+    // Watch out: Permanently stops event release until operator intervention to prevent corrupted state.
     void on_gate_frozen(std::string reason);
-    // SIGTERM: stop releasing; the next tick returns done=true.
+
+    // Requests graceful shutdown (SIGTERM/SIGINT); finishes inflight work and exits next tick with done=true.
+    // Watch out: Does not immediately kill sessions; host must flush sink before terminating.
     void request_drain() { drain_ = true; }
 
+    // Core state-machine step: executes one unit of work (recover, reverify, safe sweep, or final sweep).
+    // Returns TickResult indicating required backoff wait duration and whether pipeline is terminated.
+    // Watch out: Must be invoked sequentially from a single Asio strand/executor (single-threaded driver).
     boost::asio::awaitable<TickResult> tick();
 
+    // Returns point-in-time snapshot of pipeline health, cursors, stalls, and alert metrics.
+    // Watch out: Thread-safe read only if tick() is quiescent or invoked within the same strand.
     DriverStatus status() const;
 
 private:
@@ -92,13 +104,29 @@ private:
         std::uint32_t missed{0};
     };
 
+    // Restores checkpoint state from Redis on startup; validates contract coverage against manifest.
+    // Watch out: Fails immediately if checkpoint is partially populated or contract history is uncovered.
     boost::asio::awaitable<TickResult> recover();
+
+    // Evaluates forward progress against watchdog timeout; reports bad provider if stalled behind ceiling.
+    // Watch out: Multiple missed deadlines trigger pipeline stall alerts in status().
     void update_progress(Progress& p, const char* cls, std::uint64_t cursor, std::optional<std::uint64_t> ceiling,
                          std::uint64_t now);
+
+    // Maps Sweeper StepStatus to appropriate tick backoff sleep duration and stall tracking.
     TickResult after_step(StepStatus status, const std::string& detail);
+
+    // Recalculates CatchingUp vs Live state based on cursor distance to provider gates.
     void refresh_state();
+
+    // Returns safe ceiling: upper bound for safe sweep (provider safe gate).
     std::optional<std::uint64_t> safe_ceiling() const { return g_s_; }
+
+    // Returns final ceiling: clamped to min(g_f, c_s) to uphold Invariant I2 (C_f <= C_s).
+    // Watch out: Finalized sweep can NEVER advance beyond the current safe cursor C_s.
     std::optional<std::uint64_t> final_ceiling() const;
+
+    // Transitions pipeline state to Failed with a fatal diagnostic reason string.
     TickResult fail(std::string why);
 
     const core::Config& cfg_;

@@ -31,11 +31,12 @@ public:
     std::uint32_t max() const { return max_; }
     std::uint32_t min() const { return min_; }
 
+    // Advances success streak; doubles page size after `grow_after` consecutive successes (clamped to max).
     void on_success();
 
     enum class Shrink { Shrunk, AtMin };
-    // AtMin: the request is still too large at the minimum: the caller must split by address, and stall (I5)
-    // if that fails too.
+    // Multiplicative decrease: shrinks range to suggested limit or halves current range (clamped to min).
+    // Watch out: Returns Shrink::AtMin if range is already at minimum; caller must split query by address.
     Shrink on_range_too_large(std::optional<std::uint32_t> suggested);
 
 private:

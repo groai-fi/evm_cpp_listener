@@ -40,11 +40,12 @@ struct Event {
     std::string listener_version;
 };
 
-// "{chain_id}:{blockHash}:{logIndex}": unique per canonical log; a reorg changes the blockHash and so the id.
+// Constructs unique deterministic event identifier "{chain_id}:{blockHash}:{logIndex}".
+// Watch out: A chain reorg produces a different blockHash, yielding a distinct event_id for the new fork.
 std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash, std::uint64_t log_index);
 
-// Dedup key "dedup:{event_id}" (rev 5, N1). Its Redis value is the last emitted type (log|revert), so a revert is
-// never swallowed by its log and a log that is canonical again after a revert is emitted again.
+// Derives Redis deduplication key "dedup:{event_id}" (rev 5, N1).
+// Watch out: Value stores the last emitted EventType (log|revert) to permit log -> revert -> log transitions.
 std::string dedup_key(const Event& e);
 
 // Process-level constants of every event this instance emits.
@@ -54,16 +55,15 @@ struct EventContext {
     std::string listener_version;
 };
 
-// Builds the Event for `log` from the config route table. Throws std::invalid_argument when the log has no topic0
-// or (address, topic0) is not a tracked pair (callers validate responses first, so this is a contract violation).
+// Enriches raw rpc::Log into a fully formed canonical Event with routing and signature metadata.
+// Watch out: Throws std::invalid_argument if topic0 is missing or route is untracked (contract violation).
 Event make_event(const rpc::Log& log, const core::Config& cfg, const EventContext& ctx, EventType type,
                  std::uint64_t block_timestamp, std::string first_source, std::uint64_t observed_ms,
                  std::uint64_t emitted_ms);
 
 using Field = std::pair<std::string, std::string>;
-// Flat stream fields in schema order: v, type, finality, event_id, chain_id, contract, address, event, signature,
-// block_number, block_hash, block_timestamp, tx_hash, tx_index, log_index, topics (JSON array), data, first_source,
-// observed_ms, emitted_ms, host, shard, listener_version.
+// Serializes Event struct into Redis XADD field-value pairs according to schema v=1.
+// Watch out: Topics are formatted as a JSON array string of 0x-prefixed 32-byte hex hashes.
 std::vector<Field> to_fields(const Event& e);
 
 }  // namespace evml::pipeline

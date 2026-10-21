@@ -47,31 +47,42 @@ struct Checkpoint {
 // Reads return nullopt when the sink cannot answer (rev 6, C/A): it is degraded or replaying, or the connection
 // failed. A read never returns a partial or stale answer: a released set that misses queued emissions would make the
 // final-sweep diff skip a vanished log, so the caller must pause and ask again later.
+// Abstract interface isolating pipeline state machine from Redis transport, Lua execution, and disk spill WAL.
+// Concurrency model: writes enqueue asynchronously and never block the Asio event loop; reads are awaitable.
+// Invariants enforced: Invariant I3 (Monotonic Checkpoints), Invariant I4 (Atomic Dedup), Invariant I6 (Revert Fidelity).
 class Sink {
 public:
     virtual ~Sink() = default;
 
-    // Backpressure (plan 4.6): when true the pipeline must not release or advance a checkpoint.
+    // Backpressure probe (plan 4.6): returns true if queue or spill buffer is full.
+    // Watch out: Pipeline must immediately pause sweeps when saturated() returns true.
     virtual bool saturated() const = 0;
 
-    // False while a read would resolve to nullopt (sink degraded, replaying, fenced or failed). Lets the final sweep
-    // and reverify skip the getLogs fetch whose result they could not use, instead of paying one RPC per pause poll
-    // for the whole outage. A true answer is not a promise: the sink can degrade before the read is served.
+    // Read availability probe: returns false when sink is disconnected, degraded, or replaying spill WAL.
+    // Watch out: Final sweep and reverification should pause rather than burn RPC calls when readable() is false.
     virtual bool readable() const = 0;
 
+    // Enqueues an event emission to the stream; writes dedup key atomically via Lua.
     virtual void emit(Emission e) = 0;
+
+    // Enqueues a checkpoint advance for safe or finalized cursor (applied strictly after preceding emits).
     virtual void checkpoint(CheckpointKind kind, std::uint64_t block) = 0;
-    // First run only (rev 6, E): writes safe = finalized = c0 and the contracts manifest in one atomic step, so a crash
-    // can never leave a partial checkpoint. A no-op if a checkpoint already exists (plan 4.2 ckpt.lua init).
+
+    // Atomically initializes safe, finalized, and contracts checkpoint on a fresh deployment (rev 6, E).
+    // Watch out: Executed via Lua to ensure zero possibility of partial checkpoints on crash.
     virtual void init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) = 0;
-    // Stores the contracts manifest (ckpt.contracts). Enqueued like a checkpoint: applied after earlier emissions.
+
+    // Enqueues updated contract manifest (ckpt.contracts); serialized after inflight emissions.
     virtual void set_contracts(std::vector<std::string> manifest) = 0;
-    // ZREMRANGEBYSCORE released -inf block (plan 4.2 final_trim.lua).
+
+    // Trims released tracking ZSET entries with score <= block (plan 4.2 final_trim.lua).
     virtual void final_trim(std::uint64_t block) = 0;
 
-    // nullopt: unavailable right now (see above). A Checkpoint with every field empty is a fresh store.
+    // Asynchronously fetches checkpoint hash from Redis (nullopt if Redis is unreachable).
     virtual boost::asio::awaitable<std::optional<Checkpoint>> load_checkpoint() = 0;
-    // Released members with score in [from, to], including those released before a restart. nullopt: unavailable.
+
+    // Fetches released safe-class entries with block numbers in [from, to] for final sweep diffing.
+    // Watch out: Returns nullopt if sink is degraded or replaying; caller must wait and retry.
     virtual boost::asio::awaitable<std::optional<std::vector<ReleasedEntry>>> released_range(std::uint64_t from,
                                                                                           std::uint64_t to) = 0;
 };

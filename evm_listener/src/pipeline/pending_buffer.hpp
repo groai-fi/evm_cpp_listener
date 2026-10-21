@@ -25,23 +25,26 @@ struct CrossCheck {
     std::size_t ws_extra{};   // staged by WS only: orphaned or not yet indexed (ws_extra_logs_total)
 };
 
-// WS staging, cross-check only (plan 3.4). getLogs stays the single source of truth for release; nothing here is
-// ever emitted. Buckets are keyed by block number, then blockHash (a reorg can stage two hashes for one height),
-// then logIndex. Pure and single-threaded.
+// In-memory buffer staging real-time WebSocket logs strictly for cross-checking against getLogs sweeps (plan 3.4).
+// getLogs remains the single source of truth for release; staged logs are never emitted directly.
+// Keyed hierarchically: block_number -> block_hash -> log_index.
+// Pure and single-threaded.
 class PendingBuffer {
 public:
-    // `max_logs` caps the number of staged logs; the oldest (lowest-numbered) buckets are evicted beyond it.
+    // `max_logs` caps the number of staged logs; oldest buckets are evicted when capacity is exceeded.
     explicit PendingBuffer(std::size_t max_logs);
 
-    // Idempotent by (blockHash, logIndex). `removed:true` erases the staged entry instead.
+    // Stages incoming WS log; idempotent by (blockHash, logIndex).
+    // Watch out: If log.removed is true, erases existing staged entry instead of inserting.
     StageResult stage(const rpc::Log& log, const std::string& source);
 
-    // Compare the staged logs of blocks [from, to] with a sweep result and drop what was compared. WS-side logs
-    // for which `in_scope` is false (e.g. a class the sweep did not cover) are neither compared nor dropped.
+    // Compares staged logs across [from, to] against getLogs sweep result; drops reconciled entries.
+    // Watch out: Logs where in_scope returns false (e.g. unpolled finality classes) are preserved.
     CrossCheck reconcile(std::uint64_t from, std::uint64_t to, const std::vector<rpc::Log>& sweep,
                          const std::function<bool(const rpc::Log&)>& in_scope);
 
-    // Unsafe-reorg purge: drop every bucket at or above `number` (the fork point + 1). Returns logs dropped.
+    // Purges all staged buckets at or above `number` (e.g. on unsafe chain reorgs).
+    // Watch out: Call immediately on head fork to prevent stale logs from corrupting cross-check telemetry.
     std::size_t purge_from(std::uint64_t number);
 
     std::size_t size() const { return total_; }

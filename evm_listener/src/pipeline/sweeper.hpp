@@ -73,31 +73,34 @@ struct SweeperOptions {
 // The two sweeps (plan 3.5) over one LogSource and one Sink. Single-threaded: call from one executor, and do not
 // run two steps concurrently (the sweeps are serialised). getLogs is the source of truth for release; a step
 // either completes (emit..., checkpoint, cursor moves) or leaves the cursor untouched (I5).
+// Enforces Invariant I1 (contiguous block coverage) and Invariant I2 (C_f <= C_s).
 class Sweeper {
 public:
     Sweeper(const core::Config& cfg, EventContext ctx, LogSource& source, Sink& sink,
             std::function<std::uint64_t()> now_ms, SweeperOptions opt = {});
 
-    // Cursor = last block already swept (inclusive). Set from the loaded checkpoint (or start_block - 1) before the
-    // first step. Throws std::invalid_argument if c_f > c_s (I2).
+    // Sets starting cursors from persistent checkpoint; inclusive upper bound of already swept blocks.
+    // Watch out: Throws std::invalid_argument if C_f > C_s to strictly uphold Invariant I2.
     void set_cursors(std::uint64_t c_s, std::uint64_t c_f);
     std::uint64_t c_s() const { return c_s_; }
     std::uint64_t c_f() const { return c_f_; }
 
-    // Safe-reorg response (plan 3.6 step 4): C_s = min(C_s, fork); C_f follows to keep C_f <= C_s.
+    // Safe-reorg rewind: pulls C_s back to fork_point; clamps C_f to keep C_f <= C_s (Invariant I2).
+    // Watch out: Only safe cursor rewinds in memory; persisted checkpoint advances monotonically (Invariant I3).
     void rewind_safe(std::uint64_t fork_point);
 
-    // One page of safe-class logs in (C_s, g_s]: emitted with finality=safe and tracked in `released`.
+    // Advances safe sweep by one AIMD page in (C_s, g_s]; emits safe-class events and adds to released ZSET.
+    // Watch out: Returns StepStatus::Paused if sink is saturated or degraded.
     boost::asio::awaitable<StepResult> safe_step(std::uint64_t g_s);
 
-    // One page of ALL logs in (C_f, min(g_f, C_s)]: finalized-class emitted, safe-class diffed against `released`.
+    // Advances finalized sweep by one page in (C_f, min(g_f, C_s)]; diffs against released ZSET.
+    // Emits finalized-class events, retracts vanished safe logs via reverts, and trims released ZSET.
+    // Watch out: Requires sink.readable() to avoid diffing against incomplete released set.
     boost::asio::awaitable<StepResult> final_step(std::uint64_t g_f);
 
-    // Immediate re-check of the released window (C_f, C_s] (plan 3.5 Re-verify, rev 5 G3): run it on a safe-reorg
-    // signal instead of waiting for the final sweep. Safe-class logs of the whole window are fetched and diffed
-    // against `released`: vanished => revert (full original fields); new => emitted at finality=safe and tracked;
-    // matched => nothing. On completion, if anything differed, C_s = min(C_s, fork point) (C_f never moves) and the
-    // result has reorg=true. Idempotent: after a Retry/Stalled/Paused, call again; the fork point found so far is kept.
+    // Immediate re-check of (C_f, C_s] on safe reorg signal; reconciles canonical fork against released set.
+    // Vanished safe logs emit reverts with full original fields; new logs emit as safe-class.
+    // Watch out: Idempotent across transient provider retries; preserves lowest pending fork point.
     boost::asio::awaitable<ReverifyResult> reverify_released();
 
     const SweepStats& stats() const { return stats_; }

@@ -36,14 +36,16 @@ Stored parse_entry(const std::string& e) {
 }
 }  // namespace
 
+// Builds lexicographically sorted list of "address:start_block:class" strings.
 std::vector<std::string> contract_manifest(const core::Config& cfg) {
     std::vector<std::string> out;
     out.reserve(cfg.contracts.size());
     for (const auto& c : cfg.contracts) out.push_back(entry_of(c));
-    std::sort(out.begin(), out.end());
+    std::sort(out.begin(), out.end()); // Deterministic sorting ensures exact equality comparisons in Redis
     return out;
 }
 
+// Scans stored Redis manifest to ensure every contract with start_block <= C_s was covered in prior runs.
 std::vector<std::string> uncovered_contracts(const core::Config& cfg, const std::vector<std::string>& stored,
                                              std::uint64_t c_s) {
     std::map<std::string, Stored> by_address;
@@ -54,19 +56,23 @@ std::vector<std::string> uncovered_contracts(const core::Config& cfg, const std:
 
     std::vector<std::string> out;
     for (const auto& c : cfg.contracts) {
+        // Contracts starting above C_s or at 'gate' will naturally be reached by live sweeps; skip check
         if (!c.start_block || *c.start_block > c_s) continue;  // the sweeps reach it on their own
         const auto it = by_address.find(c.address.to_hex());
+        // Verify historical presence: must exist in stored manifest with start_block <= current config start
         const bool covered = it != by_address.end() && it->second.start && *it->second.start <= *c.start_block;
-        if (!covered) out.push_back(c.name);
+        if (!covered) out.push_back(c.name); // Missing coverage below C_s
     }
     return out;
 }
 
+// Determines the initial sweep start cursor; returns lowest start_block - 1 or gate G_s.
 std::uint64_t initial_cursor(const core::Config& cfg, std::uint64_t g_s) {
     if (cfg.chain.start_policy == core::StartPolicy::Gate) return g_s;
     std::uint64_t cursor = g_s;
     for (const auto& c : cfg.contracts) {
         if (!c.start_block) continue;
+        // Invariant I1: sweep begins at cursor + 1, so cursor must be start_block - 1
         cursor = std::min<std::uint64_t>(cursor, *c.start_block > 0 ? *c.start_block - 1 : 0);
     }
     return cursor;
