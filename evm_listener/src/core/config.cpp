@@ -16,6 +16,7 @@
 
 namespace evml::core {
 
+/// @brief Converts Finality enum to lowercase string.
 const char* to_string(Finality f) {
     switch (f) {
         case Finality::Safe: return "safe";
@@ -25,24 +26,28 @@ const char* to_string(Finality f) {
     return "?";
 }
 
+/// @brief Converts StreamKind enum to lowercase string.
 const char* to_string(StreamKind s) { return s == StreamKind::Events ? "events" : "registry"; }
 
 namespace {
 
-// Typed, strict accessor over one TOML table. Rejects unknown keys (a typo must not silently become a default).
+/// @brief Strict TOML table parser rejecting unknown keys to catch typos and configuration drift.
 class Section {
 public:
+    /// @brief Validates that all keys present in table `t` belong to `allowed` set.
     Section(const toml::table& t, const std::string& origin, std::string path,
             std::initializer_list<std::string_view> allowed)
         : t_(t), origin_(origin), path_(std::move(path)) {
         for (auto&& [k, v] : t_) {
             const std::string_view key = k.str();
+            // Fail fast on any unrecognised configuration key
             if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
                 fail(std::string(key), "unknown key");
             }
         }
     }
 
+    /// @brief Throws formatted ConfigError identifying origin file and TOML path.
     [[noreturn]] void fail(const std::string& key, const std::string& what) const {
         throw ConfigError(origin_ + ": " + path_ + (key.empty() ? "" : "." + key) + ": " + what);
     }
@@ -50,6 +55,7 @@ public:
     bool has(std::string_view k) const { return t_.contains(k); }
     const toml::node* node(std::string_view k) const { return t_.get(k); }
 
+    /// @brief Reads required key of type T, failing if missing or wrong type.
     template <class T>
     T req(std::string_view k, const char* type_name) const {
         const toml::node* n = t_.get(k);
@@ -58,6 +64,7 @@ public:
         if (!v) fail(std::string(k), std::string("expected ") + type_name);
         return *v;
     }
+    /// @brief Reads optional key of type T with fallback default.
     template <class T>
     T opt(std::string_view k, T def, const char* type_name) const {
         return has(k) ? req<T>(k, type_name) : def;
@@ -76,6 +83,7 @@ public:
         return has(k) ? uint<U>(k, min) : def;
     }
 
+    /// @brief Parses required array of strings.
     std::vector<std::string> strings(std::string_view k) const {
         const toml::node* n = t_.get(k);
         if (!n) fail(std::string(k), "missing required key");
@@ -91,6 +99,7 @@ public:
     }
 
 private:
+    /// @brief Validates non-negative integer bounds and minimum floor.
     template <class U>
     U check_uint(std::string_view k, std::int64_t v, std::uint64_t min) const {
         if (v < 0 || static_cast<std::uint64_t>(v) < min || static_cast<std::uint64_t>(v) > std::numeric_limits<U>::max()) {
@@ -104,6 +113,7 @@ private:
     std::string path_;
 };
 
+/// @brief Looks up a required sub-table in TOML root.
 const toml::table& table_of(const toml::table& root, const std::string& origin, std::string_view key) {
     const toml::node* n = root.get(key);
     if (!n) throw ConfigError(origin + ": missing table [" + std::string(key) + "]");
@@ -112,6 +122,7 @@ const toml::table& table_of(const toml::table& root, const std::string& origin, 
     return *t;
 }
 
+/// @brief Looks up an array of tables in TOML root (e.g. [[contracts]]).
 std::vector<const toml::table*> array_tables_of(const toml::table& root, const std::string& origin,
                                                  std::string_view key) {
     const toml::node* n = root.get(key);
@@ -127,6 +138,7 @@ std::vector<const toml::table*> array_tables_of(const toml::table& root, const s
     return out;
 }
 
+/// @brief Parses finality classification string into Finality enum.
 Finality parse_finality(const Section& s, std::string_view key, const std::string& value) {
     if (value == "safe") return Finality::Safe;
     if (value == "finalized") return Finality::Finalized;
@@ -136,6 +148,7 @@ Finality parse_finality(const Section& s, std::string_view key, const std::strin
 
 bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
 
+/// @brief Intermediate provider declaration from TOML before resolving credentials from environment.
 struct Declared {
     std::string name;
     std::string ws_env;
@@ -144,7 +157,7 @@ struct Declared {
     std::uint32_t max_getlogs_range{};
 };
 
-// Public, credential-free literal endpoints only. Anything keyed must go through *_env.
+/// @brief Enforces zero hardcoded secrets policy: literal URLs must not contain query parameters, userinfo, or paths.
 void check_credential_free(const Section& s, const std::string& url) {
     const auto scheme_end = url.find("://");
     const auto path_start = scheme_end == std::string::npos ? std::string::npos : url.find_first_of("/?#", scheme_end + 3);
@@ -156,27 +169,32 @@ void check_credential_free(const Section& s, const std::string& url) {
     }
 }
 
+/// @brief Extracts event name prefix from full canonical signature (e.g. "Transfer(address,...)" -> "Transfer").
 std::string event_name(const std::string& sig) { return sig.substr(0, sig.find('(')); }
 
 }  // namespace
 
+/// @brief Queries fast routing map for an event tuple (contract_address, topic0).
 const EventRoute* Config::route(const Address20& address, const Hash32& topic0) const {
     const auto it = routes.find(RouteKey{address, topic0});
     return it == routes.end() ? nullptr : &it->second;
 }
 
+/// @brief Builds consolidated LogFilter for all monitored contracts and deduplicated topic0 hashes.
 LogFilter Config::filter() const {
     LogFilter f;
     std::set<std::string> seen;
     for (const auto& c : contracts) {
         f.addresses.push_back(c.address);
         for (const auto& t : c.topics) {
+            // Deduplicate topic0 hashes across contracts sharing the same standard events (e.g. ERC-20 Transfer)
             if (seen.insert(t.to_hex()).second) f.topic0s.push_back(t);
         }
     }
     return f;
 }
 
+/// @brief Builds LogFilter filtered to contracts belonging to a specific finality class.
 LogFilter Config::filter(Finality only) const {
     LogFilter f;
     std::set<std::string> seen;
@@ -190,10 +208,12 @@ LogFilter Config::filter(Finality only) const {
     return f;
 }
 
+/// @brief Parses TOML text using standard process environment resolver.
 Config Config::parse(std::string_view toml_text, const std::string& origin) {
     return parse(toml_text, origin, [](const std::string& k) { return env::get(k); });
 }
 
+/// @brief Loads file from disk and parses configuration.
 Config Config::load_file(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw ConfigError("cannot read config file: " + path.string());
@@ -202,14 +222,23 @@ Config Config::load_file(const std::filesystem::path& path) {
     return parse(ss.str(), path.string());
 }
 
+/// @brief Parses TOML text, resolves providers, and validates cross-section invariants.
+/// @param toml_text Raw UTF-8 TOML configuration document.
+/// @param origin Path or identifier of the config source for descriptive errors.
+/// @param env_lookup Dynamic environment resolver functor (defaults to env::get).
+/// @return Validated, fully-resolved Config object.
+/// @throws ConfigError On TOML syntax error, unknown keys, missing required fields, or invariant violations.
 Config Config::parse(std::string_view toml_text, const std::string& origin, const EnvLookup& env_lookup) {
     toml::table root;
     try {
+        // Parse raw document into tomlplusplus AST table.
         root = toml::parse(toml_text, origin);
     } catch (const toml::parse_error& e) {
+        // Format syntax error with 1-based source coordinate for operator diagnostics.
         throw ConfigError(origin + ": TOML syntax error: " + std::string(e.description()) + " (line " +
                           std::to_string(e.source().begin.line) + ", col " + std::to_string(e.source().begin.column) + ")");
     }
+    // Reject unexpected top-level sections to catch typos immediately.
     const Section top(root, origin, "<root>",
                       {"shard", "chain", "providers", "redundancy", "lease", "contracts", "backfill", "watchdog", "sink", "ops"});
     (void)top;
@@ -221,13 +250,16 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         const Section s(table_of(root, origin, "shard"), origin, "[shard]", {"id", "host_id"});
         cfg.shard.id = s.str("id");
         const auto& id = cfg.shard.id;
+        // Restrict shard ID characters because it forms the Redis cluster hash-tag `{shard}`.
         if (id.empty() || !std::all_of(id.begin(), id.end(), [](unsigned char c) {
                 return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
             })) {
             s.fail("id", "must be non-empty [a-z0-9_]+ (used in the Redis hash tag)");
         }
         cfg.shard.host_id = s.opt_str("host_id", "");
+        // Fall back to EVML_HOST_ID environment variable if not specified in TOML.
         if (cfg.shard.host_id.empty()) cfg.shard.host_id = env_lookup("EVML_HOST_ID");
+        // Fall back to OS hostname if neither TOML nor environment provided host_id.
         if (cfg.shard.host_id.empty()) {
             char buf[256] = {};
             if (gethostname(buf, sizeof(buf) - 1) != 0 || buf[0] == '\0') {
@@ -248,9 +280,11 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         c.block_time_ms = s.uint<std::uint32_t>("block_time_ms", 1);
         c.default_finality = parse_finality(s, "default_finality", s.str("default_finality"));
         c.depth = s.opt_uint<std::uint32_t>("depth", 0);
+        // Confirmation depth must be positive when depth-based finality is chosen.
         if (c.default_finality == Finality::Depth && c.depth == 0) s.fail("depth", "finality=depth requires depth > 0");
         c.hash_ring_size = s.uint<std::uint32_t>("hash_ring_size", 1);
         const std::string policy = s.str("start_policy");
+        // Start policy dictates whether historical sweeping starts at contract deploy blocks or wait for gate sync.
         if (policy == "contract_start") c.start_policy = StartPolicy::ContractStart;
         else if (policy == "gate") c.start_policy = StartPolicy::Gate;
         else s.fail("start_policy", "must be contract_start|gate, got \"" + policy + "\"");
@@ -268,12 +302,16 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                             {"name", "ws_env", "http_env", "http_url", "max_getlogs_range"});
             Declared d;
             d.name = s.str("name");
+            // Reject duplicate provider names to ensure unambiguous priority ordering.
             if (!names.insert(d.name).second) s.fail("name", "duplicate provider \"" + d.name + "\"");
             d.ws_env = s.opt_str("ws_env", "");
             d.http_env = s.opt_str("http_env", "");
             d.http_literal = s.opt_str("http_url", "");
+            // Mutual exclusivity: forbid specifying both an env reference and a literal URL.
             if (!d.http_env.empty() && !d.http_literal.empty()) s.fail("http_url", "set either http_env or http_url, not both");
+            // Enforce zero-tolerance secret policy on literal configuration endpoints.
             if (!d.http_literal.empty()) check_credential_free(s, d.http_literal);
+            // Every provider must declare at least one endpoint channel.
             if (d.ws_env.empty() && d.http_env.empty() && d.http_literal.empty()) {
                 s.fail("name", "provider \"" + d.name + "\" has no ws_env/http_env/http_url");
             }
@@ -289,6 +327,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                          "quota_cooldown_s"});
         auto& r = cfg.redundancy;
         r.mode = s.str("mode");
+        // Supported redundancy modes: sequential failover or simultaneous hedged dispatch.
         if (r.mode != "failover" && r.mode != "hedged") s.fail("mode", "must be failover|hedged, got \"" + r.mode + "\"");
         r.ws_order = s.strings("ws_order");
         r.getlogs_order = s.strings("getlogs_order");
@@ -297,17 +336,20 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         r.prefer_primary_after_s = s.uint<std::uint32_t>("prefer_primary_after_s", 0);
         r.quota_cooldown_s = s.uint<std::uint32_t>("quota_cooldown_s", 1);
 
+        // Helper to locate a declared provider by name in the redundancy order list.
         const auto find = [&](const std::string& name, const char* list) -> const Declared& {
             const auto it = std::find_if(declared.begin(), declared.end(), [&](const Declared& d) { return d.name == name; });
             if (it == declared.end()) s.fail(list, "references undeclared provider \"" + name + "\"");
             return *it;
         };
+        // Verify URL protocol scheme matches the transport expectation.
         const auto check_scheme = [&](const std::string& env_name, const std::string& url, bool ws) {
             const bool ok = ws ? (starts_with(url, "wss://") || starts_with(url, "ws://"))
-                               : (starts_with(url, "https://") || starts_with(url, "http://"));
+                                : (starts_with(url, "https://") || starts_with(url, "http://"));
             if (!ok) throw ConfigError(origin + ": env " + env_name + " must be a " + (ws ? "ws:// or wss://" : "http:// or https://") + " URL");
         };
 
+        // Resolve WebSocket provider chain in operator-defined priority order.
         for (const auto& name : r.ws_order) {
             const Declared& d = find(name, "ws_order");
             if (d.ws_env.empty()) {
@@ -326,6 +368,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             p.max_getlogs_range = d.max_getlogs_range;
             cfg.ws_chain.push_back(std::move(p));
         }
+        // Resolve getLogs HTTP provider chain in operator-defined priority order.
         for (const auto& name : r.getlogs_order) {
             const Declared& d = find(name, "getlogs_order");
             std::string url = d.http_literal;
@@ -368,6 +411,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             }
             return out;
         };
+        // Invariant: At least one WS and one HTTP provider must be resolved to run the listener.
         if (cfg.ws_chain.empty()) {
             throw ConfigError(origin + ": no WS provider enabled; set at least one of: " + unset_names(r.ws_order, true));
         }
@@ -382,12 +426,14 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         cfg.lease.enabled = s.boolean("enabled");
         cfg.lease.ttl_ms = s.uint<std::uint32_t>("ttl_ms", 1);
         cfg.lease.renew_ms = s.uint<std::uint32_t>("renew_ms", 1);
+        // Invariant: Renewal period must be shorter than TTL to avoid leader lease expiry during normal operation.
         if (cfg.lease.renew_ms >= cfg.lease.ttl_ms) s.fail("renew_ms", "must be < ttl_ms");
     }
 
     // [[contracts]]
     {
         const auto tables = array_tables_of(root, origin, "contracts");
+        // Invariant: A listener instance requires at least one contract subscription to execute.
         if (tables.empty()) throw ConfigError(origin + ": at least one [[contracts]] entry is required");
         std::set<std::string> names;
         std::set<std::string> addrs;
@@ -396,12 +442,15 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                             {"name", "address", "start_block", "finality", "stream", "events"});
             ContractCfg c;
             c.name = s.str("name");
+            // Disallow duplicate contract names for clear logging and Prometheus labelling.
             if (!names.insert(c.name).second) s.fail("name", "duplicate contract name \"" + c.name + "\"");
             try {
+                // Parse 20-byte EVM hex address with checksum validation.
                 c.address = Address20::from_hex(s.str("address"));
             } catch (const DecodeError& e) {
                 s.fail("address", e.what());
             }
+            // Disallow duplicate contract addresses within the same listener process.
             if (!addrs.insert(c.address.to_hex()).second) s.fail("address", "duplicate contract address " + c.address.to_hex());
 
             const std::string stream = s.opt_str("stream", "events");
@@ -409,6 +458,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             else if (stream == "registry") c.stream = StreamKind::Registry;
             else s.fail("stream", "must be events|registry, got \"" + stream + "\"");
 
+            // Inherit default chain finality if contract does not specify its own override.
             c.finality = s.has("finality") ? parse_finality(s, "finality", s.str("finality")) : cfg.chain.default_finality;
             if (c.finality == Finality::Depth && cfg.chain.depth == 0) s.fail("finality", "finality=depth requires [chain].depth > 0");
 
@@ -417,6 +467,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                     if (*v < 0) s.fail("start_block", "must be >= 0");
                     c.start_block = static_cast<std::uint64_t>(*v);
                 } else if (auto g = n->value<std::string>(); g && *g == "gate") {
+                    // "gate" defers sweep start until finality gate has processed the current head.
                     c.start_block = std::nullopt;
                 } else {
                     s.fail("start_block", "expected a non-negative integer or \"gate\"");
@@ -430,12 +481,15 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             std::set<std::string> seen_topics;
             for (const auto& sig : c.events) {
                 try {
+                    // Compute canonical Keccak-256 topic0 hash from event signature string.
                     c.topics.push_back(topic0(sig));
                 } catch (const ConfigError& e) {
                     s.fail("events", e.what());
                 }
+                // Reject duplicate event signatures for the same contract.
                 if (!seen_topics.insert(c.topics.back().to_hex()).second) s.fail("events", "duplicate event \"" + sig + "\"");
             }
+            // Populate fast lookup route map from (contract_address, topic0) to EventRoute metadata.
             for (std::size_t e = 0; e < c.events.size(); ++e) {
                 cfg.routes.emplace(RouteKey{c.address, c.topics[e]},
                                    EventRoute{c.name, event_name(c.events[e]), c.stream, c.finality});
@@ -483,6 +537,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         k.consumer_lag_warn_s = s.opt_uint<std::uint32_t>("consumer_lag_warn_s", k.consumer_lag_warn_s, 1);
         k.consumer_lag_crit_s = s.opt_uint<std::uint32_t>("consumer_lag_crit_s", k.consumer_lag_crit_s, 1);
         if (k.consumer_lag_warn_s >= k.consumer_lag_crit_s) s.fail("consumer_lag_warn_s", "must be < consumer_lag_crit_s");
+        // Invariant: Critical lag alert must trigger well before Redis trims stream entries by retention limit.
         if (k.consumer_lag_crit_s >= k.retention_ms / 1000)
             s.fail("consumer_lag_crit_s", "must be < retention_ms / 1000: an alert after the data was trimmed is too late");
 
@@ -501,6 +556,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                 else g.fail("stream", "must be events|registry, got \"" + stream + "\"");
                 c.group = g.str("group");
                 if (c.group.empty()) g.fail("group", "must not be empty");
+                // Deduplicate consumer group definitions per stream.
                 if (!seen.emplace(static_cast<int>(c.stream), c.group).second)
                     g.fail("group", "duplicate group \"" + c.group + "\" on stream " + stream);
                 k.consumer_groups.push_back(std::move(c));
@@ -526,10 +582,12 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         // Never POST unauthenticated, never POST a token over plaintext.
         const std::string hook = env_lookup(o.alert_webhook_env);
         if (!hook.empty()) {
+            // Require bearer auth token environment variable when alert webhook URL is defined.
             if (env_lookup(o.alert_webhook_token_env).empty()) {
                 throw ConfigError(origin + ": " + o.alert_webhook_env + " is set but " + o.alert_webhook_token_env +
                                   " is not (refusing unauthenticated alert POSTs)");
             }
+            // Enforce HTTPS transport encryption to prevent token leakage over the network.
             if (!starts_with(hook, "https://")) throw ConfigError(origin + ": env " + o.alert_webhook_env + " must be an https:// URL");
         } else {
             cfg.notes.push_back("WARN alerts disabled: env " + o.alert_webhook_env + " unset");

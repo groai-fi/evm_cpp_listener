@@ -5,12 +5,12 @@
 
 namespace evml::core {
 
-// Invalid/missing configuration or environment. main() maps this to exit code 2.
+/// @brief Fatal configuration or environment error causing service exit with code 2.
 struct ConfigError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Malformed hex / JSON-RPC payload. Never defaulted: always surfaced with context.
+/// @brief Payload decoding or serialization failure with context; never swallowed or defaulted.
 struct DecodeError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };

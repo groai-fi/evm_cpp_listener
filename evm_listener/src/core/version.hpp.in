@@ -2,10 +2,12 @@
 
 namespace evml::core {
 
+/// @brief Semantic version string populated by CMake during configuration.
 inline constexpr const char* kSemver = "@PROJECT_VERSION@";
+/// @brief Git commit describe string populated by CMake build script.
 inline constexpr const char* kGitDescribe = "@EVML_GIT_DESCRIBE@";
 
-// "evm_listener <semver> (<git describe>)"
+/// @brief Returns the complete human-readable version banner ("evm_listener <semver> (<git describe>)").
 const char* version_string();
 
 }  // namespace evml::core

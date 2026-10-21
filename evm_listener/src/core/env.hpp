@@ -6,23 +6,36 @@
 
 namespace evml::core::env {
 
-// Walks up from `start` to the filesystem root, loading `.env`, `.env.local.dev`, `.env.local`
-// (in that order per directory). Never overwrites variables already in the process environment.
-// Handles CRLF files, `export ` prefixes, quotes, and ` #` inline comments on unquoted values.
+/// @brief Walks up filesystem directories starting from `start` to root, loading `.env`, `.env.local.dev`, `.env.local`.
+/// Invariants:
+/// - Priority: Earlier-discovered (nearer to current working directory) files take precedence over parent files.
+/// - Non-Overwriting: Variables already defined in process environment are preserved (overwrite = 0).
+/// - Parsing: Handles CRLF line breaks, `export ` prefixes, single/double quotes, and inline ` #` comments.
+/// @param start Starting directory path to begin ascending traversal.
 void load_dotenv_from(const std::filesystem::path& start);
 
-// load_dotenv_from(current_path()); throws ConfigError if the cwd cannot be determined.
+/// @brief Loads dotenv configuration from current working directory up to root.
+/// @warning Throws ConfigError if current directory cannot be queried.
 void load_dotenv();
 
-// Value of `key`, or `default_val` when unset.
+/// @brief Retrieves environment variable value, or fallback default if unset or empty.
+/// @param key Environment variable name.
+/// @param default_val Default fallback string if variable is unset.
+/// @return String value.
 std::string get(const std::string& key, const std::string& default_val = "");
 
-// Value of `key`; throws ConfigError("missing env: KEY") when unset or empty.
+/// @brief Retrieves required environment variable value, failing fast if unset or empty.
+/// @param key Environment variable name.
+/// @return Non-empty string value.
+/// @warning Throws ConfigError if variable is missing or empty.
 std::string require(const std::string& key);
 
-// Masks everything after the host so endpoint URLs are safe to log:
-//   wss://base-mainnet.g.alchemy.com/v2/<key>  ->  wss://base-mainnet.g.alchemy.com/****
-// Userinfo (user:pass@) is masked too. Input that is not scheme://authority... yields "<invalid-url>".
+/// @brief Masks sensitive credentials, access tokens, API keys, and userinfo in RPC URLs for safe logging.
+/// Transformations:
+/// - wss://base-mainnet.g.alchemy.com/v2/secretKey -> wss://base-mainnet.g.alchemy.com/****
+/// - http://alice:password@localhost:8545/ -> http://****@localhost:8545/
+/// @param url Raw endpoint URL.
+/// @return Redacted URL string, or "<invalid-url>" if malformed.
 std::string redact(std::string_view url);
 
 }  // namespace evml::core::env
