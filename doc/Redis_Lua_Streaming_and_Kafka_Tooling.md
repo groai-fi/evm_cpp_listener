@@ -357,3 +357,12 @@ Best for proprietary trading firms, risk keepers, and quant research teams where
    - DuckDB directly writes Zstandard-compressed Parquet files to a host-local, LUKS/dm-crypt encrypted NVMe volume (or an isolated, internal air-gapped MinIO instance).
    - **Zero Data Egress**: No bytes leave the host boundary or secure VPC layer.
    - **Quant Research Ready**: Quantitative researchers run SIMD-vectorized SQL backtests directly against local Parquet files via Python (`import duckdb`), R, or Julia with instantaneous query execution and zero cloud data egress fees.
+
+---
+
+## Practical Recommendations: Choosing the Right Tool
+
+- **If your goal is historical backtesting, trading analytics, and cold storage**: Use **DuckDB + Parquet**. Neither Kvrocks nor Asynq can do this.
+- **If your Redis RAM is filling up from storing too many unconsumed events or stream history**: Swap Redis for **Apache Kvrocks** to store streams on cheap NVMe.
+- **If you need reliable background worker execution (retries, timeouts, priority queues)**: Use **Asynq** (in Go) or **BullMQ** (in Node.js).
+
