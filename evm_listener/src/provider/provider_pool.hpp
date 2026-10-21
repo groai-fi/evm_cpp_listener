@@ -27,12 +27,14 @@
 
 namespace evml::provider {
 
+/// @brief Network endpoint descriptor for a single RPC provider (WebSocket and HTTP URLs).
 struct ProviderEndpoint {
     std::string name;
     std::string ws_url;    // empty for providers that are only used for getLogs
     std::string http_url;  // required for every provider that appears in an order list
 };
 
+/// @brief Configuration settings controlling provider pool failover, timeouts, backoff, and poll intervals.
 struct PoolConfig {
     using ms = std::chrono::milliseconds;
 
@@ -66,6 +68,7 @@ struct PoolConfig {
     ms crosscheck_period{60000};     // WS provider's own `safe` (for the getLogs-lag check)
 };
 
+/// @brief Event callbacks fired by the provider pool for streaming blocks, logs, transitions, and connection events.
 struct PoolHandlers {
     // All optional; called on the pool's executor, must not throw.
     std::function<void(const rpc::Head&, const std::string& provider)> on_head;
@@ -77,8 +80,10 @@ struct PoolHandlers {
     std::function<void(const rpc::WsClosed&, const std::string& provider)> on_ws_down;
 };
 
+/// @brief Block tag identifiers for chain progression queries.
 enum class Tag { Safe, Finalized };
 
+/// @brief Point-in-time snapshot of a resolved block tag (number and hash) from a specific provider.
 struct TagSnapshot {
     std::string provider;  // the provider that answered: a snapshot is only meaningful against that provider
     std::uint64_t number{};
@@ -88,6 +93,7 @@ struct TagSnapshot {
 
 using RequestBuilder = std::function<std::string(std::uint64_t id)>;
 
+/// @brief Result of a JSON-RPC HTTP invocation with error classification and retry metadata.
 struct RpcOutcome {
     bool ok{false};
     std::string provider;    // who answered (or who failed last)
@@ -103,30 +109,45 @@ struct RpcOutcome {
 // stale/lag detection, all driven by ProviderBook + StaleDetector. Single-threaded: create it, and use every
 // member, from one executor (strand-free io_context thread). Create via create(); keep the shared_ptr alive
 // until every awaitable returned by call()/read_tag() has completed.
+/// @brief Multi-provider RPC orchestrator managing active WebSocket streaming and HTTP request failover.
+/// Invariants & Architecture:
+/// - Dual Paths: Keeps active WebSocket stream for real-time events while using distinct HTTP endpoints for getLogs.
+/// - Self-Healing: Background tick probes dormant providers, polls safe/finalized block tags, and restarts dropped sessions.
+/// - Concurrency: Thread-confined to a single Boost.Asio io_context executor.
 class ProviderPool : public std::enable_shared_from_this<ProviderPool> {
 public:
     // Throws std::invalid_argument for an inconsistent config (unknown/duplicate names, missing URLs, empty chains,
     // no subscription) and rpc::TransportError for a malformed URL.
+    /// @brief Factory creating and validating a new ProviderPool instance.
     static std::shared_ptr<ProviderPool> create(boost::asio::any_io_executor executor, PoolConfig cfg,
                                                 PoolHandlers handlers);
 
+    /// @brief Starts background tick timer, initiates WebSocket session, and schedules periodic probes.
     void start();  // throws std::logic_error if called twice
+    /// @brief Stops timers, terminates active WebSocket session, and suppresses pending callbacks.
     void stop();   // idempotent; no handler is called afterwards
 
     // One JSON-RPC request over the getLogs chain. `build` is called once per attempt with that attempt's id.
     // A provider failure falls through to the next provider; RangeTooLarge returns immediately (it is the
     // caller's range, not the provider's fault). All providers failing returns ok=false with the last error.
+    /// @brief Coroutine executing JSON-RPC HTTP request with sequential failover across usable providers.
     boost::asio::awaitable<RpcOutcome> call(RequestBuilder build);
 
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
     // provider; a null block counts as a failure too).
+    /// @brief Queries named provider for latest block matching Tag (Safe or Finalized) and caches the snapshot.
     boost::asio::awaitable<std::optional<TagSnapshot>> read_tag(std::string provider, Tag tag);
     // Last successful read_tag from that provider. Never mixes providers.
+    /// @brief Returns cached block tag snapshot previously fetched from specified provider.
     std::optional<TagSnapshot> cached_tag(const std::string& provider, Tag tag) const;
 
+    /// @brief Returns name of currently active WebSocket provider.
     const std::optional<std::string>& active_ws() const { return book_.active_ws(); }
+    /// @brief Returns name of primary getLogs provider currently selected.
     std::optional<std::string> current_getlogs() const { return book_.pick_getlogs(Clock::now()); }
+    /// @brief Returns current health state of named provider.
     State state(const std::string& provider) const { return book_.state(provider).state; }
+    /// @brief Returns measured block height divergence between WebSocket and HTTP providers.
     std::optional<std::uint64_t> divergence() const { return detector_.divergence(); }
 
     ProviderPool(const ProviderPool&) = delete;

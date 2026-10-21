@@ -44,30 +44,42 @@ void StaleDetector::reset_http(TimePoint) {
 }
 
 void StaleDetector::evaluate(TimePoint now) {
+    // Check if HTTP head block is ahead of WS head by more than ws_lag_blocks (default 5).
     const bool head_lag = ws_head_ && http_head_ && *http_head_ > *ws_head_ + t_.ws_lag_blocks;
     if (!head_lag) {
         ws_lag_since_.reset();
     } else if (!ws_lag_since_) {
+        // Start continuous lag timer.
         ws_lag_since_ = now;
     }
 
+    // Check if WS safe tag block is ahead of HTTP safe tag by more than safe_lag_blocks (default 30).
     const bool safe_lag = ws_safe_ && http_safe_ && *ws_safe_ > *http_safe_ + t_.safe_lag_blocks;
     if (!safe_lag) {
         safe_lag_since_.reset();
     } else if (!safe_lag_since_) {
+        // Start continuous safe tag lag timer.
         safe_lag_since_ = now;
     }
 }
 
-bool StaleDetector::ws_head_stalled(TimePoint now) const { return now - ws_baseline_ >= t_.head_stall; }
+bool StaleDetector::ws_head_stalled(TimePoint now) const {
+    // Triggers if elapsed time since last received newHeads block exceeds head_stall (default 15s).
+    return now - ws_baseline_ >= t_.head_stall;
+}
 
-bool StaleDetector::ws_stale(TimePoint now) const { return ws_lag_since_ && now - *ws_lag_since_ >= t_.ws_lag_for; }
+bool StaleDetector::ws_stale(TimePoint now) const {
+    // Triggers if WS head has lagged HTTP head continuously for more than ws_lag_for (default 30s).
+    return ws_lag_since_ && now - *ws_lag_since_ >= t_.ws_lag_for;
+}
 
 bool StaleDetector::getlogs_stale(TimePoint now) const {
+    // Triggers if getLogs safe tag has lagged WS safe tag continuously for more than safe_lag_for (default 120s).
     return safe_lag_since_ && now - *safe_lag_since_ >= t_.safe_lag_for;
 }
 
 std::optional<std::uint64_t> StaleDetector::divergence() const {
+    // Calculate maximum absolute block distance between WS and HTTP for both head and safe tags.
     std::uint64_t worst = 0;
     if (ws_head_ && http_head_) worst = std::max(worst, distance(*ws_head_, *http_head_));
     if (ws_safe_ && http_safe_) worst = std::max(worst, distance(*ws_safe_, *http_safe_));

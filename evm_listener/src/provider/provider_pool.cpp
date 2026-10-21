@@ -124,6 +124,7 @@ void ProviderPool::stop() {
 void ProviderPool::reconcile() {
     if (!running_) return;
     const auto now = Clock::now();
+    // Query book for best usable WebSocket provider (handles sticky retention & switchback).
     const auto d = book_.select_ws(now);
     if (!d.changed) return;
     end_session_quiet();
@@ -203,12 +204,14 @@ void ProviderPool::end_session(rpc::WsClosed c) {
     end_session_quiet();
     n.backoff.report_live(live);
     if (handlers_.on_ws_down) handlers_.on_ws_down(c, name);
+    // Record session failure in book; triggers transition to Down if failure threshold exceeded.
     if (const auto t = book_.on_failure(name, c.kind, c.retry_after, now)) emit_transition(*t, "ws: " + c.reason);
 
     reconcile();
     if (!running_ || session_) return;  // reconcile already started a session on another provider
     const auto& active = book_.active_ws();
     if (!active) return;                // nothing usable: tick() retries as providers recover
+    // Apply backoff delay respecting Retry-After hint before reconnecting.
     const auto hint = c.retry_after ? std::chrono::duration_cast<ms>(*c.retry_after) : ms{0};
     schedule_restart(*active, std::max(nodes_.at(*active).backoff.next(), hint));
 }
@@ -248,11 +251,13 @@ void ProviderPool::tick() {
     reconcile();
 
     // A session that stayed Ready long enough counts as a success (a connect-then-die flap never does).
+    // Mark provider healthy only if session survived backoff_min_live (anti-flap protection).
     if (session_ && ws_ready_ && !ws_credited_ && now - ws_ready_at_ >= cfg_.backoff_min_live) {
         ws_credited_ = true;
         if (const auto t = book_.on_success(session_name_, now)) emit_transition(*t, "ws session live");
     }
 
+    // Detect silent stalls where WebSocket connection is open but no newHeads arrive.
     if (session_ && ws_ready_ && cfg_.subscribe_heads && detector_.ws_head_stalled(now)) {
         rpc::WsClosed c;
         c.kind = rpc::FailKind::Retry;
@@ -278,6 +283,7 @@ void ProviderPool::tick() {
         detector_.reset_http(now);
         last_getlogs_ = cur;
     }
+    // Demote getLogs provider voluntarily if its safe block tag is lagging active WS head.
     if (cur && detector_.getlogs_stale(now) && book_.pick_getlogs(now, {*cur})) {
         if (const auto t = book_.demote_voluntary(*cur, now)) {
             emit_transition(*t, "getLogs provider's safe tag lagging the WS provider");
@@ -407,12 +413,14 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
     RpcOutcome last;
     last.error = "no getLogs provider is usable";
     for (;;) {
+        // Pick next usable HTTP provider, skipping already tried endpoints during this request.
         const auto p = book_.pick_getlogs(Clock::now(), tried);
         if (!p) co_return last;
         tried.insert(*p);
         const auto id = next_id_++;
         auto o = co_await call_on(*p, build(id), id);
         note(*p, o);
+        // Return immediately on success or RangeTooLarge (caller adjusts range without provider failover).
         if (o.ok || o.kind == rpc::FailKind::RangeTooLarge) co_return o;
         last = std::move(o);
     }
@@ -421,6 +429,7 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
 net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string provider, Tag tag) {
     const auto self = shared_from_this();
     const auto id = next_id_++;
+    // Fetch block by tag name ("safe" or "finalized") via eth_getBlockByNumber.
     auto o = co_await call_on(provider, rpc::build_get_block_by_number(id, tag_name(tag), false), id);
 
     std::optional<rpc::Head> head;
@@ -428,6 +437,7 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
         try {
             head = dec_.parse_block(o.result_raw);
             if (!head) {
+                // Node returned null result for tag; counts as a retryable provider error.
                 o.ok = false;
                 o.kind = rpc::FailKind::Retry;
                 o.error = std::string("null block for tag '") + tag_name(tag) + "'";
@@ -446,6 +456,7 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
     s.number = head->number;
     s.hash = head->hash;
     s.at = Clock::now();
+    // Cache tag snapshot in node record to avoid redundant network calls.
     nodes_.at(provider).tags[tag_index(tag)] = s;
     co_return s;
 }
@@ -456,6 +467,7 @@ std::optional<TagSnapshot> ProviderPool::cached_tag(const std::string& provider,
 
 net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<ProviderPool> self, std::string provider) {
     const auto id = next_id_++;
+    // Probe node liveness via lightweight eth_blockNumber call.
     auto o = co_await call_on(provider, rpc::build_block_number(id), id);
     if (o.ok) {
         try {
@@ -472,6 +484,7 @@ net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<Provid
     const auto now = Clock::now();
     std::optional<Transition> t;
     if (o.ok) {
+        // Successful probe restores Down provider to Up.
         t = book_.on_probe_result(provider, true, now);
     } else {
         switch (o.kind) {
@@ -511,6 +524,7 @@ net::awaitable<void> ProviderPool::poll([[maybe_unused]] std::shared_ptr<Provide
     }
     note(provider, o);
     if (!running_ || !head) co_return;
+    // Feed latest HTTP head block to StaleDetector for cross-provider divergence checking.
     if (last_getlogs_ == provider) detector_.on_http_head(*head, Clock::now());
 
     const auto safe = co_await read_tag(provider, Tag::Safe);

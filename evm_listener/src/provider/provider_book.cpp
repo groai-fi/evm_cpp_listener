@@ -56,6 +56,7 @@ std::optional<Transition> ProviderBook::on_failure(std::string_view name, rpc::F
                                                    std::optional<seconds> retry_after, TimePoint now) {
     auto& ps = at(name);
     if (ps.state == State::Fatal) return std::nullopt;
+    // RangeTooLarge indicates requested block window exceeded node limit; handled by caller splitting range.
     if (kind == rpc::FailKind::RangeTooLarge) return std::nullopt;  // the caller shrinks its range; provider is fine
 
     ps.healthy_since.reset();
@@ -69,10 +70,12 @@ std::optional<Transition> ProviderBook::on_failure(std::string_view name, rpc::F
             ps.next_probe_at = now + policy_.auth_disable;
             return set_state(ps, name, State::Disabled);
         case rpc::FailKind::RateLimited:
+            // Apply Retry-After delay or default rate limit wait before provider can be used again.
             ps.not_before = std::max(ps.not_before, now + retry_after.value_or(policy_.default_rate_limit_wait));
             [[fallthrough]];
         case rpc::FailKind::Retry:
             ++ps.consecutive_failures;
+            // Mark Down once consecutive transient failures reach failover_after threshold (default: 3).
             if (ps.state == State::Up && ps.consecutive_failures >= policy_.failover_after) {
                 ps.next_probe_at = now + policy_.probe_interval;
                 return set_state(ps, name, State::Down);
@@ -140,6 +143,7 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
     };
 
     if (!active_ws_) {
+        // Initial provider selection at system startup.
         if (auto p = first_usable()) {
             active_ws_ = p;
             return {p, true, Reason::Initial};
@@ -148,6 +152,7 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
     }
 
     // The active provider is kept while Up, even if momentarily rate-limited (its session backs off itself).
+    // Forced failover occurs immediately when active WebSocket provider transitions to Down/Cooldown/Disabled.
     if (at(*active_ws_).state != State::Up) {
         auto p = first_usable();
         active_ws_ = p;
@@ -156,6 +161,7 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
     }
 
     // Switch back to a better-ranked provider only after it proved stable, and not in a flap window.
+    // Enforce 10-minute sustained health window and anti-flap spacing before switching back to higher-ranked primary.
     if (voluntary_allowed(now)) {
         for (const auto& n : ws_order_) {
             if (n == *active_ws_) break;  // only providers ranked above the active one
@@ -173,10 +179,12 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
 std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const { return pick_getlogs(now, {}); }
 
 std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now, const std::unordered_set<std::string>& exclude) const {
+    // Cross-check: prioritize an independent provider distinct from active_ws to avoid single-node blind spots.
     for (const auto& n : getlogs_order_) {
         if (active_ws_ && n == *active_ws_) continue;
         if (exclude.count(n) == 0 && usable(n, now)) return n;
     }
+    // Fall back to active WS provider only when no independent alternative is currently usable.
     if (active_ws_ && exclude.count(*active_ws_) == 0 &&
         std::find(getlogs_order_.begin(), getlogs_order_.end(), *active_ws_) != getlogs_order_.end() &&
         usable(*active_ws_, now)) {
