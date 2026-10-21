@@ -435,3 +435,11 @@ TEST_CASE("redis scripts: call builders reject malformed emissions", "[unit][red
     CHECK_THROWS_WITH(Keys("a{b}"), ContainsSubstring("no braces"));
     CHECK_THROWS_WITH(Keys(""), ContainsSubstring("non-empty"));
 }
+
+TEST_CASE("redis scripts: every embedded script starts with the #!lua shebang", "[unit][redis]") {
+    for (std::size_t i = 0; i < kScriptCount; ++i) {
+        const std::string src = script_source(static_cast<Script>(i));
+        INFO(script_name(static_cast<Script>(i)));
+        CHECK(src.rfind("#!lua\n", 0) == 0);
+    }
+}

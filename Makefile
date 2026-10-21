@@ -119,6 +119,11 @@ test-integration: ## Run only integration tests (Redis & Toxiproxy)
 	@echo "$(GREEN)==> Running integration tests...$(RESET)"
 	$(DEV_EXEC) ctest --preset conan-debug -L integration --output-on-failure
 
+.PHONY: lint-lua
+lint-lua: ## Lint Redis Lua scripts (luacheck w/ Redis sandbox globals, luac5.1 parse, #!lua/LF invariants)
+	@echo "$(GREEN)==> Running luacheck on Lua scripts...$(RESET)"
+	$(DEV_EXEC) tools/lint_lua.sh
+
 .PHONY: clean-build
 clean-build: ## Remove the local build/ directory
 	@echo "$(YELLOW)==> Removing build directory...$(RESET)"

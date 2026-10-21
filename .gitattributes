@@ -1,0 +1,2 @@
+# Redis requires '#!lua' + LF as the first bytes of each script; never convert Lua line endings to CRLF.
+*.lua text eol=lf

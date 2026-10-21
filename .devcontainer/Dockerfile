@@ -26,6 +26,9 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
         python3-venv \
         # Redis CLI only; the Redis server runs as the separate `redis` compose service
         redis-tools \
+        # Redis Lua scripts: luacheck (static analysis) + lua5.1 (luac5.1 -p = the Lua 5.1 parser Redis uses)
+        lua-check \
+        lua5.1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Conan 2.x globally

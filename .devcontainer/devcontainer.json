@@ -22,7 +22,8 @@
         "ms-vscode.cmake-tools",
         "twxs.cmake",
         "llvm-vs-code-extensions.vscode-clangd",
-        "vadimcn.vscode-lldb"
+        "vadimcn.vscode-lldb",
+        "dwenegar.vscode-luacheck"
       ]
     }
   },
