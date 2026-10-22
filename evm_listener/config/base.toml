@@ -16,6 +16,7 @@ hash_ring_size     = 1024
 start_policy       = "contract_start" # no checkpoint -> min(contract.start_block); or "gate" (= now)
 safe_poll_ms       = 4000
 finalized_poll_ms  = 12000
+pending_max_logs   = 200000           # staged WS logs kept for the cross-check; oldest evicted beyond this
 
 # A provider is ENABLED iff its env var(s) are non-empty.
 [[providers]]
@@ -54,6 +55,8 @@ failover_after         = 3
 stale_after_blocks     = 5
 prefer_primary_after_s = 600
 quota_cooldown_s       = 3600
+reconcile_rps          = 2      # per-provider token bucket for reconcile calls (getLogs retries, block lookups)
+reconcile_burst        = 4      # bucket capacity; must be >= reconcile_rps
 
 [lease]
 enabled  = true

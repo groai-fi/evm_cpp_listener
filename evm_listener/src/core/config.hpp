@@ -54,6 +54,7 @@ struct ChainCfg {
     StartPolicy start_policy{StartPolicy::ContractStart};    // Cold startup block positioning policy
     std::uint32_t safe_poll_ms{};                            // Safe finality polling interval
     std::uint32_t finalized_poll_ms{};                       // Finalized finality polling interval
+    std::uint32_t pending_max_logs{200000};                  // PendingBuffer cap: staged WS logs kept for the cross-check (oldest evicted)
 };
 
 /// @brief Active RPC provider credentials and capability configuration.
@@ -74,6 +75,8 @@ struct RedundancyCfg {
     std::uint32_t stale_after_blocks{};     // Maximum block divergence before marking provider stale
     std::uint32_t prefer_primary_after_s{}; // Stability duration required before failing back to primary
     std::uint32_t quota_cooldown_s{};       // Cooldown duration when monthly quota is exhausted
+    std::uint32_t reconcile_rps{2};         // Per-provider token bucket refill rate for getLogs/block reconcile calls
+    std::uint32_t reconcile_burst{4};       // Per-provider token bucket capacity (>= reconcile_rps)
 };
 
 /// @brief Distributed Redis leader lease parameters.

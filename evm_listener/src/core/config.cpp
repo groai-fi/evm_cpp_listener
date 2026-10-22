@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -273,7 +274,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
     {
         const Section s(table_of(root, origin, "chain"), origin, "[chain]",
                         {"name", "chain_id", "block_time_ms", "default_finality", "depth", "hash_ring_size", "start_policy",
-                         "safe_poll_ms", "finalized_poll_ms"});
+                         "safe_poll_ms", "finalized_poll_ms", "pending_max_logs"});
         auto& c = cfg.chain;
         c.name = s.str("name");
         c.chain_id = s.uint<std::uint64_t>("chain_id", 1);
@@ -290,6 +291,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         else s.fail("start_policy", "must be contract_start|gate, got \"" + policy + "\"");
         c.safe_poll_ms = s.uint<std::uint32_t>("safe_poll_ms", 1);
         c.finalized_poll_ms = s.uint<std::uint32_t>("finalized_poll_ms", 1);
+        c.pending_max_logs = s.opt_uint<std::uint32_t>("pending_max_logs", c.pending_max_logs, 1);
     }
 
     // [[providers]] -> declared
@@ -324,7 +326,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
     {
         const Section s(table_of(root, origin, "redundancy"), origin, "[redundancy]",
                         {"mode", "ws_order", "getlogs_order", "failover_after", "stale_after_blocks", "prefer_primary_after_s",
-                         "quota_cooldown_s"});
+                         "quota_cooldown_s", "reconcile_rps", "reconcile_burst"});
         auto& r = cfg.redundancy;
         r.mode = s.str("mode");
         // Supported redundancy modes: sequential failover or simultaneous hedged dispatch.
@@ -335,6 +337,10 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         r.stale_after_blocks = s.uint<std::uint32_t>("stale_after_blocks", 1);
         r.prefer_primary_after_s = s.uint<std::uint32_t>("prefer_primary_after_s", 0);
         r.quota_cooldown_s = s.uint<std::uint32_t>("quota_cooldown_s", 1);
+        r.reconcile_rps = s.opt_uint<std::uint32_t>("reconcile_rps", r.reconcile_rps, 1);
+        r.reconcile_burst = s.opt_uint<std::uint32_t>("reconcile_burst", r.reconcile_burst, 1);
+        // A bucket that holds fewer tokens than it refills per second can never reach its own rate.
+        if (r.reconcile_burst < r.reconcile_rps) s.fail("reconcile_burst", "must be >= reconcile_rps");
 
         // Helper to locate a declared provider by name in the redundancy order list.
         const auto find = [&](const std::string& name, const char* list) -> const Declared& {
@@ -571,6 +577,16 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                          "deadman_ping_env", "deadman_ping_s", "http_user_agent"});
         auto& o = cfg.ops;
         o.http_listen = s.str("http_listen");
+        // Railway tells the service which port to serve through $PORT (plan 60 D5): it replaces the port, keeps the host.
+        if (const std::string port = env_lookup("PORT"); !port.empty()) {
+            const bool digits = std::all_of(port.begin(), port.end(), [](unsigned char ch) { return std::isdigit(ch); });
+            if (!digits || port.size() > 5 || std::stoul(port) < 1 || std::stoul(port) > 65535) {
+                throw ConfigError(origin + ": env PORT must be an integer 1..65535");
+            }
+            const auto colon = o.http_listen.rfind(':');
+            if (colon == std::string::npos) s.fail("http_listen", "must be host:port to apply $PORT");
+            o.http_listen = o.http_listen.substr(0, colon + 1) + port;
+        }
         o.heartbeat_s = s.uint<std::uint32_t>("heartbeat_s", 1);
         o.alert_webhook_env = s.str("alert_webhook_env");
         o.alert_webhook_token_env = s.str("alert_webhook_token_env");

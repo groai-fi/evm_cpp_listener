@@ -365,3 +365,60 @@ TEST_CASE("host_id: explicit value beats $EVML_HOST_ID, which beats hostname", "
     env.erase("EVML_HOST_ID");
     CHECK_FALSE(parse_with(base_toml(), env).shard.host_id.empty());  // hostname
 }
+
+TEST_CASE("base.toml: reconcile and pending-buffer keys", "[unit][config]") {
+    const Config c = parse_with(base_toml(), full_env());
+    CHECK(c.chain.pending_max_logs == 200000);
+    CHECK(c.redundancy.reconcile_rps == 2);
+    CHECK(c.redundancy.reconcile_burst == 4);
+
+    // Every key is optional: a config that predates them gets the plan defaults.
+    std::string bare = mutate(base_toml(), "pending_max_logs   = 200000           # staged WS logs kept for the cross-check; oldest evicted beyond this\n", "");
+    bare = mutate(bare, "reconcile_rps          = 2      # per-provider token bucket for reconcile calls (getLogs retries, block lookups)\n", "");
+    bare = mutate(bare, "reconcile_burst        = 4      # bucket capacity; must be >= reconcile_rps\n", "");
+    const Config d = parse_with(bare, full_env());
+    CHECK(d.chain.pending_max_logs == 200000);
+    CHECK(d.redundancy.reconcile_rps == 2);
+    CHECK(d.redundancy.reconcile_burst == 4);
+}
+
+TEST_CASE("reconcile and pending-buffer keys reject out-of-range values", "[unit][config]") {
+    const std::string base = base_toml();
+    const EnvMap env = full_env();
+    CHECK_THROWS_WITH(parse_with(mutate(base, "pending_max_logs   = 200000", "pending_max_logs   = 0"), env),
+                      ContainsSubstring("[chain].pending_max_logs: out of range"));
+    CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 0 "), env),
+                      ContainsSubstring("[redundancy].reconcile_rps: out of range"));
+    CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_burst        = 4 ", "reconcile_burst        = 0 "), env),
+                      ContainsSubstring("[redundancy].reconcile_burst: out of range"));
+    // burst below rps: 3 < 5
+    const std::string low_burst = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 5 "),
+                                         "reconcile_burst        = 4 ", "reconcile_burst        = 3 ");
+    CHECK_THROWS_WITH(parse_with(low_burst, env), ContainsSubstring("[redundancy].reconcile_burst: must be >= reconcile_rps"));
+    // burst equal to rps is allowed
+    const std::string equal = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 4 "),
+                                     "reconcile_burst        = 4 ", "reconcile_burst        = 4 ");
+    CHECK(parse_with(equal, env).redundancy.reconcile_burst == 4);
+}
+
+TEST_CASE("$PORT replaces the port of [ops].http_listen and keeps the host", "[unit][config]") {
+    EnvMap env = full_env();
+    CHECK(parse_with(base_toml(), env).ops.http_listen == "[::]:9464");  // unset: config value as written
+
+    env["PORT"] = "8080";
+    CHECK(parse_with(base_toml(), env).ops.http_listen == "[::]:8080");
+    CHECK(parse_with(mutate(base_toml(), "\"[::]:9464\"", "\"0.0.0.0:9464\""), env).ops.http_listen == "0.0.0.0:8080");
+
+    env["PORT"] = "65535";
+    CHECK(parse_with(base_toml(), env).ops.http_listen == "[::]:65535");
+
+    for (const char* bad : {"0", "65536", "abc", "80x", "-1", "123456", " 80"}) {
+        env["PORT"] = bad;
+        INFO("PORT=" << bad);
+        CHECK_THROWS_WITH(parse_with(base_toml(), env), ContainsSubstring("env PORT must be an integer 1..65535"));
+    }
+
+    env["PORT"] = "8080";
+    CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "\"[::]:9464\"", "\"localhost\""), env),
+                      ContainsSubstring("[ops].http_listen: must be host:port to apply $PORT"));
+}
