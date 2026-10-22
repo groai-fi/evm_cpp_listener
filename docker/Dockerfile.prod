@@ -31,7 +31,6 @@ COPY evm_listener/ ./evm_listener/
 ARG VERSION
 RUN cmake --preset conan-release \
         -DEVML_BUILD_TESTS=OFF \
-        -DEVML_BUILD_COMMON=OFF \
         -DEVML_SANITIZE=OFF \
         -DEVML_GIT_DESCRIBE="${VERSION:-v$(cat VERSION)}" \
     && cmake --build --preset conan-release --parallel 4 \
