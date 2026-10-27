@@ -335,3 +335,26 @@ Decisions approved by the user:
 - **C3 still open:** the "one `block(n)` call per distinct block per page" test needs the real `Sweeper` + this adapter; not written yet.
 - Test-harness note: a first build failed only because shell quoting stripped the single quotes of `a` char literals while writing the test file; fixed in the file, no product change.
 - Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **427/427** (413 + 14).
+
+### 5-C3 adapter + sweeper test: done (2026-10-27)
+- [pool_log_source_sweep_test.cpp](../../evm_listener/tests/pool_log_source_sweep_test.cpp): the real `Sweeper` over `PoolLogSource` and three mock HTTP providers. One page with 3 logs in 2 distinct blocks makes exactly 2 `eth_getBlockByNumber` calls (one per distinct block, not per log), none on the logs provider; 3 events emitted; `C_s` advances.
+- Harness note (bucket 3): the Sweeper keys its pagers by the config getLogs provider names, so the mock providers use `cfg.getlogs_chain[i].name`, not arbitrary names.
+- Gate: `make build` exit 0; `make test` exit 0, **428/428** (427 + 1).
+
+### 5-D1 host skeleton: done (2026-10-27)
+- [host.{hpp,cpp}](../../evm_listener/src/app/host.hpp): `run_host(cfg, HostOptions)` builds sink → pool → gate bridge → `PoolLogSource` → `Sweeper` → `PipelineDriver` and runs the tick loop on the calling (io) thread. `run_listener` adds log init and SIGTERM/SIGINT handlers (they only set an atomic flag). [tools.cpp](../../evm_listener/src/app/tools.cpp) `run_cli`: no action flag + `--config` now runs the listener; the three tool actions stay mutually exclusive; `user_agent()` moved out of the anonymous namespace so the host reuses it.
+- Exit codes: 0 graceful stop; 1 sink `Failed`, Redis connection or pipeline-start error; 2 driver `Failed`, Redis version/eviction check failed, or `[lease] enabled = true` (refused until 5-D2). Shutdown order: stop the watchdog, stop the pool, `sink.drain(25 s)` on the main thread, exit.
+- Ops routes (minimal): `/healthz` 503 when `watchdog.stale_heartbeat()` is non-null; `/readyz` 200 only when the driver is `live` (JSON with state, role, `"lease":"disabled"`); `/metrics` serialises the registry (empty until 5-F).
+- **Deviations from §5.H / plan 90:**
+  1. **Gate bridge pulled into D1** (user decision): `PoolHandlers::on_tag` (pool test added, see below), `FinalityGate` → `driver.set_gates`, `SafeRegression`/`SafeHashMismatch` → `on_safe_reorg_signal`, `FinalizedAnomaly` → `on_gate_frozen`. Only the **current getLogs provider's** tags feed the gate (the WS cross-check also reads tags). D3 shrinks to extra tests.
+  2. **Startup thread for the Redis wait.** `await_redis_ready` blocks; on the io thread it would starve `/healthz` and the io beat and the watchdog would abort after 30 s. A short-lived thread runs it and posts `start_runtime` to the io thread. Thread count: io + sink + watchdog (+ the startup thread until Redis is ready).
+  3. **io beat is a dedicated timer** (`beat_period`, default 1 s) that calls `beat_io`, `publish_state`, polls the stop flag and the sink mode. One tick can legitimately take many seconds, so "once per tick" would give false aborts. The stop flag is polled, not signal-driven, so shutdown starts within one beat.
+  4. `[lease] enabled = true` exits 2 with a message until 5-D2. `base.toml` ships with the lease enabled, so a prod start needs D2.
+  5. Cold start has no priming read: the pool's first `safe` poll comes after `safe_poll_ms` and the first `finalized` after `finalized_poll_ms` (4 s / 12 s in `base.toml`), so Live is delayed by up to ~12 s. Tests use 100 ms polls.
+  6. `PoolLogSource` gets no ring yet (`nullptr`); heads → `ReorgDetector` is 5-D4 (which must also fill `BlockRef::timestamp`).
+  7. Driver and sweeper clock = wall clock (`system_clock`) ms.
+- `EVML_TEST_HOOKS` (CMake option, default ON for Debug, OFF for Release/prod image) compiles `--test-freeze-io-after <s>`; the io thread then blocks and the watchdog aborts.
+- `PoolHandlers::on_tag` ([provider_pool.hpp](../../evm_listener/src/provider/provider_pool.hpp)): fires after every successful `read_tag` while the pool is running; `Tag` enum moved above `PoolHandlers`. Test: `pool: on_tag fires with provider/tag/number only while the pool is running`.
+- Tests ([host_test.cpp](../../evm_listener/tests/host_test.cpp)): lease-enabled refusal (unit); in-process cold start against compose Redis + mock node reaches Live (c_s 52060300, c_f 52060250), writes the initial checkpoint, and a stop request exits 0 with the sink drained; child-process freeze test: the real binary with `--test-freeze-io-after 1` dies by SIGABRT and its log names `io_tick`.
+- Caveats: exit **134 as PID 1 is still unverified** until 5-I (needs `tini`, slice 5-H); the test asserts SIGABRT from the child's wait status, which a shell reports as 134. Redis URL errors from `await_redis_ready` are logged as given by the library (no URL is added by the host).
+- Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **432/432** (428 + 1 on_tag + 3 host). First host run failed only because the test did not call `log::init` (bucket 3, test harness); fixed in the test.

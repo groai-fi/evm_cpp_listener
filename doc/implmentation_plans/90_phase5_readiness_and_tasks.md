@@ -113,10 +113,10 @@ See plan 60 "results and deviations".
   - disagreement → `report_bad` + nullopt; no quorum → nullopt (= `Retry`);
   - **no block-info cache** (Q4: the sweeper already reads each distinct block once per page);
   - do **not** change the `LogSource` interface or the sweeper (rev 9).
-- [ ] **C3 Tests** against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item, plus "one `block(n)` call per distinct block per page".
+- [x] **C3 Tests** against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item, plus "one `block(n)` call per distinct block per page".
 
 ### ⬜ 5-D Host process (§5.H), split into six sub-slices; each has its own gate
-- [ ] **D1 Skeleton (single host, `[lease] enabled = false`):**
+- [x] **D1 Skeleton (single host, `[lease] enabled = false`):** done 2026-10-27, see plan 60 "5-D1" (gate bridge pulled in; startup thread for the Redis wait; dedicated io-beat timer)
   - CLI: no action flag + `--config` runs the listener; keep the tool flags;
   - threads io + sink + watchdog; startup order 1–4 and 6; the watchdog gets `[watchdog].process_stall_ms`; io beat + `publish_state` every tick; the sink gets `loop_beat = watchdog.sink_beat_slot()`;
   - SIGTERM/SIGINT → `request_drain()` → `sink.drain(25 s)` → exit 0; exit codes 2 / 1 / 134;
@@ -124,7 +124,7 @@ See plan 60 "results and deviations".
   - **Accept:** cold start reaches Live against Docker Redis + MockProvider; SIGTERM exits 0; the freeze hook exits 134.
 - [ ] **D2 Lease:** acquire or the standby loop (every `renew_ms`); per-leadership rebuild (§5.H); demotion on `Fenced`; read the `epoch` key before acquire for Leader Changed (D7); register / unregister the sink beat around each term.
   - **Accept:** two hosts; kill the leader → the standby leads within 20 s; the stream has no gap.
-- [ ] **D3 Gate bridge (G2):** `PoolHandlers::on_tag(provider, Tag, number, hash)` (audit pool tests); `FinalityGate::on_safe` / `on_finalized` → `driver.set_gates`; `SafeRegression` / `SafeHashMismatch` → `on_safe_reorg_signal`; `FinalizedAnomaly` → `on_gate_frozen`.
+- [ ] **D3 Gate bridge (G2), re-scoped:** the bridge itself (`on_tag`, `FinalityGate` → `set_gates`, reorg / frozen signals) was delivered in D1. Remaining: host-level tests for `SafeRegression` → reverify, `FinalizedAnomaly` → frozen driver, and a failover where the new getLogs provider reports lower tags.
   - **Accept:** the driver leaves Recovering on real tag polls.
 - [ ] **D4 Heads → `ReorgDetector`:** fork walk via `call_to` on the WS provider; a crossing below `C_s` → `on_safe_reorg_signal`.
 - [ ] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
