@@ -22,6 +22,7 @@
 #include "app/pool_log_source.hpp"
 #include "app/tools.hpp"
 #include "chain/finality_gate.hpp"
+#include "chain/reorg_detector.hpp"
 #include "core/env.hpp"
 #include "core/log.hpp"
 #include "core/version.hpp"
@@ -30,6 +31,7 @@
 #include "ops/watchdog.hpp"
 #include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
+#include "rpc/codec.hpp"
 #include "sink/keys.hpp"
 #include "sink/lease.hpp"
 #include "sink/redis_sink.hpp"
@@ -46,6 +48,10 @@ using namespace std::chrono_literals;
 
 constexpr auto kDrainBudget = 25s;      // plan 4.8: flush the sink before exit
 constexpr auto kShutdownGrace = 300ms;  // lets aborted pool I/O unwind before the io loop stops
+// A fork walk fetches at most this many blocks (call_to is paced at reconcile_rps, so a long walk would hold the
+// provider's token bucket for minutes). A longer gap or deeper fork resyncs the ring and re-verifies instead.
+constexpr std::size_t kMaxWalkBlocks = 16;
+constexpr int kWalkAttempts = 3;  // restarts after an Inconsistent walk (a reorg mid-walk or a bad block)
 
 std::atomic<bool> g_signal_stop{false};
 extern "C" void on_signal(int) { g_signal_stop.store(true, std::memory_order_relaxed); }
@@ -58,14 +64,21 @@ std::uint64_t wall_ms() {
 /// Everything that exists only while the pipeline runs. Members are declared in dependency order, so the reverse
 /// destruction order tears down the driver first and the sink last.
 struct Runtime {
-    explicit Runtime(const std::string& shard) : keys(shard) {}
+    Runtime(const std::string& shard, std::size_t ring_size) : keys(shard), ring(ring_size) {}
     sink::Keys keys;
     std::unique_ptr<sink::RedisSink> sink;
     chain::FinalityGate gate;
+    chain::ReorgDetector ring;  // fed by WS heads on the io thread; read by `source` (also io thread)
     std::shared_ptr<provider::ProviderPool> pool;
     std::unique_ptr<PoolLogSource> source;
     std::unique_ptr<pipeline::Sweeper> sweeper;
     std::unique_ptr<pipeline::PipelineDriver> driver;
+};
+
+/// A WS head and the provider that delivered it.
+struct HeadEvent {
+    chain::BlockRef ref;
+    std::string provider;
 };
 
 class Host {
@@ -93,6 +106,12 @@ private:
     void start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token);
     net::awaitable<void> pipeline_loop();
     void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash);
+    // WS heads -> the term's ReorgDetector (plan 5.H). All of these run on the io thread.
+    void on_head(const rpc::Head& h, const std::string& provider);
+    void handle_head(const HeadEvent& e);
+    net::awaitable<void> walk_fork(std::uint64_t epoch, HeadEvent e);
+    void resync_ring(const chain::BlockRef& head, const std::string& why);
+    void bump_head_epoch();
     void schedule_beat();
     void on_beat();
     void request_exit(int code, const std::string& why);  // first reason wins
@@ -122,6 +141,11 @@ private:
     std::atomic<bool> stopping_{false};  // read by the worker thread too
     std::atomic<Phase> phase_{Phase::WaitingRedis};
     bool demoting_{false};
+    // Head handling: a walk in flight defers newer heads (the ring must not change under it); `head_epoch_` ends stale
+    // walks when the term ends or the WS provider changes.
+    bool walking_{false};
+    std::optional<HeadEvent> deferred_head_;
+    std::uint64_t head_epoch_{0};
     bool finished_{false};
     bool exit_set_{false};
     int exit_code_{0};
@@ -289,7 +313,8 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
                                              std::to_string(rep->version.patch)}});
         }
 
-        rt_ = std::make_unique<Runtime>(cfg_.shard.id);
+        bump_head_epoch();
+        rt_ = std::make_unique<Runtime>(cfg_.shard.id, cfg_.chain.hash_ring_size);
 
         auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, token);
         sopts.loop_beat = wd_.sink_beat_slot();
@@ -310,9 +335,16 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         h.on_tag = [this](const std::string& p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) {
             on_tag(p, tag, n, hash);
         };
+        h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
+        h.on_ws_active_changed = [this](const std::optional<std::string>&, std::string_view) {
+            // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
+            if (!rt_) return;
+            rt_->ring.reset();
+            bump_head_epoch();
+        };
         rt_->pool = provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
-        // Heads and the reorg ring arrive in 5-D4; until then block() has no ring and always asks a provider.
-        rt_->source = std::make_unique<PoolLogSource>(rt_->pool, nullptr);
+        // block() reads timestamps and hashes from the head ring first and asks a provider only on a ring miss.
+        rt_->source = std::make_unique<PoolLogSource>(rt_->pool, &rt_->ring);
 
         pipeline::SweeperOptions sw;
         sw.min_range = cfg_.backfill.min_range;
@@ -385,6 +417,121 @@ void Host::on_tag(const std::string& provider, provider::Tag tag, std::uint64_t 
     }
 }
 
+void Host::bump_head_epoch() {
+    ++head_epoch_;
+    walking_ = false;
+    deferred_head_.reset();
+}
+
+void Host::on_head(const rpc::Head& h, const std::string& provider) {
+    if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
+    HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
+    if (walking_) {
+        deferred_head_ = std::move(e);  // only the newest matters: the next walk or extension starts from it
+        return;
+    }
+    handle_head(e);
+}
+
+void Host::handle_head(const HeadEvent& e) {
+    auto& ring = rt_->ring;
+    if (const auto top = ring.top(); top && e.ref.number > *top + kMaxWalkBlocks) {
+        resync_ring(e.ref, "head gap of " + std::to_string(e.ref.number - *top) + " blocks");
+        return;
+    }
+    if (ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
+    walking_ = true;
+    net::co_spawn(ioc_, walk_fork(head_epoch_, e), net::detached);
+}
+
+// The ring cannot say whether the chain forked below C_s (a gap or a fork too deep to walk, or a provider that would
+// not answer): start over from this head and let the driver re-verify the released window.
+void Host::resync_ring(const chain::BlockRef& head, const std::string& why) {
+    log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
+    rt_->ring.reset();
+    rt_->ring.on_head(head);
+    rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
+}
+
+// Walks the new chain's ancestry back to the ring via eth_getBlockByNumber on the provider that sent the head.
+net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
+    const auto alive = [this, epoch] { return epoch == head_epoch_ && rt_ && rt_->driver; };
+    const auto pool = rt_->pool;  // keeps the pool alive while a call_to is in flight
+    try {
+        rpc::Decoder dec;
+        std::optional<chain::ReorgInfo> info;
+        std::string why;
+        for (int attempt = 0; attempt < kWalkAttempts && !info && why.empty(); ++attempt) {
+            auto walk = rt_->ring.begin_walk(e.ref);
+            std::size_t fetched = 0;
+            while (walk.state() == chain::ForkWalk::State::NeedBlock) {
+                if (++fetched > kMaxWalkBlocks) {
+                    why = "fork walk longer than " + std::to_string(kMaxWalkBlocks) + " blocks";
+                    break;
+                }
+                const std::uint64_t n = walk.need();
+                const auto o = co_await pool->call_to(e.provider, [n](std::uint64_t id) {
+                    return rpc::build_get_block_by_number(id, core::to_hex_u64(n), false);
+                });
+                if (!alive()) co_return;
+                if (!o.ok) {
+                    why = "block " + std::to_string(n) + " from " + e.provider + " failed: " + o.error;
+                    break;
+                }
+                const auto b = dec.parse_block(o.result_raw);  // DecodeError ends up in the catch below
+                if (!b) {
+                    why = e.provider + " has no block " + std::to_string(n);
+                    break;
+                }
+                walk.feed(chain::BlockRef{b->number, b->hash, b->parent_hash, b->timestamp});
+            }
+            if (!why.empty()) break;
+            switch (walk.state()) {
+                case chain::ForkWalk::State::Done:
+                    info = rt_->ring.apply(walk);
+                    break;
+                case chain::ForkWalk::State::BeyondRing:
+                    why = "fork deeper than the head ring";
+                    break;
+                case chain::ForkWalk::State::Inconsistent:  // a reorg mid-walk or a bad block: start over
+                case chain::ForkWalk::State::NeedBlock:
+                    break;
+            }
+        }
+        if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
+
+        walking_ = false;
+        if (info) {
+            const auto c_s = rt_->driver->status().c_s;
+            log::info("host", "head chain resolved",
+                      {{"fork_point", std::to_string(info->fork_point)},
+                       {"depth", std::to_string(info->depth)},
+                       {"old_top", std::to_string(info->old_top)},
+                       {"c_s", std::to_string(c_s)}});
+            // depth 0 = a gap that was only filled: nothing was replaced.
+            if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
+                log::warn("host", "head fork below C_s",
+                          {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
+                rt_->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " +
+                                                  std::to_string(c_s));
+            }
+        } else {
+            resync_ring(e.ref, why);
+        }
+        if (deferred_head_) {
+            HeadEvent next = std::move(*deferred_head_);
+            deferred_head_.reset();
+            handle_head(next);
+        }
+    } catch (const std::exception& ex) {
+        if (!alive()) co_return;
+        walking_ = false;
+        deferred_head_.reset();
+        log::error("host", "head walk threw", {{"error", ex.what()}});
+        resync_ring(e.ref, std::string("head walk threw: ") + ex.what());
+    }
+}
+
 void Host::schedule_beat() {
     beat_timer_.expires_after(opt_.beat_period);
     beat_timer_.async_wait([this](const boost::system::error_code& ec) {
@@ -442,6 +589,7 @@ void Host::demote(const std::string& why) {
 void Host::end_term() {
     if (stopping_ || !rt_) return;  // a shutdown overtook the demotion; finish() owns the teardown
     wd_.set_sink_registered(false);  // before the sink is destroyed
+    bump_head_epoch();               // a walk still waiting on a provider must not touch the runtime we destroy
     rt_->pool->stop();
     // Destroying the sink joins its thread (bounded by the Redis io timeout, 2 s): the io beat resumes right after.
     rt_.reset();
