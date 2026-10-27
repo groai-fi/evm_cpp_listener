@@ -14,6 +14,7 @@ struct BlockRef {
     std::uint64_t number{};
     core::Hash32 hash;
     core::Hash32 parent;
+    std::uint64_t timestamp{};  // Unix seconds; 0 = unknown (callers that need it must treat 0 as a ring miss)
 };
 
 enum class HeadKind {
@@ -61,6 +62,7 @@ public:
 
     std::optional<std::uint64_t> top() const;
     std::optional<core::Hash32> hash_at(std::uint64_t number) const;
+    std::optional<BlockRef> ref_at(std::uint64_t number) const;
     std::size_t size() const { return ring_.size(); }
 
 private:

@@ -37,6 +37,12 @@ std::optional<core::Hash32> ReorgDetector::hash_at(std::uint64_t number) const {
     return it->second.hash;
 }
 
+std::optional<BlockRef> ReorgDetector::ref_at(std::uint64_t number) const {
+    const auto it = ring_.find(number);
+    if (it == ring_.end()) return std::nullopt;
+    return it->second;
+}
+
 // Evaluates incoming head against ring top; categorizes into Seeded, Extended, Duplicate, or NeedWalk.
 HeadKind ReorgDetector::on_head(const BlockRef& head) {
     if (ring_.empty()) {
