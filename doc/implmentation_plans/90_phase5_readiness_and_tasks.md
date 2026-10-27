@@ -124,7 +124,7 @@ See plan 60 "results and deviations".
   - **Accept:** cold start reaches Live against Docker Redis + MockProvider; SIGTERM exits 0; the freeze hook exits 134.
 - [x] **D2 Lease:** acquire or the standby loop (every `renew_ms`); per-leadership rebuild (§5.H); demotion on `Fenced`; register / unregister the sink beat around each term. **Deferred to 5-E:** read the `epoch` key before acquire for Leader Changed (D7); no consumer yet (see plan 60, 5-D2 deviations).
   - **Accept:** two hosts; kill the leader → the standby leads within 20 s; the stream has no gap.
-- [ ] **D3 Gate bridge (G2), re-scoped:** the bridge itself (`on_tag`, `FinalityGate` → `set_gates`, reorg / frozen signals) was delivered in D1. Remaining: host-level tests for `SafeRegression` → reverify, `FinalizedAnomaly` → frozen driver, and a failover where the new getLogs provider reports lower tags.
+- [x] **D3 Gate bridge (G2), re-scoped:** the bridge itself (`on_tag`, `FinalityGate` → `set_gates`, reorg / frozen signals) was delivered in D1. D3 added host-level tests for `SafeRegression` → reverify, `FinalizedAnomaly` → frozen driver, and a failover where the new getLogs provider reports lower tags (plan 60, 5-D3).
   - **Accept:** the driver leaves Recovering on real tag polls.
 - [ ] **D4 Heads → `ReorgDetector`:** fork walk via `call_to` on the WS provider; a crossing below `C_s` → `on_safe_reorg_signal`.
 - [ ] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
