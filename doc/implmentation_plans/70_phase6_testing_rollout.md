@@ -5,7 +5,7 @@
 **Gate (master plan):** 72 h soak clean, as defined in §6.7.
 
 **Entry criteria:**
-- Phase 5 acceptance is met (chaos tests green, every alert fires and resolves in tests). Every Phase 5 slice is committed and merged to `main`.
+- Phase 5 acceptance is met (chaos tests green; in tests every condition alert fires and resolves and every event alert fires, plan 60 rev 10 §5.3.1). Every Phase 5 slice is committed and merged to `main`.
 - `make test` exits 0 in Debug (ASan/UBSan). `make prod-image` builds.
 
 **Section numbers are referenced elsewhere. Do not renumber:**

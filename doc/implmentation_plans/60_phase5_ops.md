@@ -1,4 +1,4 @@
-# Phase 5: Operations on Railway (prod) and Docker (local), rev 7
+# Phase 5: Operations on Railway (prod) and Docker (local), rev 10
 
 **Goal:** the process is observable, restarts itself when it wedges, and survives a provider outage, a container/host loss, and a Redis outage, all **without systemd**.
 
@@ -29,6 +29,7 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 - `/readyz`: 200 iff the process is leader and Live, or a healthy standby; sink not saturated; gate age OK. Returns a JSON body with state.
 - `/metrics`: Prometheus text (prometheus-cpp core `TextSerializer`).
 - The service gets **no public domain**: endpoints stay on the private network. No secrets appear in any response.
+- The acceptor sets `ip::v6_only(false)` explicitly (rev 10), so `[::]` also accepts IPv4 (`127.0.0.1` in local tests) whatever the host's `net.ipv6.bindv6only` default is.
 
 ## 5.3 Alerting without Prometheus
 ### 5.3.1 n8n alert webhook (existing workflow "EVM Listener Alert Webhook" → Slack `#strategy-production`)
@@ -39,8 +40,9 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
     "host": "<EVML_HOST_ID>", "title": "<alert title>", "message": "<one line>",
     "ts": "<ISO-8601 UTC>", "details": { "...": "alert-specific numbers" } }
   ```
-- Rules are evaluated in-process every 10 s.
-  - Each incident sends one *fire* message and one *resolve* message (`severity=info`, title prefixed `RESOLVED:`), with a 15 min re-notify while it is still firing.
+- Rules are evaluated in-process every 10 s. Each alert in §5.3.3 is one of two kinds (rev 10):
+  - **Condition** (a state that is true or false now, e.g. Safe Gate Stuck): one *fire* message, a 15 min re-notify while it is still true, and one *resolve* message (`severity=info`, title prefixed `RESOLVED:`) when it clears.
+  - **Event** (something that happened once, e.g. Provider Failover): one message per occurrence, rate-limited per key (provider, group, …) to one per 15 min. **No resolve message**: there is no state that "clears". Example: QuickNode → Infura failover pages once; it does not send `RESOLVED:` 10 s later because Infura is healthy, and it does not re-notify every 15 min while QuickNode stays down (Provider Quota Exhausted / Auth Failure cover that state).
   - The POST is async on the io thread.
   - **Delivery failure is visible but not fatal.** A non-2xx or timeout is retried 3× with jittered backoff. Then ERROR is logged and `evml_alert_send_failures_total` is incremented; `/readyz` stays unaffected. The dead-man's switch covers the case where alerts can't get out.
 
@@ -76,7 +78,7 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 | Provider Inconsistency / Gate Regressed (finalized) | > 0 | critical | `provider, block, expected_hash, got_hash` |
 | Provider Inconsistent (rev 5, G2) | `report_bad` on a provider (bad getLogs response, or canonical-hash disagreement); rate-limited to one per provider per 15 min | warning | `provider, reason, block_range, count_1h` |
 | Safe Sweep Unreliable (rev 5, D2) | > 3 late logs (missed by the safe sweep, found by the final sweep) in 1 h | warning | `count_1h, provider, last_block` |
-| Pipeline Stalled (rev 5, G4) | a cursor missed 3 consecutive progress deadlines, or a sweep returned `Stalled` (min range still failing, or no hash quorum) | critical | `class, cursor, gate, provider, detail` |
+| Pipeline Stalled (rev 5, G4) | a cursor missed 3 consecutive progress deadlines, or a sweep returned `Stalled` (min range still `RangeTooLarge`, or no agreement after `max_bad_attempts` bad pages) | critical | `class, cursor, gate, provider, detail` |
 | Leader Changed | lease taken over by another host | warning | `old_host, new_host` |
 | Redis Misconfigured | eviction policy ≠ `noeviction` or persistence off (startup check) | critical | `maxmemory_policy, appendonly, redis_version` |
 | Consumer Lagging (r6, Q2) | `max(undelivered_age_s, pending_age_s)` > `consumer_lag_warn_s` (12 h) | warning | `stream, group, undelivered_age_s, pending_age_s, lag, retention_s` |
@@ -85,6 +87,8 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 | Consumer Group Missing (r6, Q2) | configured group not found for 10 min | warning | `stream, group` |
 
 The four consumer alerts come from the Phase 4 §4.10 probe and are rate-limited to one per group per 15 min.
+
+**Kinds (rev 10, §5.3.1):** **Event** alerts are Provider Failover, Safe Reorg, Sink Fenced, Sink Invariant, WS Missed Logs, Provider Inconsistent, Leader Changed and Consumer Entries Trimmed. Every other row is a **condition** alert.
 
 **Never** alert on event silence. Your sample `seconds_since_last_event > 120s` would page during every quiet minute; gauge events can be hours apart (master W6). The sample's title "WebSocket Stalled" is kept, with a head-based trigger.
 
@@ -96,7 +100,7 @@ The production implementation of Phase 3's `LogSource` interface:
 - **Token bucket per provider** (`reconcile_rps`, default 2, burst 4), so catch-up bursts don't cause 429s in the first place.
 - **`report_bad(p, reason)`** → `on_failure(Retry)` on that provider and `provider_inconsistency_total{p}`. After `failover_after` failures the provider is `Down` and recovers only through a probe.
 - **Page retries exclude** the provider that just failed or answered badly (`pick_getlogs(exclude={p})`).
-- **`block(n)` is independent of the getLogs provider:** it reads the `ReorgDetector` ring first (fed by the WS provider); on a ring miss it calls `eth_getBlockByNumber` on a provider **other than** the one that returned the logs. Disagreement → no release + `report_bad`; no quorum after N attempts → the sweep returns `Stalled`.
+- **`block(n)` is independent of the getLogs provider:** it reads the `ReorgDetector` ring first (fed by the WS provider); on a ring miss it calls `eth_getBlockByNumber` on a provider **other than** the one that returned the logs. Disagreement → no release + `report_bad`; no quorum after N attempts → `block(n)` returns nullopt, which the sweeper treats as `Retry`; the progress deadline then raises `PipelineStalled` (rev 9).
 
 ## 5.5 Cross-host redundancy: active-passive via a Redis lease (✅ accepted)
 Why: it keeps 1× RPC quota on plans that are already limited. With pools at `safe`, a takeover adds ≤ 20 s on top of the ≈ 20–30 s safe-class latency, and only during the takeover itself.
@@ -157,18 +161,19 @@ On a redeploy the other service takes over through the lease.
 - Chaos (toxiproxy, local compose): latency 5 s, `reset_peer`, timeout, bandwidth 0 on provider and Redis links → automatic recovery with an exact stream.
 - `docker pause listener-a` → watchdog cannot run while the process is paused, so the lease expires and b takes over within 20 s. After unpause, a either demotes itself on its next renew attempt, or (if its watchdog fires first) restarts and comes back as standby; both are correct (rev 8 D2).
 - io-freeze test hook (rev 8 D3: `EVML_TEST_HOOKS` build, `--test-freeze-io-after <s>`) → watchdog aborts within `process_stall_ms` (30 s), exit 134. SIGSTOP cannot target one thread.
-- Alert rules: unit tests that feed synthetic metric snapshots and expect each alert to fire and resolve.
+- Alert rules: unit tests that feed synthetic metric snapshots and expect each condition alert to fire, re-notify after 15 min and resolve, and each event alert to fire once per occurrence, respect its 15 min rate limit and never send `RESOLVED:` (rev 10).
 - Alert transport: a MockProvider-style HTTP sink asserts the exact JSON schema, the `X-API-Key` header, and the 3× retry followed by the failure metric, and checks that the token never appears in any log line.
 - Live (manual, once): send a `severity=info` test alert to the real n8n webhook → it appears in `#strategy-production`.
 - Dead-man (local, mock HTTP sink): only the leader pings; the standby sends 0 pings; pings stop when the sink saturates or `C_s` stalls; an empty URL gives a startup WARN and `"deadman":"disabled"`.
-- LogSource adapter (rev 5, MockProvider): token bucket caps the rate; `report_bad` moves a provider toward `Down` and the page is retried on another one; `block(n)` hits the ring before any RPC and never asks the provider that returned the logs; disagreement ⇒ no release, no quorum ⇒ `Stalled`.
-- Contract coverage (rev 5): adding a contract with `start_block ≤ C_s` ⇒ exit 2 naming it; `--backfill-contract` against Docker Redis + MockProvider emits exactly that contract's history (finalized below C_f, safe and tracked above), updates the manifest, and a second run adds 0 entries; the next startup passes.
-- New alerts: Provider Inconsistent, Safe Sweep Unreliable and Pipeline Stalled fire and resolve from synthetic snapshots.
-- Rev 6 alerts: Redis Unreachable, Sink Fenced, Sink Invariant and the four consumer alerts fire and resolve from synthetic snapshots (including `ConsumerLag` snapshots from the Phase 4 §4.10 probe); consumer alerts respect the 15 min per-group rate limit.
+- LogSource adapter (rev 5, MockProvider): token bucket caps the rate; `report_bad` moves a provider toward `Down` and the page is retried on another one; `block(n)` hits the ring before any RPC and never asks the provider that returned the logs; disagreement ⇒ no release, no quorum ⇒ nullopt (`Retry`).
+- Contract coverage (rev 5): adding a contract with `start_block ≤ C_s` ⇒ exit 2 naming it; `--backfill-contract` against Docker Redis + MockProvider emits exactly that contract's history (finalized below C_f, safe and tracked above), updates the manifest, and a second run adds 0 entries; the next startup passes. Lease (D8, rev 10): with no live leader the backfill acquires the lease, never gets `FENCED` and releases it at the end; while another host holds it, exit 1 within 60 s and nothing written.
+- Ops HTTP dual-stack (rev 10, §5.2): `http://127.0.0.1:<port>/healthz` and `http://[::1]:<port>/healthz` both return 200.
+- New alerts: Provider Inconsistent (event), Safe Sweep Unreliable and Pipeline Stalled (conditions) fire, and the conditions resolve, from synthetic snapshots.
+- Rev 6 alerts: Redis Unreachable, Sink Fenced, Sink Invariant and the four consumer alerts fire from synthetic snapshots, and the condition ones resolve (including `ConsumerLag` snapshots from the Phase 4 §4.10 probe); consumer alerts respect the 15 min per-group rate limit.
 - WS liveness `ping` tests moved to [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md) §10 (rev 9).
 
 ## Acceptance
-All chaos scenarios recover automatically. A lease takeover produces a gap-free, duplicate-free stream, and every alert fires and resolves in tests.
+All chaos scenarios recover automatically. A lease takeover produces a gap-free, duplicate-free stream. In tests every condition alert fires and resolves, and every event alert fires (rev 10).
 
 ## Rev 5 changelog (3d review, see 80_phase3d_review.md)
 Integrated above: §5.1 per-cursor progress deadline, §5.3.3 three new alerts, §5.4 metrics, §5.4a LogSource adapter, §5.6 config keys, §5.6a coverage check and `--backfill-contract`, and the matching tests. Refinement made while integrating: the backfill tool also covers `(C_f, C_s]` for safe-class contracts (tracked in `released`). Stopping at `C_f` would have left that window uncovered, because the manifest marks the contract as covered up to `C_s`.
@@ -254,6 +259,13 @@ Decisions approved by the user:
 - Tests: `kill -STOP` line replaced by the D3 hook; the `docker pause` outcome now accepts the D2 restart path.
 - §5.H: lease-disabled branch, per-leadership rebuild list, watchdog/`/healthz` behaviour without a sink, and the Leader Changed source added (below).
 - §5.4a: "no quorum → `Stalled`" cannot be signalled through today's `LogSource::block()` (nullopt = `Retry`, [sweeper.cpp:173-178](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/sweeper.cpp#L173-L178)). v1 keeps `Retry`; the per-cursor progress deadline already raises `PipelineStalled` after 3 × `progress_stall_ms` (6 min at defaults). No interface change.
+
+## Rev 10 changelog (2026-10-27, plan moved into the repo)
+- The plan now lives at `doc/implmentation_plans/60_phase5_ops.md` (was in an agent conversation folder). Cross-links to sibling plans are relative.
+- §5.3.1 / §5.3.3: alerts split into **condition** (fire, re-notify, resolve) and **event** (once per occurrence, rate-limited, no resolve). Rev 9 applied fire/resolve to every row, which would send a bogus `RESOLVED: Provider Failover` 10 s after a failover, or re-notify it for as long as the old provider stays down. Tests and Acceptance follow; Phase 6 entry criteria (plan 70) and slice 5-E (plan 90) updated to match.
+- §5.2: explicit `v6_only(false)` on the `[::]` acceptor, with a dual-stack `/healthz` test (IPv4 and IPv6 loopback).
+- §Tests: backfill lease tests for D8 (acquire, no `FENCED`, release; exit 1 when the lease is held). Plan 90 slices 5-B and 5-G updated to match.
+- Stale rev 7 text fixed: §5.4a and §Tests still said "no quorum → `Stalled`", which the rev 9 review had already replaced with nullopt → `Retry`. The Pipeline Stalled row now names the two real `Stalled` sources in [sweeper.cpp](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/sweeper.cpp) (min range still too large; no agreement after `max_bad_attempts`).
 
 ## Phase 5 results and deviations (per slice)
 

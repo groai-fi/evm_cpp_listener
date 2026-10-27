@@ -1,7 +1,7 @@
 # Job 71: WS liveness mode `ping` (opt-in, after Phase 6)
 
 **Status:** planned, **not part of Phase 5 or Phase 6**. Moved out of plan 60 (was §5.1a, rev 7, slice 5-J) by user decision on 2026-10-22.
-**Runs after:** Phase 6 complete (go-live done, quota measurement taken in `heads` mode). File prefix 71 because 70 is the Phase 6 plan (`70_phase6_testing_rollout.md`, not written yet). The measurement is Phase 6 §6.4 (`70_phase6_testing_rollout.md`).
+**Runs after:** Phase 6 complete (go-live done, quota measurement taken in `heads` mode). File prefix 71 because 70 is the Phase 6 plan ([70_phase6_testing_rollout.md](70_phase6_testing_rollout.md)). The measurement is Phase 6 §6.4.
 **Default stays `heads`.** Nothing in Phase 5 or 6 depends on this job.
 
 ## 0. Why this is a separate job
@@ -47,7 +47,7 @@ A ping is **bad** if any of these happen:
 | Session stall (`head_stall_ms`, `ProviderPool::tick`) | Replaced by `ping_stall_count` bad pings in a row. Detection takes ≈ `ping_stall_count × ping_interval_s` (10 min at defaults) instead of 15 s | WS failover is slower. No data impact |
 | WS head lag vs the getLogs provider (`StaleDetector::ws_stale`) | Compared **once per ping** against the getLogs provider's latest `eth_blockNumber` (polled every `safe_poll_ms`). The ping head is not kept as a standing value: a 5-min-old head would read as ≈ 150 blocks behind and demote a healthy WS. `ws_lag_for` becomes "`ping_stall_count` lagging pings in a row" | Same rule, coarser timing |
 | `StaleDetector::divergence()` head term | Uses the same per-ping comparison. The safe-tag term is unchanged | none |
-| Hash ring (`ReorgDetector`, 1024 blocks) used by `LogSource::block(n)` (Phase 5 §5.4a) | Ring stays empty, so every distinct event block reads its canonical hash with `eth_getBlockByNumber` on a provider other than the one that returned the logs. That is already the path today for blocks outside the ring (catch-up) | Same safety (still an independent source). Cost: at most one call per distinct event block while Live (≤ ≈ 9.7k/day at today's event rate, usually fewer), on a non-getLogs provider, paced by `reconcile_rps` |
+| Hash ring (`ReorgDetector`, 1024 blocks) used by `LogSource::block(n)` (Phase 5 §5.4a) | Ring stays empty, so every distinct event block reads its canonical hash with `eth_getBlockByNumber` on a provider other than the one that returned the logs. That is already the path today for blocks outside the ring (catch-up) | Same safety (still an independent source). Cost: at most one call per distinct event block (per-sweep cache, §8; many logs in one block cost one call) while Live (≤ ≈ 9.7k/day at today's event rate, usually fewer), on a non-getLogs provider, paced by `reconcile_rps` |
 | Unsafe-reorg detection above `G_s` | Not detected. Orphaned WS logs show up as `ws_extra_logs_total` when the sweep covers the block, instead of being purged early | Metric noise only. Nothing above `G_s` is ever released |
 | Safe-reorg detection | **Unchanged.** It comes from `G_s` regression, `hash(G_s)` from tag polls, the final-sweep diff and re-verify. None of these uses `newHeads` | none |
 | `head` in `gate_lag_blocks{class}` and alert details | Taken from the getLogs provider's `eth_blockNumber` poll, which already runs every `safe_poll_ms` | none |
@@ -95,6 +95,7 @@ Log notifications (≈ 9.7k/day) are billed in both modes. If the quota is still
 - `StaleDetector`: a per-sample head comparison (`on_ws_ping_head`) next to `on_ws_head`.
 - `pool_config.cpp`: `subscribe_heads = (liveness == heads)`.
 - `config.cpp`: parses the `[ws]` section and validates it.
+- `pool_log_source` (`LogSource` adapter, Phase 5 slice 5-C): a per-sweep block-info cache keyed by block number, so `block(n)` makes at most one `eth_getBlockByNumber` per distinct block across all pages of a sweep. Example: 200 logs in 50 blocks → 50 calls, not 200. Clear it at the start of each sweep and on any reorg signal, so a reorged hash is never reused. Only verified answers are cached (a disagreement or nullopt is not).
 - Phase 5 interplay to check at start: the `on_tag` callback and `ProviderPool` API added in Phase 5 slices 5-C/5-D, and the host's `ReorgDetector` feeding. In `ping` mode the host must not wait for heads.
 
 ## 9. Task list
@@ -104,7 +105,7 @@ Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits witho
 - [ ] **W-1 Config:** `[ws]` section parse and validation, `base.toml` keeps the defaults (`heads`). Tests in `tests/config_test.cpp`: defaults, `ping_interval_s` below 30 / above 900 exits 2, unknown `liveness` exits 2.
 - [ ] **W-2 `WsSession` ping:** timer, id-matched response, bad-ping classification (timeout, RPC error with quota/auth kinds kept, non-advancing number). Tests with `tests/mock_ws_server` answering `eth_blockNumber` mid-stream.
 - [ ] **W-3 Pool + stale detector:** stall branch and lag branch switch on mode; `on_ws_ping_head`; `subscribe_heads = (liveness == heads)`. Tests: see §10.
-- [ ] **W-4 Host + alerts:** host runs without heads in `ping` mode (empty ring path via `LogSource::block(n)`), `WebSocket Stalled` ping trigger and details. Test the ring-empty path asks a provider other than the logs provider.
+- [ ] **W-4 Host + alerts:** host runs without heads in `ping` mode (empty ring path via `LogSource::block(n)`), `WebSocket Stalled` ping trigger and details. Per-sweep block-info cache in the adapter (§8). Test the ring-empty path asks a provider other than the logs provider, and the cache test in §10.
 - [ ] **W-5 Canary:** deploy the new binary to **both** services first (old binaries exit 2 on `[ws]`). Then set `[ws] liveness = "ping"` on **both** services together: the standby opens no WS, so a standby-only canary measures nothing, and mixed modes would flip WS cost on every takeover. Watch the leader for 24 h: provider-dashboard calls/day against the `heads` baseline, `WebSocket Stalled` silent, stream gap-free. Roll back = remove `[ws]` and redeploy. Record the decision here.
   - Config is baked into the image (`/app/config/base.toml`), so changing mode is a redeploy; both services build from the same commit.
 
@@ -114,6 +115,7 @@ Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits witho
 - quota and auth errors on a ping keep their classification;
 - a healthy ping head is never demoted for lag between pings, but a ping head > `stale_after_blocks` behind the getLogs head for `ping_stall_count` pings is demoted;
 - with the ring empty, `block(n)` asks a provider other than the one that returned the logs;
+- block cache: a catch-up sweep with 200 logs spanning 50 blocks makes exactly 50 `eth_getBlockByNumber` calls; after a reorg signal the same block is fetched again;
 - `heads` mode is byte-for-byte unchanged (the existing session and pool tests pass untouched);
 - config: out-of-range `ping_interval_s` and an unknown `liveness` value exit 2.
 
@@ -129,3 +131,4 @@ Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits witho
 ## Changelog
 - 2026-10-22: created from plan 60 §5.1a (rev 7), moved out of Phase 5 by user decision.
 - 2026-10-22 review: renamed from `70_ws_ping_liveness.md` (70 is the Phase 6 plan); "§6.4" now confirmed against the Phase 6 plan; W-5 canary fixed (a standby-only canary measured nothing because the standby opens no WS).
+- 2026-10-27: added a per-sweep block-info cache in the `LogSource` adapter (§5 cost row, §8, W-4) and its test in §10 (200 logs over 50 blocks → exactly 50 calls).

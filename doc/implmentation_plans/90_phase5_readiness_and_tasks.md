@@ -115,6 +115,7 @@ Rules for every slice:
 - [ ] Tests:
   - HTTP client against `tests/mock_http_server` (header sent, timeout, non-2xx);
   - server endpoints;
+  - dual-stack bind (`v6_only(false)`, plan 60 §5.2): `http://127.0.0.1:<port>/healthz` and `http://[::1]:<port>/healthz` both return 200;
   - watchdog: fires at 30 s, does not fire after an injected self-pause, does not fire while beats are fresh.
 
 ### 5-C `LogSource` adapter (§5.4a)
@@ -171,7 +172,7 @@ Rules for every slice:
 - [ ] `src/ops/alerts.{hpp,cpp}`: **pure** rule evaluation over an `OpsSnapshot` built from:
   - driver status, sink status, consumer lag, pool state / transitions, startup facts;
   - role, and the gate / cursor advance timestamps.
-- [ ] Every row of §5.3.3: fire / resolve / 15 min re-notify; per-group and per-provider 15 min rate limits; ownership per D7.
+- [ ] Every row of §5.3.3, by kind (plan 60 rev 10 §5.3.1): **condition** alerts fire / 15 min re-notify / resolve; **event** alerts fire once per occurrence with no resolve. Per-group and per-provider 15 min rate limits; ownership per D7.
 - [ ] Treat a consumer-lag snapshot older than 2× the probe interval as unknown.
 - [ ] `src/ops/alert_sender`: the exact JSON schema and the `X-API-Key` header. 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`. The token and URL never appear in logs.
 - [ ] `src/ops/deadman`:
@@ -180,7 +181,7 @@ Rules for every slice:
   - failures counted;
   - an empty URL gives `"deadman":"disabled"` in `/readyz`.
 - [ ] Tests:
-  - synthetic snapshots → each alert fires and resolves, including rev 5/6 and the four consumer alerts with their rate limit;
+  - synthetic snapshots → each condition alert fires and resolves, each event alert fires once and never sends `RESOLVED:` (e.g. one Provider Failover → exactly 1 POST, none on the next 10 s tick), including rev 5/6 and the four consumer alerts with their rate limit;
   - transport test against the mock HTTP sink (schema, header, retry count, failure metric, token absent from captured logs);
   - dead-man: leader pings, standby sends 0, no pings when saturated or stalled.
 
@@ -200,6 +201,9 @@ Rules for every slice:
   - exit 0 / 1.
 - [ ] `--check-redis`: connect, run the startup checks, print the address family (plan 50 §4.3, used by the Phase 6 Railway smoke test).
 - [ ] Integration: run the backfill twice → the second run adds 0 entries; the next startup passes the coverage check.
+- [ ] Lease tests (D8), Docker Redis:
+  - no live leader → the backfill acquires the lease, emits the historical events, updates the manifest, never gets `FENCED`, and releases the lease at the end (the `leader` key is gone or free afterwards);
+  - another host holds the lease → exit 1 within 60 s and nothing written (stream length and manifest unchanged).
 
 ### 5-H Image + Railway + local compose
 - [ ] `docker/Dockerfile.prod`:
