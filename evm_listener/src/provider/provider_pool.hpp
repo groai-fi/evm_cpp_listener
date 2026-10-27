@@ -73,6 +73,9 @@ struct PoolConfig {
     std::uint32_t reconcile_burst{4};  // must be >= reconcile_rps
 };
 
+/// @brief Block tag identifiers for chain progression queries.
+enum class Tag { Safe, Finalized };
+
 /// @brief Event callbacks fired by the provider pool for streaming blocks, logs, transitions, and connection events.
 struct PoolHandlers {
     // All optional; called on the pool's executor, must not throw.
@@ -83,10 +86,9 @@ struct PoolHandlers {
     std::function<void(const std::optional<std::string>&, std::string_view reason)> on_ws_active_changed;
     std::function<void(const std::string& provider)> on_ws_ready;
     std::function<void(const rpc::WsClosed&, const std::string& provider)> on_ws_down;
+    // A fresh `safe` / `finalized` tag answered by `provider` (every successful read_tag, whoever asked for it).
+    std::function<void(const std::string& provider, Tag, std::uint64_t number, const core::Hash32& hash)> on_tag;
 };
-
-/// @brief Block tag identifiers for chain progression queries.
-enum class Tag { Safe, Finalized };
 
 /// @brief Point-in-time snapshot of a resolved block tag (number and hash) from a specific provider.
 struct TagSnapshot {

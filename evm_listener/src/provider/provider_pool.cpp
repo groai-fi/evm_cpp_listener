@@ -485,6 +485,7 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
     s.at = Clock::now();
     // Cache tag snapshot in node record to avoid redundant network calls.
     nodes_.at(provider).tags[tag_index(tag)] = s;
+    if (running_ && handlers_.on_tag) handlers_.on_tag(provider, tag, s.number, s.hash);
     co_return s;
 }
 

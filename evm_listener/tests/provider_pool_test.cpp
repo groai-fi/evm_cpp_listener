@@ -515,6 +515,37 @@ TEST_CASE("pool: tags are cached per answering provider and never mixed after a 
     shutdown(ioc, pool);
 }
 
+TEST_CASE("pool: on_tag fires with provider/tag/number only while the pool is running", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    chain.safe = 150;
+    MockHttpServer ha(ioc, healthy(chain));
+    struct Seen {
+        std::string provider;
+        Tag tag;
+        std::uint64_t number;
+    };
+    std::vector<Seen> seen;
+    PoolHandlers h;
+    h.on_tag = [&](const std::string& p, Tag t, std::uint64_t n, const evml::core::Hash32&) {
+        seen.push_back({p, t, n});
+    };
+    auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", kDeadWs, ha.url()}}, {"A"}, {"A"}), h);
+    pool->start();
+
+    REQUIRE(run_sync(ioc, pool->read_tag("A", Tag::Safe)).has_value());
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].provider == "A");
+    CHECK(seen[0].tag == Tag::Safe);
+    CHECK(seen[0].number == 150);
+
+    pool->stop();
+    run_until(ioc, [] { return false; }, 150ms);
+    ioc.restart();
+    (void)run_sync(ioc, pool->read_tag("A", Tag::Safe));
+    CHECK(seen.size() == 1);  // stopped pool does not call handlers
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // call_to / report_bad / pick_getlogs_excluding (5-C1)
 // ---------------------------------------------------------------------------------------------------------------
