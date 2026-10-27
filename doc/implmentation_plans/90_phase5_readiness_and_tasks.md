@@ -76,171 +76,114 @@ Reviewed [60_phase5_ops.md](60_phase5_ops.md) (rev 7) against the code at `d91de
 
 ---
 
-## 3. Task list for the worker agent
+## 3. Task list for the worker agent (rev 2, 2026-10-27: replaces the rev 1 list; status as of this date)
 
 Rules for every slice:
-- Use `make build` / `make test` with exit code 0 as the gate. The tree is ASan/UBSan `-Werror`.
-- No commits without the user's instruction.
-- Surgical diffs.
+- **Gate:** `make build` and `make test` exit 0. The tree is ASan/UBSan `-Werror`. Run make with `PATH=/usr/local/bin:$PATH` and the dev container up (`docker compose -f .devcontainer/docker-compose.yml up -d dev`).
+- Update plan 60 "results and deviations" before ticking a slice.
+- No commits without the user's instruction. Surgical diffs.
 - Secrets come from the env only, and `redact()` is applied before any log line.
-- Leave plan 60 updated with a "results and deviations" list per slice, as in plan 50.
 
-### 5-0 Prep (docs only)
-- [x] Write §5.H (host) and D2–D11 into plan 60. Fix the paths (R9) and the config sections (R8).
-- [x] Update master plan §5 status (Phase 4 committed; Phase 5 started).
-- [x] Remove `-DEVML_BUILD_COMMON=OFF` from `docker/Dockerfile.prod` (R10). Check `mk/*.mk` for the same flag.
-- **Accept:** `make build` passes with no CMake unused-variable warning.
+Status: ✅ done · 🟡 partial · ⬜ not started.
 
-### 5-A Config additions
-- [x] `[chain] pending_max_logs` (default 200000) and `[redundancy] reconcile_rps` (2) / `reconcile_burst` (4, which must be ≥ rps). Validate them, and add them to `base.toml`.
-- [x] `PORT` override of the `http_listen` port (D5); malformed `PORT` → exit 2.
-- [x] Tests in `tests/config_test.cpp`: defaults, out-of-range values exit 2, `PORT` override.
+### ✅ 5-0 Prep · ✅ 5-A Config
+See plan 60 "results and deviations".
 
-### 5-B Ops primitives (pure / unit-testable, no host yet)
-- [ ] `src/ops/http_client.{hpp,cpp}`: an async Beast HTTPS client on the io executor.
-  - `post_json(url, body, headers)` and `get(url)`.
-  - Timeout and TLS verification, using the same SSL context approach as `HttpRpcClient`.
-  - The URL is redacted in every error.
-- [ ] `src/ops/ops_http_server.{hpp,cpp}`: Beast server on the io thread with `/healthz`, `/readyz` and `/metrics`.
-  - It calls callbacks that return status code + body.
-  - Unknown paths → 404.
-  - Bind `[::]`.
-- [ ] `src/ops/metrics.{hpp,cpp}`: a prometheus-cpp registry plus `TextSerializer`.
-  - Helper to set a counter from a monotonic total (delta increment), because the sink and sweeper expose totals.
-- [ ] `src/ops/watchdog.{hpp,cpp}`: one thread, two `std::atomic<uint64_t>` heartbeats (io tick, sink loop), a 1 s check, and the threshold from `[watchdog].process_stall_ms` (30 000).
-  - Pause tolerance as in D2.
-  - On abort: `write(2)` a pre-formatted CRITICAL line, then `std::abort()`. No locks, no allocation in the loop.
-  - Clock and abort are injectable for tests.
-  - The sink beat is checked only while a sink is registered (leader); standby and the startup Redis wait check the io beat only (§5.H).
-- [ ] Tests:
-  - HTTP client against `tests/mock_http_server` (header sent, timeout, non-2xx);
-  - server endpoints;
-  - dual-stack bind (`v6_only(false)`, plan 60 §5.2): `http://127.0.0.1:<port>/healthz` and `http://[::1]:<port>/healthz` both return 200;
-  - watchdog: fires at 30 s, does not fire after an injected self-pause, does not fire while beats are fresh.
+### 🟡 5-B Ops primitives (pure / unit-testable, no host yet)
+- [x] **B1 `src/ops/watchdog.{hpp,cpp}`** (rework done 2026-10-27, review decisions Q1–Q3 accepted):
+  - one thread, two heartbeats (io tick, sink loop), 1 s check, threshold passed in by the caller (no default, 0 throws);
+  - D2 pause tolerance; abort line on **stdout** in the `core/log` schema (`ts`, `level`, `message`, `component`) with the last known state (`role`, `driver_state`, `c_s`, `c_f`, `g_s`, `g_f`, `sink_mode`, published by the io thread through `publish_state`);
+  - `stale_heartbeat()` for `/healthz`;
+  - the sink stores its beat through `RedisSinkOptions::loop_beat`, which points at storage owned by the watchdog (`sink_beat_slot()`); unregister the sink (`set_sink_registered(false)`) **before** destroying it;
+  - `std::abort()` → exit 134.
+  - Open points: A7 (134 needs `tini` as PID 1; verified in 5-I inside the prod image); the host must pass `[watchdog].process_stall_ms` (5-D1).
+- [ ] **B2 `src/ops/http_client.{hpp,cpp}`:** async Beast HTTPS client on the io executor: `post_json(url, body, headers)` and `get(url)`. Timeout, TLS verification (same SSL context approach as `HttpRpcClient`), URL redacted in every error.
+  - Tests against `tests/mock_http_server`: header sent, timeout, non-2xx, URL absent from errors.
+- [ ] **B3 `src/ops/ops_http_server.{hpp,cpp}`:** Beast server on the io thread with `/healthz`, `/readyz`, `/metrics` through callbacks returning status + body; unknown path → 404; bind `[::]` with `v6_only(false)`.
+  - Tests: each endpoint, 404, and dual-stack (`http://127.0.0.1:<port>/healthz` and `http://[::1]:<port>/healthz` both 200).
+- [ ] **B4 `src/ops/metrics.{hpp,cpp}`:** prometheus-cpp registry + `TextSerializer`; helper that sets a counter from a monotonic total (delta increment).
+  - Tests: serialized output contains the names; repeated totals do not double-count.
 
-### 5-C `LogSource` adapter (§5.4a)
-- [ ] `ProviderPool` public API (audit every call site):
-  - `call_to(provider, RequestBuilder)`;
-  - `pick_getlogs_excluding(set)`;
-  - `report_bad(provider, reason)` → book `on_failure(Retry)` + an inconsistency counter;
-  - a per-provider token bucket (`reconcile_rps` / `burst`) that every `call_to` respects.
-- [ ] `src/app/pool_log_source.{hpp,cpp}` implementing `pipeline::LogSource`:
+### ⬜ 5-C `LogSource` adapter (§5.4a), parallel with 5-B
+- [ ] **C1 `ProviderPool` public API** (audit every call site; `call_on` is private today):
+  - `call_to(provider, RequestBuilder)`, `pick_getlogs_excluding(set)`, `report_bad(provider, reason)` → book `on_failure(Retry)` + an inconsistency counter, and a per-provider token bucket (`reconcile_rps` / `burst`) that every `call_to` respects.
+- [ ] **C2 `src/app/pool_log_source.{hpp,cpp}`** implementing `pipeline::LogSource`:
   - `get_logs` retries the next provider, excluding the ones already tried;
-  - `block(n)` reads the `ReorgDetector` ring first; on a miss it uses `eth_getBlockByNumber` on a provider ≠ the logs provider;
-  - disagreement → `report_bad` + nullopt;
-  - no quorum after N attempts → return nullopt. The sweeper treats nullopt as `Retry` ([sweeper.cpp:173-178](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/sweeper.cpp#L173-L178)); the progress deadline raises `PipelineStalled` after 3 × `progress_stall_ms`. Do **not** change the `LogSource` interface or the sweeper (rev 9).
-- [ ] Tests against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item.
+  - `block(n)` reads the `ReorgDetector` ring first; on a miss it asks a provider ≠ the logs provider;
+  - disagreement → `report_bad` + nullopt; no quorum → nullopt (= `Retry`);
+  - **no block-info cache** (Q4: the sweeper already reads each distinct block once per page);
+  - do **not** change the `LogSource` interface or the sweeper (rev 9).
+- [ ] **C3 Tests** against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item, plus "one `block(n)` call per distinct block per page".
 
-### 5-D Host process (G1, G2, G3; spec from §5.H)
-- [ ] CLI: no action flag + `--config` = run the listener. Keep the existing tool flags.
-- [ ] Threads: **io** (pool, driver tick loop, ops HTTP, alerts, pinger), **sink** (`RedisSink::start()`) and **watchdog**. Cross-thread reads only through `RedisSink::status()` / atomics.
-- [ ] Startup order:
-  1. `log::init`;
-  2. ops HTTP up, so `/healthz` answers during the Redis wait;
-  3. watchdog;
-  4. `await_redis_ready` + startup checks (→ Redis Unreachable / Misconfigured facts);
-  5. lease acquire **or** standby loop (poll every `renew_ms`); with `[lease] enabled = false`, skip both and use `lease_disabled_token()`;
-  6. on leadership: build fresh sink (with the token), pool, `FinalityGate`, `ReorgDetector`, `PendingBuffer`, adapter, `Sweeper` and driver (§5.H "Per-leadership objects"); register the sink beat with the watchdog.
-- [ ] Leader Changed: read the `epoch` key before `acquire`; if it names another host, fire with `old_host` (D7, §5.H).
-- [ ] Gate bridge (G2):
-  - add a `PoolHandlers::on_tag(provider, Tag, number, hash)` callback fired from the existing polls (audit pool tests);
-  - host → `FinalityGate::on_safe` / `on_finalized` → `driver.set_gates(...)`;
-  - `SafeRegression` / `SafeHashMismatch` → `on_safe_reorg_signal`;
-  - `FinalizedAnomaly` → `on_gate_frozen`.
-- [ ] Heads → `ReorgDetector` (with the fork walk via `call_to` on the WS provider). A crossing below `C_s` → `on_safe_reorg_signal`.
-- [ ] Logs → `PendingBuffer(pending_max_logs)`. Compare against the sweep results for `ws_extra_logs_total` / WS Missed Logs (G3).
-  - Read plan 40 §3.4 first.
-  - If the sweeper does not expose its released set per page, **report back before changing the sweeper**.
-- [ ] Heartbeat payload JSON every `heartbeat_s` → `sink.set_heartbeat`. Wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
-- [ ] Demotion: poll `sink.status().mode == Fenced` (and `renew_failures_total`) each tick, then:
-  1. stop the driver;
-  2. stop the pool (drop the WS);
-  3. destroy the sink;
-  4. go back to the standby loop. A fresh sink and a fresh spill are built on the next acquire.
-- [ ] Signals: SIGTERM/SIGINT → `driver.request_drain()`, then wait for the tick loop to finish, then `sink.drain(25 s)` (which releases the lease), then exit 0.
-- [ ] Exit codes:
-  - config error 2;
-  - driver `Failed` 2, printing `status().fatal`;
-  - sink `Failed` / runtime error 1;
-  - watchdog abort 134.
-- [ ] Integration (Docker Redis + MockProvider):
-  - a cold start reaches Live and emits the expected stream;
-  - SIGTERM drains and releases the lease;
-  - two hosts: one leader, one standby; kill the leader → the standby leads within 20 s; gap-free stream.
+### ⬜ 5-D Host process (§5.H), split into six sub-slices; each has its own gate
+- [ ] **D1 Skeleton (single host, `[lease] enabled = false`):**
+  - CLI: no action flag + `--config` runs the listener; keep the tool flags;
+  - threads io + sink + watchdog; startup order 1–4 and 6; the watchdog gets `[watchdog].process_stall_ms`; io beat + `publish_state` every tick; the sink gets `loop_beat = watchdog.sink_beat_slot()`;
+  - SIGTERM/SIGINT → `request_drain()` → `sink.drain(25 s)` → exit 0; exit codes 2 / 1 / 134;
+  - test-only build flag `EVML_TEST_HOOKS` + `--test-freeze-io-after <s>` (D3).
+  - **Accept:** cold start reaches Live against Docker Redis + MockProvider; SIGTERM exits 0; the freeze hook exits 134.
+- [ ] **D2 Lease:** acquire or the standby loop (every `renew_ms`); per-leadership rebuild (§5.H); demotion on `Fenced`; read the `epoch` key before acquire for Leader Changed (D7); register / unregister the sink beat around each term.
+  - **Accept:** two hosts; kill the leader → the standby leads within 20 s; the stream has no gap.
+- [ ] **D3 Gate bridge (G2):** `PoolHandlers::on_tag(provider, Tag, number, hash)` (audit pool tests); `FinalityGate::on_safe` / `on_finalized` → `driver.set_gates`; `SafeRegression` / `SafeHashMismatch` → `on_safe_reorg_signal`; `FinalizedAnomaly` → `on_gate_frozen`.
+  - **Accept:** the driver leaves Recovering on real tag polls.
+- [ ] **D4 Heads → `ReorgDetector`:** fork walk via `call_to` on the WS provider; a crossing below `C_s` → `on_safe_reorg_signal`.
+- [ ] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
+- [ ] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
 
-### 5-E Alert engine + transport + dead-man (§5.3)
-- [ ] `src/ops/alerts.{hpp,cpp}`: **pure** rule evaluation over an `OpsSnapshot` built from:
-  - driver status, sink status, consumer lag, pool state / transitions, startup facts;
-  - role, and the gate / cursor advance timestamps.
-- [ ] Every row of §5.3.3, by kind (plan 60 rev 10 §5.3.1): **condition** alerts fire / 15 min re-notify / resolve; **event** alerts fire once per occurrence with no resolve. Per-group and per-provider 15 min rate limits; ownership per D7.
-- [ ] Treat a consumer-lag snapshot older than 2× the probe interval as unknown.
-- [ ] `src/ops/alert_sender`: the exact JSON schema and the `X-API-Key` header. 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`. The token and URL never appear in logs.
-- [ ] `src/ops/deadman`:
-  - pings only when leader and healthy (§5.3.2);
-  - 10 s timeout;
-  - failures counted;
-  - an empty URL gives `"deadman":"disabled"` in `/readyz`.
-- [ ] Tests:
-  - synthetic snapshots → each condition alert fires and resolves, each event alert fires once and never sends `RESOLVED:` (e.g. one Provider Failover → exactly 1 POST, none on the next 10 s tick), including rev 5/6 and the four consumer alerts with their rate limit;
-  - transport test against the mock HTTP sink (schema, header, retry count, failure metric, token absent from captured logs);
-  - dead-man: leader pings, standby sends 0, no pings when saturated or stalled.
+### ⬜ 5-E Alert engine + transport + dead-man (§5.3)
+- [ ] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.
+- [ ] **E2 `src/ops/alert_sender`:** exact JSON schema and `X-API-Key`; 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`; token and URL never in logs.
+- [ ] **E3 `src/ops/deadman`:** pings only when leader and healthy (§5.3.2); 10 s timeout; failures counted; empty URL → `"deadman":"disabled"` in `/readyz`.
+- [ ] **E4 Tests:** every row of §5.3.3 by kind (one Provider Failover → exactly 1 POST, none on the next tick); transport schema, header, retry count, failure metric, token absent from captured logs; dead-man leader / standby / saturated cases.
 
-### 5-F Metrics + `/readyz` wiring
-- [ ] Register the §5.4 list plus the existing sink and sweeper totals. Update them from the snapshot every 10 s and on scrape.
-- [ ] `/readyz`:
-  - 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby;
-  - the JSON body has state, role, lease (`"disabled"` when the lease is off), deadman, and the gates and cursors;
-  - no secrets.
-- [ ] Tests: the `/metrics` output contains each metric name; `/readyz` codes for leader-live, leader-saturated, standby and lease-disabled.
+### ⬜ 5-F Metrics + `/readyz` wiring
+- [ ] Register the §5.4 list plus existing sink and sweeper totals; update every 10 s and on scrape.
+- [ ] `/healthz` uses `Watchdog::stale_heartbeat()`; `/readyz`: 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby; JSON body with state, role, lease (`"disabled"` when off), deadman, gates and cursors; no secrets.
+- [ ] Tests: each metric name in `/metrics`; `/readyz` codes for leader-live, leader-saturated, standby, lease-disabled.
 
-### 5-G Operator tools
-- [ ] `--backfill-contract <name>` per §5.6a + D8:
-  - a one-off sweeper filtered to that address;
-  - finalized up to `C_f`, plus safe and tracked in `(C_f, C_s]` for a safe-class contract;
-  - the manifest is updated only after the last page is acked;
-  - exit 0 / 1.
-- [ ] `--check-redis`: connect, run the startup checks, print the address family (plan 50 §4.3, used by the Phase 6 Railway smoke test).
-- [ ] Integration: run the backfill twice → the second run adds 0 entries; the next startup passes the coverage check.
-- [ ] Lease tests (D8), Docker Redis:
-  - no live leader → the backfill acquires the lease, emits the historical events, updates the manifest, never gets `FENCED`, and releases the lease at the end (the `leader` key is gone or free afterwards);
-  - another host holds the lease → exit 1 within 60 s and nothing written (stream length and manifest unchanged).
+### ⬜ 5-G Operator tools
+- [ ] `--backfill-contract <name>` per §5.6a + D8 (acquires the lease, up to 60 s; exit 1 if held).
+- [ ] `--check-redis`: connect, run the startup checks, print the address family.
+- [ ] Integration: second backfill run adds 0 entries; lease free → acquire / release; lease held → exit 1 within 60 s with nothing written.
 
-### 5-H Image + Railway + local compose
-- [ ] `docker/Dockerfile.prod`:
-  - `ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/evm_listener"]`, `CMD ["--config","/app/config/base.toml"]`, `STOPSIGNAL SIGTERM`;
-  - `HEALTHCHECK` with curl on `/healthz`;
-  - `COPY evm_listener/config/ /app/config/`;
-  - target < 60 MB, and if it misses, report why.
-- [ ] `railway.json` at the repo root per §5.6, with `dockerfilePath: docker/Dockerfile.prod` and **no `startCommand`** (it would replace the `ENTRYPOINT` and bypass `tini`; verified against Railway docs).
-- [ ] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` services under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
-- [ ] Make targets for these, if missing. **Accept:** `make prod-image` succeeds and `--version` runs in the image.
+### ⬜ 5-H Image + Railway + local compose
+- [ ] `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why.
+- [ ] `railway.json` at the repo root, **no** `startCommand`.
+- [ ] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
+- [ ] **Accept:** `make prod-image` succeeds and `--version` runs in the image.
 
-### 5-I Chaos / end-to-end (§Tests)
-- [ ] toxiproxy on the provider and Redis links (latency 5 s, `reset_peer`, timeout, bandwidth 0) → automatic recovery with an exact stream.
-- [ ] `docker pause listener-a` → b takes over within 20 s. After unpause, a demotes, or restarts and becomes standby (either is acceptable per D2).
-- [ ] io-freeze hook → exit 134 within 30 s (D3).
+### ⬜ 5-I Chaos / end-to-end (§Tests)
+- [ ] toxiproxy on provider and Redis links → recovery with an exact stream.
+- [ ] `docker pause listener-a` → b takes over within 20 s; after unpause a demotes or restarts as standby (D2).
+- [ ] io-freeze hook → **exit 134 inside the prod image** within 30 s (D3, closes watchdog review A7).
 - [ ] Manual, once: a `severity=info` test alert reaches `#strategy-production`.
 
 ### 5-J removed
-The WS `ping` mode is no longer a Phase 5 slice. It is the separate job [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md), after Phase 6. Phase 5 workers must not add the `[ws]` config section or change `subscribe_heads` behaviour.
+The WS `ping` mode is the separate job [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md), after Phase 6. Phase 5 workers must not add the `[ws]` config section or change `subscribe_heads` behaviour.
 
 ---
 
 ## 4. Suggested order and parallelism
 ```mermaid
 graph LR
-  P0["5-0 prep"] --> A["5-A config"]
-  A --> B["5-B ops primitives"]
+  P0["5-0 ✅"] --> A["5-A ✅"]
+  A --> B["5-B ops primitives 🟡"]
   A --> C["5-C LogSource adapter"]
-  B --> D["5-D host"]
-  C --> D
-  D --> E["5-E alerts"]
-  D --> F["5-F metrics/readyz"]
-  D --> G["5-G tools"]
+  B --> D1["5-D1 host skeleton"]
+  D1 --> D2["5-D2 lease/standby"]
+  D1 --> D3["5-D3 gate bridge"]
+  C --> D3
+  D3 --> D4["5-D4 heads/reorg"]
+  D3 --> D5["5-D5 WS cross-check"]
+  D1 --> D6["5-D6 heartbeat"]
+  D2 --> E["5-E alerts"]
+  D3 --> E
+  D2 --> F["5-F metrics/readyz"]
+  D2 --> G["5-G tools"]
   B --> H["5-H image/railway"]
   E --> I["5-I chaos"]
   F --> I
   G --> I
   H --> I
 ```
-5-B and 5-C can run in parallel. 5-D is the critical path and the riskiest slice: review it before 5-E starts.
+5-B (B2–B4) and 5-C run in parallel. 5-D is the critical path and the riskiest slice: review D1 and D2 before 5-E starts.

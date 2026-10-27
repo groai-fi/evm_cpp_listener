@@ -284,3 +284,15 @@ Decisions approved by the user:
 - **Nothing consumes the new keys yet.** `PendingBuffer`, the token bucket and the ops HTTP server pick them up in 5-C / 5-D / 5-B.
 - Gate: `make build` exit 0; `make test` exit 0, **366/366** (363 + 3 new).
 
+
+### 5-B1 Watchdog: done (2026-10-27)
+- New [watchdog.hpp](../../evm_listener/src/ops/watchdog.hpp) / [watchdog.cpp](../../evm_listener/src/ops/watchdog.cpp): one thread, two heartbeats (io tick, sink loop), 1 s check, D2 pause tolerance (own wake gap > interval + 5 s → baselines reset, check skipped), abort = one line on **stdout** then `std::abort()`.
+- The abort line uses the `core/log` keys (`ts`, `level=critical`, `message`, `component=watchdog`) plus `heartbeat`, `stale_ms`, `limit_ms` and the last known state (`role`, `driver_state`, `c_s`, `c_f`, `g_s`, `g_f`, `sink_mode`). The io thread publishes the state each tick through `publish_state`; values are raw numeric codes whose meaning the host defines (5-D1).
+- `stale_heartbeat()` gives `/healthz` the same rule as the abort (5-F).
+- **Sink beat:** `RedisSinkOptions::loop_beat` (new, optional pointer, default null) is written by `RedisSink::run()` next to its own `heartbeat_ms_`. The storage is owned by the watchdog (`sink_beat_slot()`), so a per-leadership sink that is destroyed can never leave a dangling reader. The host must call `set_sink_registered(false)` **before** destroying the sink.
+- No default threshold: `stall_ms == 0` throws. The host passes `[watchdog].process_stall_ms` (5-D1).
+- Timestamp is formatted without `gmtime_r` (it takes a libc lock, unsafe while wedged). All buffers are on the stack. `snprintf` is not formally guaranteed allocation-free (glibc does not allocate for `%s` / `%llu`); plan 90 asked for a pre-formatted line, so this is a small deviation.
+- **Not yet verified:** exit code 134 as PID 1 needs `tini` (5-H); asserted inside the prod image in 5-I. Nothing calls the watchdog yet (host = 5-D1), so no process is protected today.
+- Tests: 14 in `tests/watchdog_test.cpp` (fake clock: fresh beats, io stall, sink stall, standby ignores sink, registration baseline, pause tolerance, fire once, schema + state, `stale_heartbeat`, sink slot, required threshold, double start; real thread: abort, quiet) and 1 in `tests/redis_sink_test.cpp` (loop beat reaches the slot). The real-thread "quiet" test uses a 5 s threshold so a loaded CI box cannot flake it; the beat-vs-stall logic is covered deterministically by the fake-clock tests.
+- Review decision Q4: the planned block-info cache is **dropped** (plan 71 updated): the sweeper already reads each distinct block once per page.
+- Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **381/381** (366 + 15).
