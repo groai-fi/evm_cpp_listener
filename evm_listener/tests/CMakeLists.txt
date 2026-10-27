@@ -20,6 +20,7 @@ add_executable(evml_tests
     stale_detector_test.cpp
     provider_pool_test.cpp
     pool_config_test.cpp
+    pool_log_source_test.cpp
     token_bucket_test.cpp
     finality_gate_test.cpp
     reorg_detector_test.cpp

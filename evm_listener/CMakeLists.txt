@@ -101,6 +101,7 @@ add_library(evml_core STATIC
     src/sink/lease.cpp
     src/sink/consumer_lag.cpp
     src/app/pool_config.cpp
+    src/app/pool_log_source.cpp
     src/app/tools.cpp
     src/ops/watchdog.cpp
     src/ops/metrics.cpp
