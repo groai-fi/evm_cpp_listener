@@ -86,20 +86,27 @@ public:
     int run();
 
 private:
+    // Where the process is, for /readyz and the worker thread. Written by the worker (Standby) and the io thread (Leader).
+    enum class Phase : int { WaitingRedis, Standby, Leader };
+
     // ---- io thread ----
-    void start_runtime(const sink::StartupReport& rep);
+    void start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token);
     net::awaitable<void> pipeline_loop();
     void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash);
     void schedule_beat();
     void on_beat();
     void request_exit(int code, const std::string& why);  // first reason wins
     void begin_shutdown(int code, const std::string& why);
+    void demote(const std::string& why);
+    void end_term();
     void finish();
     ops::OpsHttpServer::Routes routes();
     std::string state_name() const;
+    const char* role_name() const;
 
-    // ---- startup thread ----
-    void startup_thread_main();
+    // ---- worker thread (Redis wait, lease acquire / standby loop) ----
+    void launch_acquire(bool first);
+    void acquire_thread_main(bool first);
 
     const core::Config& cfg_;
     HostOptions opt_;
@@ -110,9 +117,11 @@ private:
     ops::Metrics metrics_;
     std::unique_ptr<ops::OpsHttpServer> ops_;
     net::steady_timer beat_timer_, sleep_timer_, grace_timer_, freeze_timer_;
-    std::thread startup_;
+    std::thread startup_;  // the acquire worker; one run per leadership term
 
-    std::atomic<bool> stopping_{false};  // read by the startup thread too
+    std::atomic<bool> stopping_{false};  // read by the worker thread too
+    std::atomic<Phase> phase_{Phase::WaitingRedis};
+    bool demoting_{false};
     bool finished_{false};
     bool exit_set_{false};
     int exit_code_{0};
@@ -122,12 +131,17 @@ private:
 };
 
 // ------------------------------------------------------------------------------------------------------------------
-// Ops routes (minimal in D1; full wiring in 5-F)
+// Ops routes (minimal; full wiring in 5-F)
 // ------------------------------------------------------------------------------------------------------------------
 
 std::string Host::state_name() const {
     if (rt_ && rt_->driver) return pipeline::to_string(rt_->driver->status().state);
-    return "waiting_redis";
+    return phase_.load() == Phase::Standby ? "standby" : "waiting_redis";
+}
+
+const char* Host::role_name() const {
+    if (rt_ && rt_->driver) return "leader";
+    return phase_.load() == Phase::Standby ? "standby" : "none";
 }
 
 ops::OpsHttpServer::Routes Host::routes() {
@@ -145,10 +159,10 @@ ops::OpsHttpServer::Routes Host::routes() {
     r.readyz = [this] {
         ops::OpsResponse o;
         const std::string state = state_name();
-        o.status = state == "live" ? 200 : 503;
+        o.status = state == "live" || state == "standby" ? 200 : 503;  // plan 5.1: leader and Live, or a healthy standby
         o.content_type = "application/json";
-        o.body = "{\"state\":\"" + state + "\",\"role\":\"" + (rt_ && rt_->driver ? "leader" : "none") +
-                 "\",\"lease\":\"disabled\"}\n";
+        o.body = "{\"state\":\"" + state + "\",\"role\":\"" + role_name() + "\",\"lease\":\"" +
+                 (cfg_.lease.enabled ? "enabled" : "disabled") + "\"}\n";
         return o;
     };
     r.metrics = [this] {
@@ -166,10 +180,6 @@ ops::OpsHttpServer::Routes Host::routes() {
 
 int Host::run() {
     if (!opt_.stop) throw std::invalid_argument("HostOptions::stop is required");
-    if (cfg_.lease.enabled) {
-        std::cerr << "[lease] enabled = true is not supported yet (slice 5-D2); set enabled = false for a single host\n";
-        return kExitUsage;
-    }
     redis_url_ = core::env::require(cfg_.sink.redis_url_env);
     ops_ = std::make_unique<ops::OpsHttpServer>(ioc_, cfg_.ops.http_listen, routes());
 
@@ -179,7 +189,7 @@ int Host::run() {
                {"shard", cfg_.shard.id},
                {"host_id", cfg_.shard.host_id},
                {"ops_port", std::to_string(ops_->port())},
-               {"lease", "disabled"}});
+               {"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
 
     if (opt_.test_freeze_io_after) {
         freeze_timer_.expires_after(*opt_.test_freeze_io_after);
@@ -190,7 +200,7 @@ int Host::run() {
         });
     }
     schedule_beat();
-    startup_ = std::thread([this] { startup_thread_main(); });
+    launch_acquire(true);
 
     try {
         ioc_.run();
@@ -216,25 +226,52 @@ int Host::run() {
     return exit_code_;
 }
 
-void Host::startup_thread_main() {
-    // Blocking Redis wait lives off the io thread: /healthz and the io beat keep working while Redis is down.
-    sink::StartupOptions so;
-    so.require_noeviction = cfg_.sink.require_noeviction;
-    so.on_waiting = [](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
-        log::warn("host", "redis unreachable, waiting",
-                  {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
-    };
-    so.stop = [this] { return stopping_.load() || opt_.stop->load(std::memory_order_relaxed); };
-    so.sleep = [this](std::chrono::milliseconds d) {  // sliced so a stop request is noticed quickly
+void Host::launch_acquire(bool first) {
+    if (startup_.joinable()) startup_.join();  // the previous run has already posted its result and is exiting
+    startup_ = std::thread([this, first] { acquire_thread_main(first); });
+}
+
+void Host::acquire_thread_main(bool first) {
+    // Blocking waits (Redis readiness on the first run, the standby loop on every run) live off the io thread:
+    // /healthz and the io beat keep working while Redis is down or another host leads.
+    const auto stop = [this] { return stopping_.load() || opt_.stop->load(std::memory_order_relaxed); };
+    const auto sleep = [stop](std::chrono::milliseconds d) {  // sliced so a stop request is noticed quickly
         const auto end = std::chrono::steady_clock::now() + d;
-        while (std::chrono::steady_clock::now() < end && !stopping_.load() && !opt_.stop->load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(50ms);
-        }
+        while (std::chrono::steady_clock::now() < end && !stop()) std::this_thread::sleep_for(50ms);
     };
     try {
-        const auto report = sink::await_redis_ready(redis_url_, so);
-        if (report) net::post(ioc_, [this, r = *report] { start_runtime(r); });
-        // nullopt: stop was requested while waiting; the beat sees the same flag and shuts down.
+        std::optional<sink::StartupReport> report;
+        if (first) {
+            sink::StartupOptions so;
+            so.require_noeviction = cfg_.sink.require_noeviction;
+            so.on_waiting = [](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
+                log::warn("host", "redis unreachable, waiting",
+                          {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
+            };
+            so.stop = stop;
+            so.sleep = sleep;
+            report = sink::await_redis_ready(redis_url_, so);
+            if (!report) return;  // stop requested while waiting; the beat sees the same flag and shuts down
+        }
+
+        std::string token;
+        if (cfg_.lease.enabled) {
+            phase_ = Phase::Standby;
+            const sink::Keys keys(cfg_.shard.id);
+            sink::RedisppConn conn(redis_url_, keys);
+            sink::AcquireOptions ao;
+            ao.host_id = cfg_.shard.host_id;
+            ao.ttl_ms = cfg_.lease.ttl_ms;
+            ao.poll = std::chrono::milliseconds(cfg_.lease.renew_ms);  // plan 5.H: the standby polls every renew_ms
+            ao.stop = stop;
+            ao.sleep = sleep;
+            const auto t = sink::acquire_lease_blocking(conn, keys, ao);
+            if (!t) return;  // stop requested while on standby
+            token = *t;
+        } else {
+            token = sink::lease_disabled_token();
+        }
+        net::post(ioc_, [this, report, token] { start_runtime(report, token); });
     } catch (const sink::StartupFatal& e) {
         net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitUsage, "redis startup check failed: " + msg); });
     } catch (const std::exception& e) {
@@ -242,17 +279,19 @@ void Host::startup_thread_main() {
     }
 }
 
-void Host::start_runtime(const sink::StartupReport& rep) {
+void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token) {
     if (stopping_) return;
     try {
-        for (const auto& w : rep.warnings) log::warn("host", "redis startup warning", {{"warning", w}});
-        log::info("host", "redis ready",
-                  {{"redis_version", std::to_string(rep.version.major) + "." + std::to_string(rep.version.minor) + "." +
-                                         std::to_string(rep.version.patch)}});
+        if (rep) {
+            for (const auto& w : rep->warnings) log::warn("host", "redis startup warning", {{"warning", w}});
+            log::info("host", "redis ready",
+                      {{"redis_version", std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
+                                             std::to_string(rep->version.patch)}});
+        }
 
         rt_ = std::make_unique<Runtime>(cfg_.shard.id);
 
-        auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, sink::lease_disabled_token());
+        auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, token);
         sopts.loop_beat = wd_.sink_beat_slot();
         rt_->sink = std::make_unique<sink::RedisSink>(std::move(sopts), rt_->keys,
                                                       std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys),
@@ -286,6 +325,9 @@ void Host::start_runtime(const sink::StartupReport& rep) {
         rt_->driver = std::make_unique<pipeline::PipelineDriver>(cfg_, *rt_->sweeper, *rt_->sink, *rt_->source, wall_ms, dopt);
 
         rt_->pool->start();
+        phase_ = Phase::Leader;
+        log::info("host", "leadership term started", {{"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
+        if (opt_.on_event) opt_.on_event("leader");
         net::co_spawn(ioc_, pipeline_loop(), net::detached);
     } catch (const std::exception& e) {
         begin_shutdown(kExitFailure, std::string("pipeline startup failed: ") + e.what());
@@ -297,7 +339,7 @@ net::awaitable<void> Host::pipeline_loop() {
     try {
         for (;;) {
             const auto r = co_await driver.tick();
-            if (r.done || stopping_) break;
+            if (r.done || stopping_ || demoting_) break;
             if (r.wait.count() > 0) {
                 sleep_timer_.expires_after(r.wait);
                 boost::system::error_code ec;  // operation_aborted = a stop request cancelled the sleep
@@ -310,6 +352,11 @@ net::awaitable<void> Host::pipeline_loop() {
     const auto st = driver.status();
     if (st.state == pipeline::PipelineState::Failed) {
         request_exit(kExitUsage, "pipeline failed: " + st.fatal);
+    }
+    if (demoting_ && !stopping_) {
+        // Tear the term down from a fresh handler: this coroutine still runs on the runtime being destroyed.
+        net::post(ioc_, [this] { end_term(); });
+        co_return;
     }
     finish();
 }
@@ -350,7 +397,7 @@ void Host::schedule_beat() {
 void Host::on_beat() {
     wd_.beat_io();
     ops::Watchdog::State s;
-    s.role = rt_ && rt_->driver ? 1 : 0;
+    s.role = rt_ && rt_->driver ? 1 : 0;  // 1 = leader (lease disabled counts as leader), 0 = standby / starting
     if (rt_ && rt_->sink) s.sink_mode = static_cast<std::uint64_t>(rt_->sink->mode());
     if (rt_ && rt_->driver) {
         const auto st = rt_->driver->status();
@@ -375,7 +422,35 @@ void Host::on_beat() {
         begin_shutdown(kExitOk, "stop requested");
     } else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Failed) {
         begin_shutdown(kExitFailure, "sink failed: " + rt_->sink->fatal_message());
+    } else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Fenced) {
+        demote("sink fenced: another term holds the lease");
     }
+}
+
+// A fenced sink has already discarded its queue and spill (plan 4.8); the host ends the term and goes back to the
+// standby loop. The driver and pool are stopped first, then the term's objects are destroyed.
+void Host::demote(const std::string& why) {
+    if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
+    demoting_ = true;
+    const auto st = rt_->sink->status();
+    log::warn("host", "demoting to standby",
+              {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
+    rt_->driver->request_drain();
+    sleep_timer_.cancel();  // pipeline_loop ends and posts end_term()
+}
+
+void Host::end_term() {
+    if (stopping_ || !rt_) return;  // a shutdown overtook the demotion; finish() owns the teardown
+    wd_.set_sink_registered(false);  // before the sink is destroyed
+    rt_->pool->stop();
+    // Destroying the sink joins its thread (bounded by the Redis io timeout, 2 s): the io beat resumes right after.
+    rt_.reset();
+    demoting_ = false;
+    last_state_ = pipeline::PipelineState::Init;
+    phase_ = Phase::Standby;
+    log::info("host", "leadership term ended, back on standby");
+    if (opt_.on_event) opt_.on_event("demoted");
+    launch_acquire(false);
 }
 
 void Host::request_exit(int code, const std::string& why) {

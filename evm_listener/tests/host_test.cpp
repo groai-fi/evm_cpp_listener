@@ -27,6 +27,9 @@
 #include "core/log.hpp"
 #include "mock_http_server.hpp"
 #include "sink/keys.hpp"
+#include "sink/lease.hpp"
+#include "sink/lua_scripts.hpp"
+#include "sink/script_runner.hpp"
 #include "test_util.hpp"
 #include "toxiproxy.hpp"
 
@@ -66,13 +69,19 @@ void replace_once(std::string& text, const std::string& from, const std::string&
     text.replace(pos, from.size(), to);
 }
 
-// base.toml adapted for a single-host run on this machine: lease off, private shard and spill dir, loopback ops port,
-// fast tag polls, and the credential-free public provider URL pointed at `http_url`.
+// base.toml adapted for a run on this machine: lease off unless `lease_enabled`, private shard and spill dir, loopback
+// ops port, fast tag polls, and the credential-free public provider URL pointed at `http_url`.
 std::string host_toml(const std::string& shard, const fs::path& spill, const std::string& http_url,
-                      std::uint32_t process_stall_ms) {
+                      std::uint32_t process_stall_ms, bool lease_enabled = false, std::uint32_t ttl_ms = 3000,
+                      std::uint32_t renew_ms = 500) {
     auto t = read_base_toml();
     replace_once(t, "id      = \"base_eurc_usdc\"", "id      = \"" + shard + "\"");
-    replace_once(t, "enabled  = true", "enabled  = false");
+    if (lease_enabled) {
+        replace_once(t, "ttl_ms   = 15000", "ttl_ms   = " + std::to_string(ttl_ms));
+        replace_once(t, "renew_ms = 5000", "renew_ms = " + std::to_string(renew_ms));
+    } else {
+        replace_once(t, "enabled  = true", "enabled  = false");
+    }
     replace_once(t, "safe_poll_ms       = 4000", "safe_poll_ms       = 100");
     replace_once(t, "finalized_poll_ms  = 12000", "finalized_poll_ms  = 100");
     replace_once(t, "process_stall_ms     = 30000", "process_stall_ms     = " + std::to_string(process_stall_ms));
@@ -83,11 +92,11 @@ std::string host_toml(const std::string& shard, const fs::path& spill, const std
 }
 
 // Every provider env var of base.toml: HTTP -> `http_url`, WS -> a port nobody listens on (validated, never served).
-evml::core::EnvLookup provider_env(const std::string& http_url) {
-    return [http_url](const std::string& k) -> std::string {
+evml::core::EnvLookup provider_env(const std::string& http_url, const std::string& host_id = "test-host") {
+    return [http_url, host_id](const std::string& k) -> std::string {
         if (k.rfind("BASE_RPC_URL", 0) == 0) return http_url;
         if (k.rfind("BASE_WSS_URL", 0) == 0) return "ws://127.0.0.1:9/";
-        if (k == "EVML_HOST_ID") return "test-host";
+        if (k == "EVML_HOST_ID") return host_id;
         return "";
     };
 }
@@ -149,16 +158,49 @@ evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64
     };
 }
 
-}  // namespace
-
-TEST_CASE("host: [lease] enabled = true is refused with the usage exit code until 5-D2", "[unit]") {
-    const auto cfg = evml::test::load_base_config();  // base.toml ships with the lease enabled
-    REQUIRE(cfg.lease.enabled);
+// One host (run_host on its own thread) with its observable state.
+struct RunningHost {
+    evml::core::Config cfg;
     std::atomic<bool> stop{false};
-    evml::app::HostOptions opt;
-    opt.stop = &stop;
-    CHECK(evml::app::run_host(cfg, opt) == evml::app::kExitUsage);
-}
+    std::atomic<int> state{-1};
+    std::atomic<int> exit_code{-1};
+    std::atomic<int> leader_events{0};
+    std::atomic<int> demoted_events{0};
+    std::atomic<bool> threw{false};
+    std::string what;
+    std::thread th;
+
+    explicit RunningHost(evml::core::Config c) : cfg(std::move(c)) {}
+    void start() {
+        th = std::thread([this] {
+            evml::app::HostOptions opt;
+            opt.stop = &stop;
+            opt.beat_period = 50ms;
+            opt.on_status = [this](const evml::pipeline::DriverStatus& s) { state = static_cast<int>(s.state); };
+            opt.on_event = [this](std::string_view e) {
+                if (e == "leader") ++leader_events;
+                if (e == "demoted") {
+                    ++demoted_events;
+                    state = -1;
+                }
+            };
+            try {
+                exit_code = evml::app::run_host(cfg, opt);
+            } catch (const std::exception& e) {
+                what = e.what();
+                threw = true;
+            }
+        });
+    }
+    bool live() const { return state.load() == static_cast<int>(evml::pipeline::PipelineState::Live); }
+    void finish() {
+        stop = true;
+        if (th.joinable()) th.join();
+    }
+    ~RunningHost() { finish(); }
+};
+
+}  // namespace
 
 TEST_CASE("host: cold start reaches Live, writes the initial checkpoint, and a stop request exits 0", "[integration]") {
     evml::core::log::init("info");
@@ -209,6 +251,99 @@ TEST_CASE("host: cold start reaches Live, writes the initial checkpoint, and a s
     REQUIRE_FALSE(ckpt.empty());
     CHECK(std::stoull(ckpt.at("safe")) >= c0);
     CHECK(std::stoull(ckpt.at("finalized")) >= c0);
+}
+
+TEST_CASE("host: a standby takes over within the lease ttl when the leader stops, without moving the checkpoint back",
+          "[integration]") {
+    evml::core::log::init("info");
+    const std::string redis_url = require_env("REDIS_URL");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill_a = fs::temp_directory_path() / ("evml-host-a-" + random_tag());
+    const fs::path spill_b = fs::temp_directory_path() / ("evml-host-b-" + random_tag());
+    Cleanup cleanup{shard, spill_a};
+    Cleanup cleanup_b{shard, spill_b};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+    RunningHost a(evml::core::Config::parse(host_toml(shard, spill_a, node.url(), 30000, true), "a.toml",
+                                            provider_env(node.url(), "hostA")));
+    RunningHost b(evml::core::Config::parse(host_toml(shard, spill_b, node.url(), 30000, true), "b.toml",
+                                            provider_env(node.url(), "hostB")));
+
+    a.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
+    REQUIRE_FALSE(a.threw.load());
+
+    b.start();
+    evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 1500ms);  // must time out
+    CHECK_FALSE(b.live());
+    CHECK(b.leader_events.load() == 0);
+
+    sw::redis::Redis admin{redis_url};
+    const evml::sink::Keys keys{shard};
+    const auto holder = admin.get(keys.leader());
+    REQUIRE(holder.has_value());
+    CHECK(holder->find("hostA") != std::string::npos);
+    std::unordered_map<std::string, std::string> before;
+    admin.hgetall(keys.ckpt(), std::inserter(before, before.begin()));
+    REQUIRE_FALSE(before.empty());
+
+    a.finish();
+    CHECK(a.exit_code.load() == 0);
+    const bool took_over = evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 15s);
+    INFO("host B threw: " << b.what);
+    REQUIRE_FALSE(b.threw.load());
+    REQUIRE(took_over);
+    CHECK(b.leader_events.load() == 1);
+
+    std::unordered_map<std::string, std::string> after;
+    admin.hgetall(keys.ckpt(), std::inserter(after, after.begin()));
+    CHECK(std::stoull(after.at("safe")) >= std::stoull(before.at("safe")));
+    CHECK(std::stoull(after.at("finalized")) >= std::stoull(before.at("finalized")));
+
+    b.finish();
+    CHECK(b.exit_code.load() == 0);
+}
+
+TEST_CASE("host: losing the lease demotes the host to standby and it leads again after the intruder expires",
+          "[integration]") {
+    evml::core::log::init("info");
+    const std::string redis_url = require_env("REDIS_URL");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-fence-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true), "fence.toml",
+                                            provider_env(node.url(), "hostA")));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // Steal the lease: delete the leader key and acquire it as another host.
+    sw::redis::Redis admin{redis_url};
+    const evml::sink::Keys keys{shard};
+    admin.del(keys.leader());
+    evml::sink::ScriptRunner runner(admin);
+    REQUIRE(runner.run(evml::sink::lease_acquire_call(keys, "intruder", "n1", 3000)).has_value());
+
+    const bool demoted = evml::test::run_until(
+        mock_ioc, [&] { return h.demoted_events.load() >= 1 || h.threw.load(); }, 15s);
+    INFO("host threw: " << h.what);
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(demoted);
+
+    const bool relead = evml::test::run_until(
+        mock_ioc, [&] { return (h.leader_events.load() >= 2 && h.live()) || h.threw.load(); }, 30s);
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(relead);
+    CHECK(h.demoted_events.load() == 1);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
 }
 
 #if defined(EVML_TEST_HOOKS)
