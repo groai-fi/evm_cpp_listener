@@ -97,11 +97,11 @@ See plan 60 "results and deviations".
   - the sink stores its beat through `RedisSinkOptions::loop_beat`, which points at storage owned by the watchdog (`sink_beat_slot()`); unregister the sink (`set_sink_registered(false)`) **before** destroying it;
   - `std::abort()` → exit 134.
   - Open points: A7 (134 needs `tini` as PID 1; verified in 5-I inside the prod image); the host must pass `[watchdog].process_stall_ms` (5-D1).
-- [ ] **B2 `src/ops/http_client.{hpp,cpp}`:** async Beast HTTPS client on the io executor: `post_json(url, body, headers)` and `get(url)`. Timeout, TLS verification (same SSL context approach as `HttpRpcClient`), URL redacted in every error.
+- [x] **B2 `src/ops/http_client.{hpp,cpp}`:** async Beast HTTPS client on the io executor: `post_json(url, body, headers)` and `get(url)`. Timeout, TLS verification (same SSL context approach as `HttpRpcClient`), URL redacted in every error.
   - Tests against `tests/mock_http_server`: header sent, timeout, non-2xx, URL absent from errors.
-- [ ] **B3 `src/ops/ops_http_server.{hpp,cpp}`:** Beast server on the io thread with `/healthz`, `/readyz`, `/metrics` through callbacks returning status + body; unknown path → 404; bind `[::]` with `v6_only(false)`.
+- [x] **B3 `src/ops/ops_http_server.{hpp,cpp}`:** Beast server on the io thread with `/healthz`, `/readyz`, `/metrics` through callbacks returning status + body; unknown path → 404; bind `[::]` with `v6_only(false)`.
   - Tests: each endpoint, 404, and dual-stack (`http://127.0.0.1:<port>/healthz` and `http://[::1]:<port>/healthz` both 200).
-- [ ] **B4 `src/ops/metrics.{hpp,cpp}`:** prometheus-cpp registry + `TextSerializer`; helper that sets a counter from a monotonic total (delta increment).
+- [x] **B4 `src/ops/metrics.{hpp,cpp}`:** prometheus-cpp registry + `TextSerializer`; helper that sets a counter from a monotonic total (delta increment).
   - Tests: serialized output contains the names; repeated totals do not double-count.
 
 ### ⬜ 5-C `LogSource` adapter (§5.4a), parallel with 5-B
