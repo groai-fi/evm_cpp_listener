@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -27,6 +30,7 @@
 #include "core/hex.hpp"
 #include "core/log.hpp"
 #include "mock_http_server.hpp"
+#include "mock_ws_server.hpp"
 #include "sink/keys.hpp"
 #include "sink/lease.hpp"
 #include "sink/lua_scripts.hpp"
@@ -166,12 +170,26 @@ struct NodeState {
     std::uint64_t finalized{0};
     bool fail{false};  // every request answers HTTP 500
     int getlogs_calls{0};
+    std::map<std::uint64_t, std::string> blocks{};  // eth_getBlockByNumber(<hex number>): block JSON; absent -> null
+    std::vector<std::uint64_t> block_requests{};     // every numeric eth_getBlockByNumber, in order
 };
 
 evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
     return [&s](const evml::test::MockRequest& r) {
         if (s.fail) return evml::test::MockReply{.status = 500, .body = "node down"};
-        if (r.body.find("eth_getLogs") != std::string::npos) ++s.getlogs_calls;
+        const auto v = boost::json::parse(r.body).as_object();
+        const std::string method(v.at("method").as_string());
+        if (method == "eth_getLogs") ++s.getlogs_calls;
+        if (method == "eth_getBlockByNumber") {
+            const std::string tag(v.at("params").as_array().at(0).as_string());
+            if (tag.rfind("0x", 0) == 0) {  // a block by number (the tags are "safe" / "finalized")
+                const auto n = std::stoull(tag, nullptr, 16);
+                s.block_requests.push_back(n);
+                const auto id = static_cast<std::uint64_t>(v.at("id").as_int64());
+                const auto it = s.blocks.find(n);
+                return evml::test::MockReply{.body = rpc_reply(id, it == s.blocks.end() ? "null" : it->second)};
+            }
+        }
         return healthy_node(s.safe, s.finalized)(r);
     };
 }
@@ -226,6 +244,104 @@ struct RunningHost {
         if (th.joinable()) th.join();
     }
     ~RunningHost() { finish(); }
+};
+
+// ---- 5-D4 helpers: a WS node that pushes newHeads the test queues, and block hashes per branch ----
+
+constexpr const char* kHeadsSub = "0x9ce59a13059e417087c02d3236a0b1cc";
+constexpr const char* kLogsSub = "0x4a8a4c0d8a3b4e5f9d7c1b2a3e4f5a6b";
+
+// 32-byte hash of block `n` on branch `branch` ('a' = the canonical chain first fed, 'b' = the fork).
+std::string hx(char branch, std::uint64_t n) {
+    char num[17];
+    std::snprintf(num, sizeof num, "%016llx", static_cast<unsigned long long>(n));
+    return std::string("0x") + branch + std::string(47, '0') + num;
+}
+
+std::string head_json(std::uint64_t n, const std::string& hash, const std::string& parent) {
+    return R"({"number":")" + evml::core::to_hex_u64(n) + R"(","hash":")" + hash + R"(","parentHash":")" + parent +
+           R"(","timestamp":")" + evml::core::to_hex_u64(1000 + n) + R"("})";
+}
+
+std::string head_msg(std::uint64_t n, const std::string& hash, const std::string& parent) {
+    return std::string(R"({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":")") + kHeadsSub +
+           R"(","result":)" + head_json(n, hash, parent) + "}}";
+}
+
+struct HeadFeed {
+    std::deque<std::string> out;  // frames to send; touched only by the test thread (the mock lives on its ioc)
+};
+
+evml::test::MockWsServer::Script head_script(HeadFeed& f) {
+    return [&f](evml::test::MockWsConn& c) -> net::awaitable<void> {
+        auto r1 = co_await c.read_req();  // eth_chainId
+        co_await c.send(rpc_reply(r1.id, "\"0x2105\""));
+        auto r2 = co_await c.read_req();  // eth_subscribe newHeads
+        co_await c.send(rpc_reply(r2.id, std::string("\"") + kHeadsSub + "\""));
+        auto r3 = co_await c.read_req();  // eth_subscribe logs
+        co_await c.send(rpc_reply(r3.id, std::string("\"") + kLogsSub + "\""));
+        for (;;) {
+            if (f.out.empty()) {
+                co_await c.sleep(10ms);
+                continue;
+            }
+            const std::string frame = std::move(f.out.front());
+            f.out.pop_front();
+            co_await c.send(frame);
+        }
+    };
+}
+
+// quicknode (first in ws_order) gets the mock WS node; every other WS URL stays dead.
+evml::core::EnvLookup ws_provider_env(const std::string& http_url, const std::string& ws_url) {
+    return [http_url, ws_url](const std::string& k) -> std::string {
+        if (k.rfind("BASE_RPC_URL", 0) == 0) return http_url;
+        if (k == "BASE_WSS_URL_QUICKNODE") return ws_url;
+        if (k.rfind("BASE_WSS_URL", 0) == 0) return "ws://127.0.0.1:9/";
+        if (k == "EVML_HOST_ID") return "test-host";
+        return "";
+    };
+}
+
+// One host with a live WS node (heads on demand) and an HTTP node whose safe / finalized tags the test sets. The mock
+// node sits at c0 + 310 (= safe + 10), so the heads the test feeds around that height agree with the HTTP head.
+struct HeadRig {
+    std::string shard = "t_host_" + random_tag();
+    fs::path spill = fs::temp_directory_path() / ("evml-host-heads-" + random_tag());
+    Cleanup cleanup{shard, spill};
+    std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
+    HeadFeed feed;
+    evml::test::MockHttpServer http{mock_ioc, tunable_node(ns)};
+    evml::test::MockWsServer ws{mock_ioc, head_script(feed)};
+    RunningHost host{evml::core::Config::parse(host_toml(shard, spill, http.url(), 30000), "heads.toml",
+                                               ws_provider_env(http.url(), ws.url()))};
+
+    template <class Pred>
+    bool until(Pred p, std::chrono::milliseconds limit) {
+        return evml::test::run_until(mock_ioc, p, limit);
+    }
+    void wait(std::chrono::milliseconds d) { until([] { return false; }, d); }
+    bool live() { return until([this] { return host.live() || host.threw.load(); }, 30s) && !host.threw.load(); }
+    // Waits until the host stops calling eth_getLogs (all sweeps and re-verifications are done).
+    int quiet() {
+        int calls = ns.getlogs_calls;
+        for (int i = 0; i < 40; ++i) {
+            wait(700ms);
+            if (ns.getlogs_calls == calls) return calls;
+            calls = ns.getlogs_calls;
+        }
+        FAIL("the host never stopped calling eth_getLogs");
+        return calls;
+    }
+    // Queues heads lo..hi on `branch` (each one's parent is the previous block of the same branch) and waits until the
+    // host has read them.
+    void feed_chain(char branch, std::uint64_t lo, std::uint64_t hi) {
+        for (auto n = lo; n <= hi; ++n) feed.out.push_back(head_msg(n, hx(branch, n), hx(branch, n - 1)));
+        REQUIRE(until([this] { return feed.out.empty(); }, 10s));
+        wait(500ms);
+    }
 };
 
 }  // namespace
@@ -494,6 +610,87 @@ TEST_CASE("host: failing over to a provider with lower tags neither freezes nor 
 
     h.finish();
     CHECK(h.exit_code.load() == 0);
+}
+
+// ---- 5-D4: WS heads -> ReorgDetector -> driver ----
+
+TEST_CASE("host: a head fork below C_s is walked back to the ring and makes the driver re-verify", "[integration]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+
+    // Canonical chain 297..310 ('a'); the driver sits at C_s = c0 + 300.
+    r.feed_chain('a', r.c0 + 297, r.c0 + 310);
+    const int before = r.quiet();
+
+    // A fork off block c0 + 298: blocks 299..309 and the head 310 are on branch 'b'.
+    for (auto n = r.c0 + 299; n <= r.c0 + 309; ++n) {
+        r.ns.blocks[n] = head_json(n, hx('b', n), n == r.c0 + 299 ? hx('a', r.c0 + 298) : hx('b', n - 1));
+    }
+    r.feed.out.push_back(head_msg(r.c0 + 310, hx('b', r.c0 + 310), hx('b', r.c0 + 309)));
+    const bool reverified =
+        r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 30s);
+    REQUIRE_FALSE(r.host.threw.load());
+    REQUIRE(reverified);  // the fork point c0 + 298 is below C_s: eth_getLogs over (C_f, C_s] again
+
+    // The walk asked for exactly the missing ancestors, newest first, and stopped at the ring.
+    std::vector<std::uint64_t> expect;
+    for (auto n = r.c0 + 309; n >= r.c0 + 299; --n) expect.push_back(n);
+    CHECK(r.ns.block_requests == expect);
+
+    REQUIRE(r.until([&] { return !r.host.status().reverify_pending && r.host.live(); }, 15s));
+    CHECK_FALSE(r.host.status().frozen);
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+}
+
+TEST_CASE("host: a head fork above C_s is walked but does not trigger a re-verification", "[integration]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+
+    r.feed_chain('a', r.c0 + 297, r.c0 + 310);
+    const int before = r.quiet();
+
+    // Fork off block c0 + 308 (>= C_s = c0 + 300): only block 309 and the head 310 differ.
+    r.ns.blocks[r.c0 + 309] = head_json(r.c0 + 309, hx('b', r.c0 + 309), hx('a', r.c0 + 308));
+    r.feed.out.push_back(head_msg(r.c0 + 310, hx('b', r.c0 + 310), hx('b', r.c0 + 309)));
+    REQUIRE(r.until([&] { return !r.ns.block_requests.empty() || r.host.threw.load(); }, 15s));
+    REQUIRE_FALSE(r.host.threw.load());
+    r.wait(1500ms);  // time for a (wrongly) triggered re-verification to show up
+
+    CHECK(r.ns.block_requests == std::vector<std::uint64_t>{r.c0 + 309});
+    CHECK(r.ns.getlogs_calls == before);
+    CHECK_FALSE(r.host.status().reverify_pending);
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+}
+
+TEST_CASE("host: a head gap too long to walk resyncs the ring and makes the driver re-verify", "[integration]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+
+    r.feed_chain('a', r.c0 + 297, r.c0 + 310);
+    // The chain moves on 17 blocks (a WS outage): raise the HTTP node with it, so the pool sees no lag.
+    r.ns.safe = r.c0 + 317;
+    r.ns.finalized = r.c0 + 267;
+    REQUIRE(r.until([&] { return r.host.status().g_s == r.c0 + 317 || r.host.threw.load(); }, 15s));
+    const int before = r.quiet();  // the sweeps caught up with the new gates
+
+    r.feed.out.push_back(head_msg(r.c0 + 327, hx('a', r.c0 + 327), hx('a', r.c0 + 326)));  // 17 > the walk limit of 16
+    const bool reverified =
+        r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 15s);
+    REQUIRE_FALSE(r.host.threw.load());
+    REQUIRE(reverified);
+    CHECK(r.ns.block_requests.empty());  // no walk was started: a 17-block walk would hold the provider's bucket
+
+    REQUIRE(r.until([&] { return !r.host.status().reverify_pending && r.host.live(); }, 15s));
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
 }
 
 #if defined(EVML_TEST_HOOKS)
