@@ -45,6 +45,8 @@ net::awaitable<void> session(std::shared_ptr<MockHttpServer::State> st, tcp::soc
             mr.user_agent = std::string(req[http::field::user_agent]);
             mr.accept_encoding = std::string(req[http::field::accept_encoding]);
             mr.body = req.body();
+            mr.method = std::string(req.method_string());
+            for (const auto& h : req) mr.headers.emplace_back(std::string(h.name_string()), std::string(h.value()));
             const MockReply rep = st->handler(mr);
 
             if (rep.hang) {

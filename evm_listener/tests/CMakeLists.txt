@@ -36,6 +36,10 @@ add_executable(evml_tests
     redis_sink_integration_test.cpp
     redis_startup_test.cpp
     consumer_lag_test.cpp
+    watchdog_test.cpp
+    metrics_test.cpp
+    ops_http_server_test.cpp
+    http_client_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE

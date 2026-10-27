@@ -18,6 +18,8 @@ struct MockRequest {
     std::string user_agent;
     std::string accept_encoding;
     std::string body;
+    std::string method;                                       // "GET", "POST", ...
+    std::vector<std::pair<std::string, std::string>> headers;  // every request header, in arrival order
 };
 
 struct MockReply {
