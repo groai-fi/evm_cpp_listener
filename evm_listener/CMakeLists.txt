@@ -102,6 +102,10 @@ add_library(evml_core STATIC
     src/sink/consumer_lag.cpp
     src/app/pool_config.cpp
     src/app/tools.cpp
+    src/ops/watchdog.cpp
+    src/ops/metrics.cpp
+    src/ops/ops_http_server.cpp
+    src/ops/http_client.cpp
 )
 target_include_directories(evml_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
