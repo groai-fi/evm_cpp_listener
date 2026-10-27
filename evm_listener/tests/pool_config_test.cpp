@@ -80,6 +80,8 @@ TEST_CASE("make_pool_config maps base.toml onto the pool", "[unit][pool_config]"
     CHECK(p.finalized_poll == 12000ms);
     CHECK(p.subscribe_timeout == 10000ms);
     CHECK(p.http_timeout == 15000ms);
+    CHECK(p.reconcile_rps == 2);
+    CHECK(p.reconcile_burst == 4);
 
     boost::asio::io_context ioc;
     CHECK_NOTHROW(evml::provider::ProviderPool::create(ioc.get_executor(), p, {}));  // the mapping is consistent

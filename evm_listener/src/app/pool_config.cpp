@@ -56,6 +56,10 @@ provider::PoolConfig make_pool_config(const core::Config& cfg, const std::string
     // Configure block tag polling cadences for unfinalized and finalized safety gates.
     p.safe_poll = milliseconds(cfg.chain.safe_poll_ms);
     p.finalized_poll = milliseconds(cfg.chain.finalized_poll_ms);
+
+    // Per-provider pacing for reconcile calls (call_to).
+    p.reconcile_rps = cfg.redundancy.reconcile_rps;
+    p.reconcile_burst = cfg.redundancy.reconcile_burst;
     return p;
 }
 

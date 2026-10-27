@@ -514,3 +514,95 @@ TEST_CASE("pool: tags are cached per answering provider and never mixed after a 
     CHECK_FALSE(pool->cached_tag("A", Tag::Finalized).has_value());
     shutdown(ioc, pool);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// call_to / report_bad / pick_getlogs_excluding (5-C1)
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_CASE("pool: call_to asks only the named provider and does not fail over", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockHttpServer h1(ioc, [](const MockRequest&) { return MockReply{.status = 500, .body = "boom-1"}; });
+    MockHttpServer h2(ioc, healthy(chain));
+    auto pool = ProviderPool::create(
+        ioc.get_executor(),
+        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
+
+    const auto bad = run_sync(ioc, pool->call_to("H1", get_logs_request()));
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.provider == "H1");
+    CHECK(h1.requests() == 1);
+    CHECK(h2.requests() == 0);  // no failover
+
+    const auto good = run_sync(ioc, pool->call_to("H2", get_logs_request()));
+    CHECK(good.ok);
+    CHECK(good.provider == "H2");
+    CHECK(good.result_raw == "[]");
+    CHECK(h2.requests() == 1);
+
+    CHECK_THROWS_AS(run_sync(ioc, pool->call_to("nope", get_logs_request())), std::out_of_range);
+    shutdown(ioc, pool);
+}
+
+TEST_CASE("pool: call_to waits for a token instead of exceeding reconcile_rps", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockHttpServer h1(ioc, healthy(chain));
+    auto cfg = base_cfg({{"H1", kDeadWs, h1.url()}}, {"H1"}, {"H1"});
+    cfg.reconcile_rps = 2;
+    cfg.reconcile_burst = 2;
+    auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), {});
+
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(run_sync(ioc, pool->call_to("H1", get_logs_request())).ok);
+    CHECK(run_sync(ioc, pool->call_to("H1", get_logs_request())).ok);
+    CHECK(pool->throttled_total("H1") == 0);  // inside the burst
+    CHECK(run_sync(ioc, pool->call_to("H1", get_logs_request())).ok);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    CHECK(pool->throttled_total("H1") == 1);
+    CHECK(elapsed >= 300ms);  // the 3rd call waited ~500 ms for a token (minus the time the first two took)
+    CHECK(h1.requests() == 3);
+    shutdown(ioc, pool);
+}
+
+TEST_CASE("pool: report_bad counts toward Down and pick_getlogs_excluding skips the excluded", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockHttpServer h1(ioc, healthy(chain));
+    MockHttpServer h2(ioc, healthy(chain));
+    Rec rec;
+    auto pool = ProviderPool::create(
+        ioc.get_executor(),
+        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), handlers(rec));
+
+    CHECK(pool->pick_getlogs_excluding({}) == std::optional<std::string>("H1"));
+    CHECK(pool->pick_getlogs_excluding({"H1"}) == std::optional<std::string>("H2"));
+    CHECK_FALSE(pool->pick_getlogs_excluding({"H1", "H2"}).has_value());
+
+    // failover_after = 3 in base_cfg: the first two reports leave H1 Up.
+    pool->report_bad("H1", "log outside the requested range");
+    pool->report_bad("H1", "log outside the requested range");
+    CHECK(pool->state("H1") == State::Up);
+    pool->report_bad("H1", "block hash disagrees");
+    CHECK(pool->state("H1") == State::Down);
+    CHECK(pool->inconsistency_total("H1") == 3);
+    CHECK(pool->inconsistency_total("H2") == 0);
+    CHECK(rec.transitions.empty());  // handlers fire only while the pool is running; this one is not started
+
+    CHECK(pool->pick_getlogs_excluding({}) == std::optional<std::string>("H2"));  // H1 is Down
+    CHECK_THROWS_AS(pool->report_bad("nope", "x"), std::out_of_range);
+    shutdown(ioc, pool);
+}
+
+TEST_CASE("pool: create() rejects an invalid pacing config", "[unit]") {
+    net::io_context ioc;
+    const std::vector<ProviderEndpoint> eps{{"A", "ws://127.0.0.1:9/", "http://127.0.0.1:9/"}};
+    auto cfg = base_cfg(eps, {"A"}, {"A"});
+    cfg.reconcile_rps = 0;
+    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+    cfg.reconcile_rps = 5;
+    cfg.reconcile_burst = 4;
+    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+    cfg.reconcile_burst = 5;
+    CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
+}

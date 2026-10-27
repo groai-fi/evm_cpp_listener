@@ -19,6 +19,7 @@
 #include "core/config.hpp"
 #include "provider/provider_book.hpp"
 #include "provider/stale_detector.hpp"
+#include "provider/token_bucket.hpp"
 #include "rpc/backoff.hpp"
 #include "rpc/classify.hpp"
 #include "rpc/codec.hpp"
@@ -66,6 +67,10 @@ struct PoolConfig {
     ms safe_poll{4000};              // getLogs provider: head + `safe`
     ms finalized_poll{12000};        // getLogs provider: `finalized`
     ms crosscheck_period{60000};     // WS provider's own `safe` (for the getLogs-lag check)
+
+    // Per-provider pacing of call_to() (reconcile getLogs retries, block lookups). call(), probes and polls are not paced.
+    std::uint32_t reconcile_rps{2};
+    std::uint32_t reconcile_burst{4};  // must be >= reconcile_rps
 };
 
 /// @brief Event callbacks fired by the provider pool for streaming blocks, logs, transitions, and connection events.
@@ -133,6 +138,30 @@ public:
     /// @brief Coroutine executing JSON-RPC HTTP request with sequential failover across usable providers.
     boost::asio::awaitable<RpcOutcome> call(RequestBuilder build);
 
+    // One JSON-RPC request to ONE named provider (no failover), paced by that provider's token bucket
+    // (reconcile_rps / reconcile_burst): the call waits for its turn instead of failing. The outcome is folded into
+    // the provider's health like call(). Throws std::out_of_range for an unknown provider and std::logic_error for
+    // one without an http_url.
+    /// @brief Coroutine sending one paced JSON-RPC HTTP request to the named provider.
+    boost::asio::awaitable<RpcOutcome> call_to(std::string provider, RequestBuilder build);
+
+    // Next usable getLogs provider that is not in `exclude`, in failover order. nullopt = none left.
+    /// @brief Picks the best usable getLogs provider outside the exclude set.
+    std::optional<std::string> pick_getlogs_excluding(const std::unordered_set<std::string>& exclude) const {
+        return book_.pick_getlogs(Clock::now(), exclude);
+    }
+
+    // The provider answered with data that failed validation (bad getLogs response, canonical-hash disagreement).
+    // Counts as a Retry failure toward Down (after policy.failover_after) and bumps inconsistency_total().
+    // Throws std::out_of_range for an unknown provider.
+    /// @brief Books a data-quality failure against the provider.
+    void report_bad(const std::string& provider, const std::string& reason);
+
+    /// @brief Number of report_bad() calls for the provider (provider_inconsistency_total).
+    std::uint64_t inconsistency_total(const std::string& provider) const { return nodes_.at(provider).inconsistent; }
+    /// @brief Number of call_to() calls that had to wait for a token (getlogs_throttled_total).
+    std::uint64_t throttled_total(const std::string& provider) const { return nodes_.at(provider).throttled; }
+
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
     // provider; a null block counts as a failure too).
     /// @brief Queries named provider for latest block matching Tag (Safe or Finalized) and caches the snapshot.
@@ -164,11 +193,14 @@ private:
     using ms = std::chrono::milliseconds;
 
     struct Node {
-        Node(ProviderEndpoint e, std::unique_ptr<rpc::HttpRpcClient> h, rpc::Backoff b)
-            : ep(std::move(e)), http(std::move(h)), backoff(std::move(b)) {}
+        Node(ProviderEndpoint e, std::unique_ptr<rpc::HttpRpcClient> h, rpc::Backoff b, TokenBucket tb)
+            : ep(std::move(e)), http(std::move(h)), backoff(std::move(b)), bucket(tb) {}
         ProviderEndpoint ep;
         std::unique_ptr<rpc::HttpRpcClient> http;
         rpc::Backoff backoff;
+        TokenBucket bucket;
+        std::uint64_t inconsistent{0};
+        std::uint64_t throttled{0};
         std::array<std::optional<TagSnapshot>, 2> tags;
         TimePoint next_standby_probe{};
     };

@@ -5,6 +5,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include "core/error.hpp"
 #include "rpc/blocking_http.hpp"
@@ -41,6 +42,8 @@ void validate(const PoolConfig& c) {
     if (c.chain_id == 0) fail("chain_id not set");
     if (!c.subscribe_heads && !c.logs) fail("neither newHeads nor logs subscription configured");
     if (c.logs && (c.logs->addresses.empty() || c.logs->topic0s.empty())) fail("logs filter needs an address and a topic0");
+    if (c.reconcile_rps == 0) fail("reconcile_rps must be >= 1");
+    if (c.reconcile_burst < c.reconcile_rps) fail("reconcile_burst must be >= reconcile_rps");
 
     std::unordered_map<std::string, const ProviderEndpoint*> by_name;
     for (const auto& p : c.providers) {
@@ -93,7 +96,8 @@ ProviderPool::ProviderPool(Private, net::any_io_executor executor, PoolConfig cf
         }
         nodes_.emplace(p.name, Node(p, std::move(http),
                                     rpc::Backoff(cfg_.seed + i++, cfg_.backoff_base, cfg_.backoff_cap,
-                                                 cfg_.backoff_min_live)));
+                                                 cfg_.backoff_min_live),
+                                    TokenBucket(cfg_.reconcile_rps, cfg_.reconcile_burst, Clock::now())));
         names_.push_back(p.name);
     }
 }
@@ -423,6 +427,29 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
         // Return immediately on success or RangeTooLarge (caller adjusts range without provider failover).
         if (o.ok || o.kind == rpc::FailKind::RangeTooLarge) co_return o;
         last = std::move(o);
+    }
+}
+
+net::awaitable<RpcOutcome> ProviderPool::call_to(std::string provider, RequestBuilder build) {
+    const auto self = shared_from_this();
+    Node& n = nodes_.at(provider);  // nodes_ is never modified after construction: the reference stays valid
+    const auto wait = n.bucket.reserve(Clock::now());
+    if (wait > Clock::duration::zero()) {
+        ++n.throttled;
+        net::steady_timer timer(exec_, wait);
+        co_await timer.async_wait(net::use_awaitable);
+    }
+    const auto id = next_id_++;
+    auto o = co_await call_on(provider, build(id), id);
+    note(provider, o);
+    co_return o;
+}
+
+void ProviderPool::report_bad(const std::string& provider, const std::string& reason) {
+    ++nodes_.at(provider).inconsistent;
+    if (const auto t = book_.on_failure(provider, rpc::FailKind::Retry, std::nullopt, Clock::now())) {
+        emit_transition(*t, "bad response: " + reason);
+        reconcile();
     }
 }
 
