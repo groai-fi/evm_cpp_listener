@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -158,6 +159,23 @@ evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64
     };
 }
 
+// A node whose tags and health the test changes between run_until calls. The mock server runs on the test thread, so
+// the handler and the test never touch `NodeState` concurrently.
+struct NodeState {
+    std::uint64_t safe{0};
+    std::uint64_t finalized{0};
+    bool fail{false};  // every request answers HTTP 500
+    int getlogs_calls{0};
+};
+
+evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
+    return [&s](const evml::test::MockRequest& r) {
+        if (s.fail) return evml::test::MockReply{.status = 500, .body = "node down"};
+        if (r.body.find("eth_getLogs") != std::string::npos) ++s.getlogs_calls;
+        return healthy_node(s.safe, s.finalized)(r);
+    };
+}
+
 // One host (run_host on its own thread) with its observable state.
 struct RunningHost {
     evml::core::Config cfg;
@@ -168,6 +186,8 @@ struct RunningHost {
     std::atomic<int> demoted_events{0};
     std::atomic<bool> threw{false};
     std::string what;
+    std::mutex mu;
+    evml::pipeline::DriverStatus last;  // guarded by `mu`
     std::thread th;
 
     explicit RunningHost(evml::core::Config c) : cfg(std::move(c)) {}
@@ -176,7 +196,11 @@ struct RunningHost {
             evml::app::HostOptions opt;
             opt.stop = &stop;
             opt.beat_period = 50ms;
-            opt.on_status = [this](const evml::pipeline::DriverStatus& s) { state = static_cast<int>(s.state); };
+            opt.on_status = [this](const evml::pipeline::DriverStatus& s) {
+                state = static_cast<int>(s.state);
+                std::lock_guard<std::mutex> lk(mu);
+                last = s;
+            };
             opt.on_event = [this](std::string_view e) {
                 if (e == "leader") ++leader_events;
                 if (e == "demoted") {
@@ -193,6 +217,10 @@ struct RunningHost {
         });
     }
     bool live() const { return state.load() == static_cast<int>(evml::pipeline::PipelineState::Live); }
+    evml::pipeline::DriverStatus status() {
+        std::lock_guard<std::mutex> lk(mu);
+        return last;
+    }
     void finish() {
         stop = true;
         if (th.joinable()) th.join();
@@ -341,6 +369,128 @@ TEST_CASE("host: losing the lease demotes the host to standby and it leads again
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(relead);
     CHECK(h.demoted_events.load() == 1);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
+// ---- 5-D3: the gate bridge (on_tag -> FinalityGate -> driver) as seen from the host ----
+
+TEST_CASE("host: a finalized regression on the current provider freezes release and stops the sweeps", "[integration]") {
+    evml::core::log::init("info");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-frozen-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "frozen.toml",
+                                            provider_env(node.url())));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+    CHECK_FALSE(h.status().frozen);
+
+    ns.finalized = c0 + 100;  // an impossible regression of the finalized tag
+    const bool frozen = evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s);
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(frozen);
+    const auto st = h.status();
+    CHECK(st.frozen_reason.find("finalized regressed") != std::string::npos);
+    CHECK(st.c_s == c0 + 300);  // frozen: the cursors did not move
+    CHECK(st.c_f == c0 + 250);
+
+    // Frozen means no more sweeps: even a rising safe gate does not start a getLogs call.
+    ns.safe = c0 + 320;
+    const int calls = ns.getlogs_calls;
+    evml::test::run_until(mock_ioc, [] { return false; }, 1500ms);
+    CHECK(ns.getlogs_calls == calls);
+    CHECK(h.status().c_s == c0 + 300);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
+TEST_CASE("host: a safe regression on the current provider makes the driver re-verify the released window",
+          "[integration]") {
+    evml::core::log::init("info");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-safereorg-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "safereorg.toml",
+                                            provider_env(node.url())));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // Quiet baseline: Live with C_f < C_s and nothing left to sweep, so no getLogs calls happen on their own.
+    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    const int before = ns.getlogs_calls;
+    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    REQUIRE(ns.getlogs_calls == before);
+
+    ns.safe = c0 + 290;  // the same provider's safe tag goes backwards: possible L1 reorg
+    const bool reverified =
+        evml::test::run_until(mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 15s);
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(reverified);  // reverify_released fetched (C_f, C_s] again
+
+    const bool settled = evml::test::run_until(
+        mock_ioc, [&] { return !h.status().reverify_pending && h.live(); }, 15s);
+    REQUIRE(settled);
+    const auto st = h.status();
+    CHECK_FALSE(st.frozen);
+    CHECK(st.safe_reorgs == 0);  // the mock returns the same (empty) logs: nothing differed
+    CHECK(st.g_s == c0 + 290);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
+TEST_CASE("host: failing over to a provider with lower tags neither freezes nor re-verifies", "[integration]") {
+    evml::core::log::init("info");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-failover-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState primary{.safe = c0 + 300, .finalized = c0 + 250};
+    NodeState other{.safe = c0 + 280, .finalized = c0 + 230};  // a lagging, but honest, node
+    evml::test::MockHttpServer node_a(mock_ioc, tunable_node(primary));
+    evml::test::MockHttpServer node_b(mock_ioc, tunable_node(other));
+    // Every env provider (infura, alchemy, ankr, quicknode) talks to node A. host_toml points base_public (the
+    // credential-free provider, 4th in getlogs_order) at node B, so it is the one that leads after A dies.
+    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node_b.url(), 30000), "failover.toml",
+                                            provider_env(node_a.url())));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+    CHECK(h.status().g_s == c0 + 300);
+
+    primary.fail = true;  // A dies: infura, alchemy and ankr each fail 3 times in a row, then base_public leads
+    const bool moved = evml::test::run_until(
+        mock_ioc, [&] { return h.status().g_s == c0 + 280 || h.threw.load(); }, 30s);
+    INFO("final status g_s=" << (h.status().g_s ? std::to_string(*h.status().g_s) : "none"));
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(moved);
+
+    // Give the gate bridge a few more polls: a lower tag from a NEW provider must not look like a regression.
+    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
+    const auto st = h.status();
+    CHECK_FALSE(st.frozen);
+    CHECK_FALSE(st.reverify_pending);
+    CHECK(st.safe_reorgs == 0);
+    CHECK(st.g_s == c0 + 280);
+    CHECK(st.g_f == c0 + 230);
+    CHECK(h.live());
 
     h.finish();
     CHECK(h.exit_code.load() == 0);
