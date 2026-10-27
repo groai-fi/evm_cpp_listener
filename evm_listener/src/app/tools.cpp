@@ -16,6 +16,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include "app/host.hpp"
 #include "app/pool_config.hpp"
 #include "core/env.hpp"
 #include "core/error.hpp"
@@ -28,6 +29,17 @@
 
 namespace evml::app {
 
+/// @brief Replaces `{version}` placeholder in template with compiled semver string.
+std::string user_agent(const core::Config& cfg) {
+    std::string ua = cfg.ops.http_user_agent;
+    const std::string token = "{version}";
+    for (auto pos = ua.find(token); pos != std::string::npos; pos = ua.find(token, pos)) {
+        ua.replace(pos, token.size(), core::kSemver);
+        pos += std::strlen(core::kSemver);
+    }
+    return ua;
+}
+
 namespace {
 
 using core::Address20;
@@ -38,17 +50,6 @@ using core::Provider;
 struct RpcFailure : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
-
-/// @brief Replaces `{version}` placeholder in template with compiled semver string.
-std::string user_agent(const Config& cfg) {
-    std::string ua = cfg.ops.http_user_agent;
-    const std::string token = "{version}";
-    for (auto pos = ua.find(token); pos != std::string::npos; pos = ua.find(token, pos)) {
-        ua.replace(pos, token.size(), core::kSemver);
-        pos += std::strlen(core::kSemver);
-    }
-    return ua;
-}
 
 /// @brief Truncates error messages to avoid console flooding on large response bodies.
 std::string clip(std::string_view s, std::size_t n = 120) {
@@ -313,6 +314,7 @@ int probe_transport(const Config& cfg, unsigned seconds) {
 int run_cli(int argc, char** argv) {
     const auto usage = [] {
         std::cerr << "usage: evm_listener --version\n"
+                     "       evm_listener --config <file>                        (run the listener)\n"
                      "       evm_listener --config <file> --check-config\n"
                      "       evm_listener --config <file> --find-deploy-block <address>\n"
                      "       evm_listener --config <file> --probe-transport <seconds>\n";
@@ -321,6 +323,7 @@ int run_cli(int argc, char** argv) {
 
     std::optional<std::string> config_path, find_addr;
     std::optional<unsigned> probe_seconds;
+    std::optional<std::chrono::seconds> freeze_io_after;  // test hook, see EVML_TEST_HOOKS
     bool version = false, check = false;
     // Parse command line arguments.
     for (int i = 1; i < argc; ++i) {
@@ -341,6 +344,10 @@ int run_cli(int argc, char** argv) {
             }
             probe_seconds = static_cast<unsigned>(std::stoul(v));
             if (*probe_seconds == 0) return usage();
+#ifdef EVML_TEST_HOOKS
+        } else if (a == "--test-freeze-io-after" && i + 1 < argc) {
+            freeze_io_after = std::chrono::seconds(std::stoul(argv[++i]));
+#endif
         } else {
             std::cerr << "unknown or incomplete argument: " << a << "\n";
             return usage();
@@ -353,10 +360,9 @@ int run_cli(int argc, char** argv) {
         std::cout << core::version_string() << '\n';
         return kExitOk;
     }
-    // Enforce mutual exclusivity: exactly one action must be requested.
-    if (static_cast<int>(check) + static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value()) != 1) {
-        return usage();  // need exactly one action
-    }
+    // The three tool actions are mutually exclusive; none of them means "run the listener".
+    const int actions = static_cast<int>(check) + static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value());
+    if (actions > 1) return usage();
     if (!config_path) {
         std::cerr << "--config <file> is required\n";
         return usage();
@@ -372,6 +378,7 @@ int run_cli(int argc, char** argv) {
             return check_config_online(cfg);
         }
         if (probe_seconds) return probe_transport(cfg, *probe_seconds);
+        if (!find_addr) return run_listener(cfg, freeze_io_after);
         const auto addr = Address20::from_hex(*find_addr);
         std::cout << find_deploy_block(cfg, addr) << "\n";
         return kExitOk;

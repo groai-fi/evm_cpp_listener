@@ -53,6 +53,13 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sink/lua_sources.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/sink/lua_sources.hpp @ONLY)
 
 option(EVML_SANITIZE "Build with ASan+UBSan" ON)
+# Test-only CLI hooks (--test-freeze-io-after). On for Debug (dev/test) builds, off for Release (the prod image).
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(EVML_TEST_HOOKS_DEFAULT ON)
+else()
+    set(EVML_TEST_HOOKS_DEFAULT OFF)
+endif()
+option(EVML_TEST_HOOKS "Compile test-only CLI hooks" ${EVML_TEST_HOOKS_DEFAULT})
 
 find_package(Boost REQUIRED CONFIG COMPONENTS json)
 find_package(OpenSSL REQUIRED)
@@ -102,6 +109,7 @@ add_library(evml_core STATIC
     src/sink/consumer_lag.cpp
     src/app/pool_config.cpp
     src/app/pool_log_source.cpp
+    src/app/host.cpp
     src/app/tools.cpp
     src/ops/watchdog.cpp
     src/ops/metrics.cpp
@@ -112,6 +120,9 @@ target_include_directories(evml_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_compile_features(evml_core PUBLIC cxx_std_20)
+if(EVML_TEST_HOOKS)
+    target_compile_definitions(evml_core PUBLIC EVML_TEST_HOOKS=1)
+endif()
 target_link_libraries(evml_core PUBLIC
     Boost::json
     OpenSSL::SSL OpenSSL::Crypto

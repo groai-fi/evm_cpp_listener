@@ -14,6 +14,9 @@ inline constexpr int kExitOk = 0;       ///< Success (clean execution, all check
 inline constexpr int kExitFailure = 1;  ///< Runtime error, probe failure, or online check failure.
 inline constexpr int kExitUsage = 2;    ///< Command-line syntax error or invalid configuration.
 
+/// @brief Returns `[ops].http_user_agent` with the `{version}` placeholder replaced by the compiled semver.
+std::string user_agent(const core::Config& cfg);
+
 /// @brief Prints an offline structural summary of the loaded configuration to stdout.
 ///
 /// Outputs shard ID, chain specs, enabled WS and getLogs providers (with secrets redacted),

@@ -21,6 +21,7 @@ add_executable(evml_tests
     provider_pool_test.cpp
     pool_config_test.cpp
     pool_log_source_test.cpp
+    pool_log_source_sweep_test.cpp
     token_bucket_test.cpp
     finality_gate_test.cpp
     reorg_detector_test.cpp
@@ -42,12 +43,14 @@ add_executable(evml_tests
     metrics_test.cpp
     ops_http_server_test.cpp
     http_client_test.cpp
+    host_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
     EVML_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../config"
     EVML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
-    EVML_EXPECTED_VERSION="${EVML_VERSION_STRING}")
+    EVML_EXPECTED_VERSION="${EVML_VERSION_STRING}"
+    EVML_LISTENER_EXE="$<TARGET_FILE:evm_listener>")
 
 # Tests tagged [integration] use in-process mock servers on 127.0.0.1 or the compose Redis (REDIS_URL); everything
 # else is a pure unit test. [redis_serial] tests change server-wide Redis state (maxmemory, SCRIPT FLUSH) and run alone.
