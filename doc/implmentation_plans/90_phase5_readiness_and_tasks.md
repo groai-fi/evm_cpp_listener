@@ -105,7 +105,7 @@ See plan 60 "results and deviations".
   - Tests: serialized output contains the names; repeated totals do not double-count.
 
 ### ⬜ 5-C `LogSource` adapter (§5.4a), parallel with 5-B
-- [ ] **C1 `ProviderPool` public API** (audit every call site; `call_on` is private today):
+- [x] **C1 `ProviderPool` public API** (audit every call site; `call_on` is private today):
   - `call_to(provider, RequestBuilder)`, `pick_getlogs_excluding(set)`, `report_bad(provider, reason)` → book `on_failure(Retry)` + an inconsistency counter, and a per-provider token bucket (`reconcile_rps` / `burst`) that every `call_to` respects.
 - [ ] **C2 `src/app/pool_log_source.{hpp,cpp}`** implementing `pipeline::LogSource`:
   - `get_logs` retries the next provider, excluding the ones already tried;
