@@ -295,6 +295,7 @@ struct RigCfg {
     std::uint32_t heartbeat_ms{0};
     std::vector<evml::core::ConsumerGroupCfg> groups{};
     std::uint64_t wall_ms{1700000000000};
+    std::atomic<std::uint64_t>* loop_beat{nullptr};
 };
 
 struct Rig {
@@ -340,6 +341,7 @@ struct Rig {
         o.probe_max = milliseconds(0);
         o.steady_now = [this] { return t0 + elapsed; };
         o.wall_ms = [wall = cfg.wall_ms] { return wall; };
+        o.loop_beat = cfg.loop_beat;
 
         auto d = std::make_unique<FakeConn>(server);
         auto l = std::make_unique<FakeConn>(server);
@@ -1002,6 +1004,18 @@ TEST_CASE("redis sink: the sink thread drains what producers enqueue and serves 
     CHECK(got->size() == 10);
 
     CHECK(wait_for([&] { return r.sink->loop_heartbeat_ms() > 0; }));
+    r.sink->stop();
+}
+
+TEST_CASE("redis sink: the sink loop stores its beat into the watchdog-owned slot", "[unit][sink]") {
+    std::atomic<std::uint64_t> slot{0};
+    RigCfg cfg;
+    cfg.loop_beat = &slot;
+    Rig r(cfg);
+    CHECK(slot.load() == 0);
+    r.sink->start();
+    CHECK(wait_for([&] { return slot.load() > 0; }));
+    CHECK(slot.load() == r.sink->loop_heartbeat_ms());  // same value as the sink's own counter at that iteration
     r.sink->stop();
 }
 

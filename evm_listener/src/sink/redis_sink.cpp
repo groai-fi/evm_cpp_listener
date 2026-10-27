@@ -379,8 +379,10 @@ RedisSink::TimePoint RedisSink::wake_time() const {
 
 void RedisSink::run() {
     while (!stop_.load()) {
-        heartbeat_ms_.store(static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(now().time_since_epoch()).count()));
+        const auto beat_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now().time_since_epoch()).count());
+        heartbeat_ms_.store(beat_ms);
+        if (opts_.loop_beat) opts_.loop_beat->store(beat_ms, std::memory_order_relaxed);
         if (pump()) continue;
         std::unique_lock lk(mu_);
         cv_.wait_until(lk, wake_time(), [this] { return stop_.load() || !queue_.empty(); });

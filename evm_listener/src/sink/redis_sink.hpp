@@ -73,6 +73,10 @@ struct RedisSinkOptions {
     std::vector<core::ConsumerGroupCfg> consumer_groups;
     std::uint32_t consumer_lag_interval_ms{60000};
 
+    // Process watchdog (plan 60 5.1): when non-null, every sink-loop iteration also stores its steady-clock ms here. The
+    // storage belongs to the Watchdog (process lifetime) and must outlive this sink; null = no watchdog.
+    std::atomic<std::uint64_t>* loop_beat{nullptr};
+
     /// @brief Constructs and validates RedisSinkOptions from configuration sections.
     /// @throws std::invalid_argument If configuration violates fencing consistency or timeout constraints.
     static RedisSinkOptions from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token);
