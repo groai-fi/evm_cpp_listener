@@ -1,0 +1,242 @@
+# Phase 5 readiness review + worker task list
+
+Reviewed [60_phase5_ops.md](60_phase5_ops.md) (rev 7) against the code at `d91de9e` (`feat/lua-seperation`).
+
+**Verdict: ready to start, with conditions.** First confirm the decisions in §2. The plan describes the ops features (alerts, watchdog, `/readyz`). It never specifies the **host process that runs the listener**, and that process does not exist yet. That host is the largest piece of Phase 5.
+
+---
+
+## 1. Findings
+
+### 1.1 Blocking gaps: the plan does not specify these, and the code does not have them
+
+| # | Gap | Evidence | Consequence if not specified |
+|---|---|---|---|
+| G1 | **No daemon / host assembly.** `main.cpp` only dispatches the CLI tools. Nothing builds pool + gate + driver + sink, and nothing runs the tick loop. Plan 60 has no section for it. | [main.cpp](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/main.cpp), [tools.cpp `run_cli`](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/app/tools.cpp) requires exactly one of `--check-config` / `--find-deploy-block` / `--probe-transport`. The Railway `startCommand` (`--config … ` with no action) currently exits 2. Plan 50 deviation 5: "`main.cpp` is still a stub". | Each worker guesses its own thread model and startup order. |
+| G2 | **Nothing feeds the gates.** Nothing turns pool tag polls into `FinalityGate` and then into `driver.set_gates`. `PoolHandlers` has no tag callback. | `FinalityGate` / `ReorgDetector` are referenced only in `chain/` and one comment ([grep](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/pipeline_driver.hpp#L60)). [PoolHandlers](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/provider/provider_pool.hpp) has only head / log / transition / ws callbacks. | The driver never leaves Recovering (`g_s_` stays nullopt). |
+| G3 | **The WS cross-check is not wired.** `PendingBuffer` (plan 40 §3.4) is used only by its unit test. `ws_extra_logs_total` and the **WS Missed Logs** alert have no data source. | `grep PendingBuffer src/` matches only `pending_buffer.*`. | One alert in §5.3.3 cannot fire. |
+| G4 | **`ProviderPool` lacks the API that §5.4a needs:** a call to a named provider with an exclude set, `report_bad` → `on_failure(Retry)`, and a per-provider token bucket. | `call_on(provider, …)` is **private** ([provider_pool.hpp:190](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/provider/provider_pool.hpp#L190)). Public `call()` walks the whole chain. `ProviderBook::pick_getlogs(now, exclude)` exists. | The adapter cannot meet "page retries exclude the failed provider" or "`block(n)` never asks the logs provider". |
+| G5 | **No async generic HTTP client** for the n8n POST (custom header) and the healthchecks GET. `HttpRpcClient` is JSON-RPC only, and `blocking_http` is blocking, so it is forbidden on the io thread. | [http_rpc_client.hpp](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/rpc/http_rpc_client.hpp) has only `call(json_body)`. | Alert and dead-man transport have nothing to run on. |
+
+### 1.2 Plan mistakes or risks (proposed fixes are in §2)
+
+| # | Issue | Why it matters |
+|---|---|---|
+| R1 | **The watchdog gives a false positive after `docker pause` or a VM suspend.** §5.1 aborts when a heartbeat is older than 30 s. After a 30 s+ pause, the watchdog thread can wake before the io thread ticks, see a stale heartbeat, and abort. This contradicts the §Tests expectation "after unpause, a demotes itself on its next renew". | The test will be flaky, and it causes a spurious restart on host hiccups. |
+| R2 | **"`kill -STOP` of the io thread only" is impossible on Linux.** SIGSTOP stops the whole process. | That test cannot be written as specified. |
+| R3 | **§5.1 says "3 consecutive deadlines → … demote".** If the cause is shared (for example a provider outage), the leader demotes, the standby takes over and stalls too, and the two ping-pong. Phase 3 only says "report_bad + PipelineStalled". | Leader flapping, with no data benefit. |
+| R4 | **`PORT` vs `[ops].http_listen` precedence is undefined.** §5.2 says `[::]:${PORT:-9464}`, but `base.toml` hardcodes `http_listen = "[::]:9464"`. Railway's healthcheck uses `PORT`. | The deploy healthcheck can probe the wrong port. |
+| R5 | **The `/readyz` "gate age OK" condition is undefined.** | Every implementer will pick a different rule. |
+| R6 | **Who fires each alert across 2 hosts is undefined.** If the standby evaluates pipeline alerts it duplicates or sends false alerts. "Leader Changed": old or new host? | Duplicate Slack pages. |
+| R7 | **`--backfill-contract` writes through fenced scripts**, but §5.6a never says it must acquire the lease. With `[lease] enabled = true`, unfenced writes are refused. | The tool cannot write. |
+| R8 | **New config keys have no section:** `pending_max_logs`, `reconcile_rps`, `reconcile_burst`. The loader rejects unknown keys ([config.cpp:45](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/core/config.cpp#L45)). | Each worker picks a different section. |
+| R9 | **Paths differ from the repo.** The plan says `evm_listener/deploy/docker/Dockerfile`, `deploy/docker/docker-compose.dev.yml` and `deploy/railway/railway.json`. The repo has [docker/Dockerfile.prod](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/docker/Dockerfile.prod), [mk/60-prod.mk](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/mk/60-prod.mk) and `.devcontainer/docker-compose.yml` (redis + toxiproxy). | Duplicate Dockerfiles. |
+| R10 | **`Dockerfile.prod` gaps vs §5.7:** no `tini`, no `STOPSIGNAL`, no `HEALTHCHECK`, no config copied to `/app/config/base.toml`. It still passes `-DEVML_BUILD_COMMON=OFF`, an option you just removed from `CMakeLists.txt`, so CMake warns "unused variable". The comment says ~80 MB; the target is < 60 MB. | The Railway `startCommand` points at a file that is not in the image. |
+
+### 1.3 Already in place (do not rebuild)
+- `[ops]` / `[watchdog]` config is parsed. The webhook-without-token case and non-https URLs are rejected. An empty dead-man URL gives a WARN note ([config.cpp:570-596](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/core/config.cpp#L570-L596)).
+- `host_id` resolves TOML → `$EVML_HOST_ID` → hostname.
+- JSON stdout logging (`core/log`) and `core::env::redact()` exist.
+- Uncovered-contract startup check: the driver fails and names `--backfill-contract` ([pipeline_driver.cpp:102-106](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/pipeline_driver.cpp#L102-L106)).
+- Sink side:
+  - `status()` exposes the counters for alerts;
+  - `consumer_lag()` returns snapshots that include `probed_at_ms`;
+  - `loop_heartbeat_ms()` is there for the watchdog;
+  - `set_heartbeat()`, `drain()`, and the lease functions are in place.
+- `DriverStatus` has every field the pipeline alerts need.
+- `prometheus-cpp` (core, `with_pull=False`) is already a Conan dependency.
+- `.env.example` documents the N8N, DEADMAN, `EVML_HOST_ID` and `REDIS_URL` variables.
+
+### 1.4 Rev 9 review fixes (2026-10-22)
+- `railway.json` `startCommand` removed: Railway runs it in place of the image `ENTRYPOINT`, which would bypass `tini`.
+- "No quorum → `Stalled`" replaced by nullopt → `Retry` + progress deadline (no `LogSource` change).
+- Added: lease-disabled branch, per-leadership rebuild list, watchdog sink-beat only while leader, watchdog threshold from config, Leader Changed source.
+- Ping job file renamed `71_job_ws_ping_liveness.md` (70 is the Phase 6 plan).
+
+### 1.5 Housekeeping
+- The master plan §5 status is stale: it says Phase 4 is "Uncommitted", but the commits exist. Update it in 5-0.
+
+---
+
+## 2. Decisions needed (the recommended default is listed first; the worker uses it unless you say otherwise)
+
+| # | Decision | Recommended |
+|---|---|---|
+| D1 | Add a **§5.H Host process** section to plan 60 (design in slice 5-D below) | **Yes.** I write it into plan 60 before the worker starts. |
+| D2 | Watchdog pause tolerance (R1) | The watchdog tracks its own wake gap. If its own sleep overran by more than 5 s, it resets the baselines and skips that check. It aborts only on a heartbeat that has been stale for 30 s **while the watchdog itself ran on time**. |
+| D3 | io-freeze test (R2) | Unit-test `Watchdog` with injected clocks and an injected abort callback. Add a test-only build flag `EVML_TEST_HOOKS` with `--test-freeze-io-after <s>`, which posts a blocking sleep onto the io thread, for one integration test expecting exit 134. |
+| D4 | Stall → demote (R3) | **No demotion in v1.** `PipelineStalled` alert + `report_bad` only. |
+| D5 | `PORT` precedence (R4) | If `$PORT` is set, it overrides the port in `http_listen`, and the host is kept. |
+| D6 | `/readyz` gate age (R5) | `G_s` advanced within `watchdog.safe_gate_stuck_s`. |
+| D7 | Alert ownership (R6) | Pipeline, provider, sink and consumer alerts: **leader only**. Host-local alerts (Redis Unreachable, Redis Misconfigured, Sink Fenced): either host. Leader Changed: fired by the **new** leader on acquire, when the previous lease token's host ≠ self. |
+| D8 | Backfill + lease (R7) | `--backfill-contract` acquires the lease (blocking, 60 s max). It exits 1 if another host holds it, then runs fenced and releases at the end. |
+| D9 | Config placement (R8) | `[chain] pending_max_logs` and `[redundancy] reconcile_rps` / `reconcile_burst`. Add a new `[ws]` section only in slice 5-J. |
+| D10 | Paths (R9) | Keep `docker/Dockerfile.prod`, `.devcontainer/docker-compose.yml` (add `listener-a` / `-b` under a compose profile), and put `railway.json` at the **repo root**, Railway's default location. Update plan 60 text. |
+| D11 | Rev 7 `ping` mode (§5.1a) | **Superseded:** a separate job after Phase 6, see [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md). Not part of Phase 5. |
+
+---
+
+## 3. Task list for the worker agent
+
+Rules for every slice:
+- Use `make build` / `make test` with exit code 0 as the gate. The tree is ASan/UBSan `-Werror`.
+- No commits without the user's instruction.
+- Surgical diffs.
+- Secrets come from the env only, and `redact()` is applied before any log line.
+- Leave plan 60 updated with a "results and deviations" list per slice, as in plan 50.
+
+### 5-0 Prep (docs only)
+- [x] Write §5.H (host) and D2–D11 into plan 60. Fix the paths (R9) and the config sections (R8).
+- [x] Update master plan §5 status (Phase 4 committed; Phase 5 started).
+- [x] Remove `-DEVML_BUILD_COMMON=OFF` from `docker/Dockerfile.prod` (R10). Check `mk/*.mk` for the same flag.
+- **Accept:** `make build` passes with no CMake unused-variable warning.
+
+### 5-A Config additions
+- [x] `[chain] pending_max_logs` (default 200000) and `[redundancy] reconcile_rps` (2) / `reconcile_burst` (4, which must be ≥ rps). Validate them, and add them to `base.toml`.
+- [x] `PORT` override of the `http_listen` port (D5); malformed `PORT` → exit 2.
+- [x] Tests in `tests/config_test.cpp`: defaults, out-of-range values exit 2, `PORT` override.
+
+### 5-B Ops primitives (pure / unit-testable, no host yet)
+- [ ] `src/ops/http_client.{hpp,cpp}`: an async Beast HTTPS client on the io executor.
+  - `post_json(url, body, headers)` and `get(url)`.
+  - Timeout and TLS verification, using the same SSL context approach as `HttpRpcClient`.
+  - The URL is redacted in every error.
+- [ ] `src/ops/ops_http_server.{hpp,cpp}`: Beast server on the io thread with `/healthz`, `/readyz` and `/metrics`.
+  - It calls callbacks that return status code + body.
+  - Unknown paths → 404.
+  - Bind `[::]`.
+- [ ] `src/ops/metrics.{hpp,cpp}`: a prometheus-cpp registry plus `TextSerializer`.
+  - Helper to set a counter from a monotonic total (delta increment), because the sink and sweeper expose totals.
+- [ ] `src/ops/watchdog.{hpp,cpp}`: one thread, two `std::atomic<uint64_t>` heartbeats (io tick, sink loop), a 1 s check, and the threshold from `[watchdog].process_stall_ms` (30 000).
+  - Pause tolerance as in D2.
+  - On abort: `write(2)` a pre-formatted CRITICAL line, then `std::abort()`. No locks, no allocation in the loop.
+  - Clock and abort are injectable for tests.
+  - The sink beat is checked only while a sink is registered (leader); standby and the startup Redis wait check the io beat only (§5.H).
+- [ ] Tests:
+  - HTTP client against `tests/mock_http_server` (header sent, timeout, non-2xx);
+  - server endpoints;
+  - watchdog: fires at 30 s, does not fire after an injected self-pause, does not fire while beats are fresh.
+
+### 5-C `LogSource` adapter (§5.4a)
+- [ ] `ProviderPool` public API (audit every call site):
+  - `call_to(provider, RequestBuilder)`;
+  - `pick_getlogs_excluding(set)`;
+  - `report_bad(provider, reason)` → book `on_failure(Retry)` + an inconsistency counter;
+  - a per-provider token bucket (`reconcile_rps` / `burst`) that every `call_to` respects.
+- [ ] `src/app/pool_log_source.{hpp,cpp}` implementing `pipeline::LogSource`:
+  - `get_logs` retries the next provider, excluding the ones already tried;
+  - `block(n)` reads the `ReorgDetector` ring first; on a miss it uses `eth_getBlockByNumber` on a provider ≠ the logs provider;
+  - disagreement → `report_bad` + nullopt;
+  - no quorum after N attempts → return nullopt. The sweeper treats nullopt as `Retry` ([sweeper.cpp:173-178](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/sweeper.cpp#L173-L178)); the progress deadline raises `PipelineStalled` after 3 × `progress_stall_ms`. Do **not** change the `LogSource` interface or the sweeper (rev 9).
+- [ ] Tests against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item.
+
+### 5-D Host process (G1, G2, G3; spec from §5.H)
+- [ ] CLI: no action flag + `--config` = run the listener. Keep the existing tool flags.
+- [ ] Threads: **io** (pool, driver tick loop, ops HTTP, alerts, pinger), **sink** (`RedisSink::start()`) and **watchdog**. Cross-thread reads only through `RedisSink::status()` / atomics.
+- [ ] Startup order:
+  1. `log::init`;
+  2. ops HTTP up, so `/healthz` answers during the Redis wait;
+  3. watchdog;
+  4. `await_redis_ready` + startup checks (→ Redis Unreachable / Misconfigured facts);
+  5. lease acquire **or** standby loop (poll every `renew_ms`); with `[lease] enabled = false`, skip both and use `lease_disabled_token()`;
+  6. on leadership: build fresh sink (with the token), pool, `FinalityGate`, `ReorgDetector`, `PendingBuffer`, adapter, `Sweeper` and driver (§5.H "Per-leadership objects"); register the sink beat with the watchdog.
+- [ ] Leader Changed: read the `epoch` key before `acquire`; if it names another host, fire with `old_host` (D7, §5.H).
+- [ ] Gate bridge (G2):
+  - add a `PoolHandlers::on_tag(provider, Tag, number, hash)` callback fired from the existing polls (audit pool tests);
+  - host → `FinalityGate::on_safe` / `on_finalized` → `driver.set_gates(...)`;
+  - `SafeRegression` / `SafeHashMismatch` → `on_safe_reorg_signal`;
+  - `FinalizedAnomaly` → `on_gate_frozen`.
+- [ ] Heads → `ReorgDetector` (with the fork walk via `call_to` on the WS provider). A crossing below `C_s` → `on_safe_reorg_signal`.
+- [ ] Logs → `PendingBuffer(pending_max_logs)`. Compare against the sweep results for `ws_extra_logs_total` / WS Missed Logs (G3).
+  - Read plan 40 §3.4 first.
+  - If the sweeper does not expose its released set per page, **report back before changing the sweeper**.
+- [ ] Heartbeat payload JSON every `heartbeat_s` → `sink.set_heartbeat`. Wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
+- [ ] Demotion: poll `sink.status().mode == Fenced` (and `renew_failures_total`) each tick, then:
+  1. stop the driver;
+  2. stop the pool (drop the WS);
+  3. destroy the sink;
+  4. go back to the standby loop. A fresh sink and a fresh spill are built on the next acquire.
+- [ ] Signals: SIGTERM/SIGINT → `driver.request_drain()`, then wait for the tick loop to finish, then `sink.drain(25 s)` (which releases the lease), then exit 0.
+- [ ] Exit codes:
+  - config error 2;
+  - driver `Failed` 2, printing `status().fatal`;
+  - sink `Failed` / runtime error 1;
+  - watchdog abort 134.
+- [ ] Integration (Docker Redis + MockProvider):
+  - a cold start reaches Live and emits the expected stream;
+  - SIGTERM drains and releases the lease;
+  - two hosts: one leader, one standby; kill the leader → the standby leads within 20 s; gap-free stream.
+
+### 5-E Alert engine + transport + dead-man (§5.3)
+- [ ] `src/ops/alerts.{hpp,cpp}`: **pure** rule evaluation over an `OpsSnapshot` built from:
+  - driver status, sink status, consumer lag, pool state / transitions, startup facts;
+  - role, and the gate / cursor advance timestamps.
+- [ ] Every row of §5.3.3: fire / resolve / 15 min re-notify; per-group and per-provider 15 min rate limits; ownership per D7.
+- [ ] Treat a consumer-lag snapshot older than 2× the probe interval as unknown.
+- [ ] `src/ops/alert_sender`: the exact JSON schema and the `X-API-Key` header. 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`. The token and URL never appear in logs.
+- [ ] `src/ops/deadman`:
+  - pings only when leader and healthy (§5.3.2);
+  - 10 s timeout;
+  - failures counted;
+  - an empty URL gives `"deadman":"disabled"` in `/readyz`.
+- [ ] Tests:
+  - synthetic snapshots → each alert fires and resolves, including rev 5/6 and the four consumer alerts with their rate limit;
+  - transport test against the mock HTTP sink (schema, header, retry count, failure metric, token absent from captured logs);
+  - dead-man: leader pings, standby sends 0, no pings when saturated or stalled.
+
+### 5-F Metrics + `/readyz` wiring
+- [ ] Register the §5.4 list plus the existing sink and sweeper totals. Update them from the snapshot every 10 s and on scrape.
+- [ ] `/readyz`:
+  - 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby;
+  - the JSON body has state, role, lease (`"disabled"` when the lease is off), deadman, and the gates and cursors;
+  - no secrets.
+- [ ] Tests: the `/metrics` output contains each metric name; `/readyz` codes for leader-live, leader-saturated, standby and lease-disabled.
+
+### 5-G Operator tools
+- [ ] `--backfill-contract <name>` per §5.6a + D8:
+  - a one-off sweeper filtered to that address;
+  - finalized up to `C_f`, plus safe and tracked in `(C_f, C_s]` for a safe-class contract;
+  - the manifest is updated only after the last page is acked;
+  - exit 0 / 1.
+- [ ] `--check-redis`: connect, run the startup checks, print the address family (plan 50 §4.3, used by the Phase 6 Railway smoke test).
+- [ ] Integration: run the backfill twice → the second run adds 0 entries; the next startup passes the coverage check.
+
+### 5-H Image + Railway + local compose
+- [ ] `docker/Dockerfile.prod`:
+  - `ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/evm_listener"]`, `CMD ["--config","/app/config/base.toml"]`, `STOPSIGNAL SIGTERM`;
+  - `HEALTHCHECK` with curl on `/healthz`;
+  - `COPY evm_listener/config/ /app/config/`;
+  - target < 60 MB, and if it misses, report why.
+- [ ] `railway.json` at the repo root per §5.6, with `dockerfilePath: docker/Dockerfile.prod` and **no `startCommand`** (it would replace the `ENTRYPOINT` and bypass `tini`; verified against Railway docs).
+- [ ] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` services under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
+- [ ] Make targets for these, if missing. **Accept:** `make prod-image` succeeds and `--version` runs in the image.
+
+### 5-I Chaos / end-to-end (§Tests)
+- [ ] toxiproxy on the provider and Redis links (latency 5 s, `reset_peer`, timeout, bandwidth 0) → automatic recovery with an exact stream.
+- [ ] `docker pause listener-a` → b takes over within 20 s. After unpause, a demotes, or restarts and becomes standby (either is acceptable per D2).
+- [ ] io-freeze hook → exit 134 within 30 s (D3).
+- [ ] Manual, once: a `severity=info` test alert reaches `#strategy-production`.
+
+### 5-J removed
+The WS `ping` mode is no longer a Phase 5 slice. It is the separate job [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md), after Phase 6. Phase 5 workers must not add the `[ws]` config section or change `subscribe_heads` behaviour.
+
+---
+
+## 4. Suggested order and parallelism
+```mermaid
+graph LR
+  P0["5-0 prep"] --> A["5-A config"]
+  A --> B["5-B ops primitives"]
+  A --> C["5-C LogSource adapter"]
+  B --> D["5-D host"]
+  C --> D
+  D --> E["5-E alerts"]
+  D --> F["5-F metrics/readyz"]
+  D --> G["5-G tools"]
+  B --> H["5-H image/railway"]
+  E --> I["5-I chaos"]
+  F --> I
+  G --> I
+  H --> I
+```
+5-B and 5-C can run in parallel. 5-D is the critical path and the riskiest slice: review it before 5-E starts.
