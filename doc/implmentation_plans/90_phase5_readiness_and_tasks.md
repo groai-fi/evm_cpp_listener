@@ -122,7 +122,7 @@ See plan 60 "results and deviations".
   - SIGTERM/SIGINT → `request_drain()` → `sink.drain(25 s)` → exit 0; exit codes 2 / 1 / 134;
   - test-only build flag `EVML_TEST_HOOKS` + `--test-freeze-io-after <s>` (D3).
   - **Accept:** cold start reaches Live against Docker Redis + MockProvider; SIGTERM exits 0; the freeze hook exits 134.
-- [ ] **D2 Lease:** acquire or the standby loop (every `renew_ms`); per-leadership rebuild (§5.H); demotion on `Fenced`; read the `epoch` key before acquire for Leader Changed (D7); register / unregister the sink beat around each term.
+- [x] **D2 Lease:** acquire or the standby loop (every `renew_ms`); per-leadership rebuild (§5.H); demotion on `Fenced`; register / unregister the sink beat around each term. **Deferred to 5-E:** read the `epoch` key before acquire for Leader Changed (D7); no consumer yet (see plan 60, 5-D2 deviations).
   - **Accept:** two hosts; kill the leader → the standby leads within 20 s; the stream has no gap.
 - [ ] **D3 Gate bridge (G2), re-scoped:** the bridge itself (`on_tag`, `FinalityGate` → `set_gates`, reorg / frozen signals) was delivered in D1. Remaining: host-level tests for `SafeRegression` → reverify, `FinalizedAnomaly` → frozen driver, and a failover where the new getLogs provider reports lower tags.
   - **Accept:** the driver leaves Recovering on real tag polls.

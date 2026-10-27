@@ -358,3 +358,15 @@ Decisions approved by the user:
 - Tests ([host_test.cpp](../../evm_listener/tests/host_test.cpp)): lease-enabled refusal (unit); in-process cold start against compose Redis + mock node reaches Live (c_s 52060300, c_f 52060250), writes the initial checkpoint, and a stop request exits 0 with the sink drained; child-process freeze test: the real binary with `--test-freeze-io-after 1` dies by SIGABRT and its log names `io_tick`.
 - Caveats: exit **134 as PID 1 is still unverified** until 5-I (needs `tini`, slice 5-H); the test asserts SIGABRT from the child's wait status, which a shell reports as 134. Redis URL errors from `await_redis_ready` are logged as given by the library (no URL is added by the host).
 - Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **432/432** (428 + 1 on_tag + 3 host). First host run failed only because the test did not call `log::init` (bucket 3, test harness); fixed in the test.
+
+### 5-D2 lease and standby: done (2026-10-27)
+- [host.cpp](../../evm_listener/src/app/host.cpp): with `[lease] enabled = true` the host starts in `standby`. An acquire worker thread (the former startup thread, relaunched per term) runs `sink::acquire_lease_blocking` (poll every `renew_ms`, sliced sleep, stop-aware) and posts `start_runtime(report, token)` to the io thread. Each term builds a fresh sink, pool, gate bridge, source, sweeper and driver (§5.H). Lease disabled keeps the D1 path (`lease_disabled_token()`).
+- Demotion: the io beat sees `SinkMode::Fenced` → `demote()` (`driver.request_drain()`, cancel the tick sleep) → `pipeline_loop` exits → `end_term()`: unregister the sink beat, stop the pool, destroy the runtime (joins the sink thread), back to `standby`, relaunch the acquire worker. Sink `Failed` still exits 1 (2 for driver `Failed`).
+- `/readyz`: 200 when `live` **or** a healthy `standby` (§5.1), 503 otherwise; JSON has `"lease":"enabled|disabled"`.
+- `HostOptions::on_event` (`"leader"`, `"demoted"`) is called on the io thread; used by tests, later usable by 5-E.
+- **Deviations:**
+  1. **`epoch` read before acquire (Leader Changed) deferred to 5-E.** Its only consumer is the alert engine, and `RedisConn` has no generic GET, so it would be dead code now.
+  2. `end_term()` joins the sink thread on the io thread; bounded by the 2 s Redis timeout, far below the 30 s watchdog.
+  3. The D1 test "`[lease] enabled = true` is refused" was deleted (bucket 2, spec evolution: the host now accepts the lease).
+- Tests ([host_test.cpp](../../evm_listener/tests/host_test.cpp)): `RunningHost` helper (one host per thread). (a) Takeover: hosts A and B on one shard (ttl 3 s, renew 0.5 s); B stays standby while A leads and `leader` names hostA; after A stops, B goes Live within 15 s, the checkpoint does not regress, both exit 0. (b) Fenced demotion: `DEL leader` + acquire as `intruder` → exactly one `demoted` event, then a second `leader` term, Live again after the intruder's lease expires, exit 0.
+- Gate: `make build` exit 0; `make test` exit 0, **433/433** (432 − 1 refusal + 2 lease tests).
