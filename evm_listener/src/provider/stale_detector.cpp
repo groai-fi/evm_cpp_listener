@@ -8,11 +8,13 @@ namespace {
 std::uint64_t distance(std::uint64_t a, std::uint64_t b) { return a > b ? a - b : b - a; }
 }  // namespace
 
-StaleDetector::StaleDetector(TimePoint start, StaleThresholds t) : t_(t), ws_baseline_(start) {}
+StaleDetector::StaleDetector(TimePoint start, StaleThresholds t)
+    : t_(t), session_baseline_(start), last_head_at_(start) {}
 
 void StaleDetector::on_ws_head(std::uint64_t number, TimePoint now) {
     ws_head_ = number;
-    ws_baseline_ = now;
+    session_baseline_ = now;
+    last_head_at_ = now;
     evaluate(now);
 }
 void StaleDetector::on_http_head(std::uint64_t number, TimePoint now) {
@@ -31,7 +33,7 @@ void StaleDetector::on_http_safe(std::uint64_t number, TimePoint now) {
 void StaleDetector::reset_ws(TimePoint now) {
     ws_head_.reset();
     ws_safe_.reset();
-    ws_baseline_ = now;
+    session_baseline_ = now;
     ws_lag_since_.reset();
     safe_lag_since_.reset();  // the safe comparison involves the WS side too
 }
@@ -64,12 +66,12 @@ void StaleDetector::evaluate(TimePoint now) {
 }
 
 std::chrono::milliseconds StaleDetector::ws_head_silence(TimePoint now) const {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now - ws_baseline_);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - last_head_at_);
 }
 
 bool StaleDetector::ws_head_stalled(TimePoint now) const {
-    // Triggers if elapsed time since last received newHeads block exceeds head_stall (default 15s).
-    return now - ws_baseline_ >= t_.head_stall;
+    // Triggers if elapsed time since last received newHeads block (or session reset) exceeds head_stall (default 15s).
+    return now - session_baseline_ >= t_.head_stall;
 }
 
 bool StaleDetector::ws_stale(TimePoint now) const {

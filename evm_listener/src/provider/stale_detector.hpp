@@ -48,7 +48,7 @@ public:
 
     /// @brief Returns true if newHeads stream has been completely silent longer than head_stall threshold.
     bool ws_head_stalled(TimePoint now) const;  // newHeads silence
-    /// @brief Time since the last newHeads block (or since the last reset/start before the first one).
+    /// @brief Time since the last newHeads block (or since start before the first one). Never reset on WS failover.
     std::chrono::milliseconds ws_head_silence(TimePoint now) const;
     /// @brief Returns true if WS head has continuously lagged HTTP head by > ws_lag_blocks for > ws_lag_for.
     bool ws_stale(TimePoint now) const;         // WS head lags the getLogs provider's head
@@ -64,7 +64,8 @@ private:
 
     StaleThresholds t_;
     std::optional<std::uint64_t> ws_head_, http_head_, ws_safe_, http_safe_;
-    TimePoint ws_baseline_;  // last newHeads arrival, or the last reset/start before the first one
+    TimePoint session_baseline_;  // last newHeads arrival, or the last reset/start of the current WS session
+    TimePoint last_head_at_;      // last newHeads arrival across the pool (or start before the first one)
     std::optional<TimePoint> ws_lag_since_, safe_lag_since_;
 };
 

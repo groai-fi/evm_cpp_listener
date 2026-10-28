@@ -115,11 +115,12 @@ TEST_CASE("stale: custom thresholds are honoured") {
     CHECK(d.ws_stale(at(5s)));
 }
 
-TEST_CASE("stale: ws_head_silence is the time since the last head, or since start / reset") {
+TEST_CASE("stale: ws_head_silence is the time since the last head (or start), and reset_ws does not clear it") {
     StaleDetector d(at(0s));
     CHECK(d.ws_head_silence(at(7s)) == 7000ms);  // nothing received yet: counts from start
     d.on_ws_head(1000, at(10s));
     CHECK(d.ws_head_silence(at(12s)) == 2000ms);
     d.reset_ws(at(20s));
-    CHECK(d.ws_head_silence(at(21s)) == 1000ms);
+    CHECK(d.ws_head_silence(at(21s)) == 11000ms);  // reset_ws resets the session stall timer, not pool-wide head silence
+    CHECK_FALSE(d.ws_head_stalled(at(21s)));
 }
