@@ -12,7 +12,7 @@ if mode == 'acquire' then
   local token = n .. '|' .. ARGV[2] .. '|' .. ARGV[3]
   redis.call('SET', KEYS[2], token)
   redis.call('SET', KEYS[1], token, 'PX', ARGV[4])
-  return token
+  return token .. '\n' .. (e or '')
 elseif mode == 'renew' then
   -- ARGV: 2 token  3 ttl_ms
   local cur = redis.call('GET', KEYS[1])

@@ -12,12 +12,19 @@
 namespace evml::sink {
 
 // Lease acquisition and release (plan 4.8). Renewal lives in RedisSink, which owns the lease connection while it runs.
+/// @brief Atomic lease grant returned by `lease.lua` (`acquire` mode), including the previous epoch's host if changed.
+struct LeaseGrant {
+    std::string token;
+    std::optional<std::uint64_t> epoch_n;
+    std::optional<std::string> old_host;  // populated only when a previous epoch existed and belonged to another host
+};
+
 /// @brief Attempts single lease acquisition.
-/// @return The newly assigned fencing token (e.g., "1|host|nonce"), or nullopt if another host holds leadership.
+/// @return The newly assigned LeaseGrant (token, epoch_n, old_host), or nullopt if another host holds leadership.
 /// @throws ConnError On transport failure.
 /// @throws std::runtime_error On Lua script syntax or execution failure.
-std::optional<std::string> try_acquire_lease(RedisConn& conn, const Keys& keys, const std::string& host_id,
-                                             const std::string& nonce, std::uint32_t ttl_ms);
+std::optional<LeaseGrant> try_acquire_lease(RedisConn& conn, const Keys& keys, const std::string& host_id,
+                                            const std::string& nonce, std::uint32_t ttl_ms);
 
 // Gives the lease up (graceful drain). True = released, false = it was not ours any more (NOOP). Throws like above.
 /// @brief Voluntarily surrenders the leader lease on graceful shutdown.
@@ -44,8 +51,8 @@ struct AcquireOptions {
 
 // The standby loop: asks until it gets a token. Returns nullopt only when `stop` fired. The standby never writes.
 /// @brief Blocks until the leader lease is acquired or stop condition is triggered.
-/// Watch out: A host in standby never starts processing or writing to Redis until this returns a valid token.
-std::optional<std::string> acquire_lease_blocking(RedisConn& conn, const Keys& keys, const AcquireOptions& opts);
+/// Watch out: A host in standby never starts processing or writing to Redis until this returns a valid grant.
+std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& keys, const AcquireOptions& opts);
 
 // `[lease] enabled=false` (local only; plan 4.8): there is no acquire and no renew, and the returned token "0" skips the
 // fence in every script. Logs the WARN the plan requires: nothing stops two hosts in this mode from both writing.

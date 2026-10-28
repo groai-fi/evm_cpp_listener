@@ -271,9 +271,10 @@ TEST_CASE("redis scripts: a tracked emit at or below ckpt.finalized is rejected 
 // 15. Fencing and the lease scripts.
 TEST_CASE("redis scripts: a stale token is fenced on every write script", "[integration][redis]") {
     Rig r;
-    const auto token = r.runner.run(lease_acquire_call(r.keys, "hostA", "n1", 15000));
-    REQUIRE(token.has_value());
-    CHECK(*token == "1|hostA|n1");
+    const auto reply = r.runner.run(lease_acquire_call(r.keys, "hostA", "n1", 15000));
+    REQUIRE(reply.has_value());
+    CHECK(*reply == "1|hostA|n1\n");
+    const std::string token = "1|hostA|n1";
     CHECK_FALSE(r.runner.run(lease_acquire_call(r.keys, "hostB", "n2", 15000)).has_value());  // a leader exists
 
     const std::string stale = "9|x|y";
@@ -286,37 +287,40 @@ TEST_CASE("redis scripts: a stale token is fenced on every write script", "[inte
     CHECK(r.exists(r.keys.ckpt()) == 0);
     CHECK(r.run(final_trim_call(r.keys, stale, 100)) == "FENCED");
 
-    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log, 105), params(*token))) != "FENCED");
+    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log, 105), params(token))) != "FENCED");
     CHECK(r.xlen(r.keys.events()) == 1);
-    CHECK(r.run(ckpt_init_call(r.keys, *token, 100, {})) == "OK");
-    CHECK(r.run(final_trim_call(r.keys, *token, 100)) == "0");
+    CHECK(r.run(ckpt_init_call(r.keys, token, 100, {})) == "OK");
+    CHECK(r.run(final_trim_call(r.keys, token, 100)) == "0");
 }
 
 TEST_CASE("redis scripts: lease renew resumes after a blip and is fenced after a takeover", "[integration][redis]") {
     Rig r;
-    const auto a = r.runner.run(lease_acquire_call(r.keys, "hostA", "n1", 15000));
-    REQUIRE(a.has_value());
-    CHECK(r.run(lease_renew_call(r.keys, *a, 15000)) == "OK");
+    const auto a_reply = r.runner.run(lease_acquire_call(r.keys, "hostA", "n1", 15000));
+    REQUIRE(a_reply.has_value());
+    CHECK(*a_reply == "1|hostA|n1\n");
+    const std::string a = "1|hostA|n1";
+    CHECK(r.run(lease_renew_call(r.keys, a, 15000)) == "OK");
 
     // The lease expires and nobody else acquired: the epoch still names A, so A resumes.
     r.redis.command<long long>("DEL", r.keys.leader());
-    CHECK(r.run(lease_renew_call(r.keys, *a, 15000)) == "RESUMED");
+    CHECK(r.run(lease_renew_call(r.keys, a, 15000)) == "RESUMED");
     CHECK(r.redis.command<sw::redis::OptionalString>("GET", r.keys.leader()) == a);
 
     // The lease expires and B acquires in between: A is fenced for good.
     r.redis.command<long long>("DEL", r.keys.leader());
-    const auto b = r.runner.run(lease_acquire_call(r.keys, "hostB", "n2", 15000));
-    REQUIRE(b.has_value());
-    CHECK(*b == "2|hostB|n2");  // the epoch number grows
-    CHECK(r.run(lease_renew_call(r.keys, *a, 15000)) == "FENCED");
-    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log), params(*a))) == "FENCED");
-    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log), params(*b))) != "FENCED");
+    const auto b_reply = r.runner.run(lease_acquire_call(r.keys, "hostB", "n2", 15000));
+    REQUIRE(b_reply.has_value());
+    CHECK(*b_reply == "2|hostB|n2\n1|hostA|n1");  // the epoch number grows and the previous token is returned atomically
+    const std::string b = "2|hostB|n2";
+    CHECK(r.run(lease_renew_call(r.keys, a, 15000)) == "FENCED");
+    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log), params(a))) == "FENCED");
+    CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log), params(b))) != "FENCED");
 
     // Release by the holder only.
-    CHECK(r.run(lease_release_call(r.keys, *a)) == "NOOP");
-    CHECK(r.run(lease_release_call(r.keys, *b)) == "OK");
-    CHECK(r.run(lease_release_call(r.keys, *b)) == "NOOP");
-    CHECK(r.run(lease_renew_call(r.keys, *a, 15000)) == "FENCED");
+    CHECK(r.run(lease_release_call(r.keys, a)) == "NOOP");
+    CHECK(r.run(lease_release_call(r.keys, b)) == "OK");
+    CHECK(r.run(lease_release_call(r.keys, b)) == "NOOP");
+    CHECK(r.run(lease_renew_call(r.keys, a, 15000)) == "FENCED");
 }
 
 // 7. Retention: MINID ~ trims whole stream nodes older than the cutoff.

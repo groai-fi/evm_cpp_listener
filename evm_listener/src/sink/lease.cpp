@@ -61,9 +61,25 @@ std::string random_nonce() {
 }  // namespace
 
 /// @brief Attempts single non-blocking lease acquisition via lease.lua.
-std::optional<std::string> try_acquire_lease(RedisConn& conn, const Keys& keys, const std::string& host_id,
-                                             const std::string& nonce, std::uint32_t ttl_ms) {
-    return run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
+std::optional<LeaseGrant> try_acquire_lease(RedisConn& conn, const Keys& keys, const std::string& host_id,
+                                            const std::string& nonce, std::uint32_t ttl_ms) {
+    const auto reply = run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
+    if (!reply) return std::nullopt;
+    const auto nl = reply->find('\n');
+    if (nl == std::string::npos) throw std::runtime_error("lease acquire: unexpected reply missing newline");
+    LeaseGrant g;
+    g.token = reply->substr(0, nl);
+    g.epoch_n = lease_token_epoch(g.token);
+    if (!g.epoch_n) throw std::runtime_error("lease acquire: script returned a malformed token");
+    const std::string prev = reply->substr(nl + 1);
+    if (!prev.empty()) {
+        if (const auto prev_host = lease_token_host(prev)) {
+            if (*prev_host != host_id) g.old_host = *prev_host;
+        } else {
+            core::log::warn("lease", "epoch key is not a lease token: Leader Changed is skipped", {});
+        }
+    }
+    return g;
 }
 
 /// @brief Explicitly surrenders leader lease token to allow standby to take over immediately.
@@ -75,7 +91,7 @@ bool release_lease(RedisConn& conn, const Keys& keys, const std::string& token) 
 }
 
 /// @brief Loops in standby state until leadership lease is granted or shutdown is signaled.
-std::optional<std::string> acquire_lease_blocking(RedisConn& conn, const Keys& keys, const AcquireOptions& opts) {
+std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& keys, const AcquireOptions& opts) {
     if (opts.host_id.empty()) throw std::invalid_argument("AcquireOptions: host_id must not be empty");
     if (opts.ttl_ms == 0) throw std::invalid_argument("AcquireOptions: ttl_ms must be > 0");
 
@@ -88,10 +104,10 @@ std::optional<std::string> acquire_lease_blocking(RedisConn& conn, const Keys& k
         try {
             // Generate random 128-bit hex nonce for lease fencing token generation.
             const std::string nonce = opts.nonce ? opts.nonce() : random_nonce();
-            if (auto token = try_acquire_lease(conn, keys, opts.host_id, nonce, opts.ttl_ms)) {
+            if (auto grant = try_acquire_lease(conn, keys, opts.host_id, nonce, opts.ttl_ms)) {
                 // Successfully acquired lease; host transitions from standby to active leader.
                 core::log::info("lease", "lease acquired", {{"host", opts.host_id}});
-                return token;
+                return grant;
             }
             failures = 0;
             if (!announced_standby) {

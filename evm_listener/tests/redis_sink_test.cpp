@@ -136,12 +136,13 @@ struct FakeServer {
             case Script::Lease: {
                 if (a[0] == "acquire") {
                     if (leader) return CallOutcome{ScriptOk{std::nullopt}};
+                    const std::string prev = epoch;
                     const auto bar = epoch.find('|');
-                    const std::uint64_t n = 1 + (epoch.empty() ? 0 : std::stoull(epoch.substr(0, bar)));
+                    const std::uint64_t n = 1 + (epoch.empty() || bar == std::string::npos ? 0 : std::stoull(epoch.substr(0, bar)));
                     const std::string token = std::to_string(n) + "|" + a[1] + "|" + a[2];
                     epoch = token;
                     leader = token;
-                    return ok(token);
+                    return ok(token + "\n" + prev);
                 }
                 if (a[0] == "renew") {
                     if (leader && *leader == a[1]) return ok("OK");
@@ -244,12 +245,6 @@ public:
         if (load_fixes_cache) server.scripts_valid = true;
     }
 
-    std::optional<std::string> read_epoch() override {
-        if (down) throw ConnError("fake: connection down");
-        if (server.epoch.empty()) return std::nullopt;
-        return server.epoch;
-    }
-
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override {
         if (down) throw ConnError("fake: connection down");
         if (aux_throws) throw std::runtime_error("fake: NOPERM this user has no permissions");
@@ -323,8 +318,8 @@ struct Rig {
         dir = std::filesystem::temp_directory_path() / ("evml-sink-test-" + std::to_string(rd()) + std::to_string(rd()));
 
         if (cfg.lease) {
-            const auto got = server.apply(lease_acquire_call(keys, "hostA", "n1", 15000));
-            token = *std::get<ScriptOk>(got).value;
+            const auto got = *std::get<ScriptOk>(server.apply(lease_acquire_call(keys, "hostA", "n1", 15000))).value;
+            token = got.substr(0, got.find('\n'));
         } else {
             token = kNoFence;
         }
@@ -1283,16 +1278,41 @@ TEST_CASE("redis sink options: a heartbeat needs a host id", "[unit][sink]") {
                       ContainsSubstring("host_id"));
 }
 
-TEST_CASE("lease: try_acquire answers a token, or nullopt while another host leads", "[unit][sink]") {
+TEST_CASE("lease: try_acquire answers a LeaseGrant (with atomic old_host detection), or nullopt while another host leads",
+          "[unit][sink]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
     FakeConn conn{server};
 
-    CHECK(try_acquire_lease(conn, keys, "hostA", "n1", 15000) == "1|hostA|n1");
+    const auto g1 = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(g1.has_value());
+    CHECK(g1->token == "1|hostA|n1");
+    CHECK(g1->epoch_n == 1);
+    CHECK_FALSE(g1->old_host.has_value());  // first lease ever on this shard
+
     CHECK_FALSE(try_acquire_lease(conn, keys, "hostB", "n2", 15000).has_value());
     server.leader.reset();  // hostA's key expired
-    CHECK(try_acquire_lease(conn, keys, "hostB", "n2", 15000) == "2|hostB|n2");
+    const auto g2 = try_acquire_lease(conn, keys, "hostB", "n2", 15000);
+    REQUIRE(g2.has_value());
+    CHECK(g2->token == "2|hostB|n2");
+    CHECK(g2->epoch_n == 2);
+    CHECK(g2->old_host == "hostA");
+
+    server.leader.reset();  // hostB's key expired and hostB re-acquires: same host is not a leader change
+    const auto g3 = try_acquire_lease(conn, keys, "hostB", "n3", 15000);
+    REQUIRE(g3.has_value());
+    CHECK(g3->token == "3|hostB|n3");
+    CHECK(g3->epoch_n == 3);
+    CHECK_FALSE(g3->old_host.has_value());
+
+    server.leader.reset();
+    server.epoch = "not-a-valid-token";
+    const auto g4 = try_acquire_lease(conn, keys, "hostA", "n4", 15000);
+    REQUIRE(g4.has_value());
+    CHECK(g4->token == "1|hostA|n4");
+    CHECK(g4->epoch_n == 1);
+    CHECK_FALSE(g4->old_host.has_value());  // malformed previous epoch warns and skips Leader Changed
 }
 
 TEST_CASE("lease: a flushed script cache is reloaded once; a down connection throws", "[unit][sink]") {
@@ -1302,7 +1322,9 @@ TEST_CASE("lease: a flushed script cache is reloaded once; a down connection thr
     FakeConn conn{server};
 
     server.scripts_valid = false;
-    CHECK(try_acquire_lease(conn, keys, "hostA", "n1", 15000) == "1|hostA|n1");
+    const auto g = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(g.has_value());
+    CHECK(g->token == "1|hostA|n1");
     CHECK(conn.loads == 1);
 
     conn.down = true;
@@ -1315,15 +1337,15 @@ TEST_CASE("lease: release answers true once, then false (it is no longer ours)",
     Keys keys{"shard"};
     FakeServer server{keys};
     FakeConn conn{server};
-    const auto token = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
-    REQUIRE(token.has_value());
+    const auto grant = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(grant.has_value());
 
-    CHECK(release_lease(conn, keys, *token));
+    CHECK(release_lease(conn, keys, grant->token));
     CHECK_FALSE(server.leader.has_value());
-    CHECK_FALSE(release_lease(conn, keys, *token));
+    CHECK_FALSE(release_lease(conn, keys, grant->token));
 }
 
-TEST_CASE("lease: the standby asks again until the leader lets go, and never writes", "[unit][sink]") {
+TEST_CASE("lease: the standby asks again until the leader lets go, and reports the latest leader before takeover", "[unit][sink]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
@@ -1336,13 +1358,24 @@ TEST_CASE("lease: the standby asks again until the leader lets go, and never wri
     o.host_id = "hostB";
     o.ttl_ms = 15000;
     o.poll = milliseconds(1000);
-    o.nonce = [] { return std::string("n2"); };
+    o.nonce = [] { return std::string("n3"); };
     o.sleep = [&](milliseconds d) {
         CHECK(d == milliseconds(1000));
-        if (++sleeps == 3) server.leader.reset();
+        ++sleeps;
+        if (sleeps == 2) {
+            // Another host (hostC) takes over while hostB is waiting on standby.
+            server.leader = "2|hostC|n2";
+            server.epoch = "2|hostC|n2";
+        } else if (sleeps == 3) {
+            server.leader.reset();
+        }
     };
 
-    CHECK(acquire_lease_blocking(conn, keys, o) == "2|hostB|n2");
+    const auto grant = acquire_lease_blocking(conn, keys, o);
+    REQUIRE(grant.has_value());
+    CHECK(grant->token == "3|hostB|n3");
+    CHECK(grant->epoch_n == 3);
+    CHECK(grant->old_host == "hostC");
     CHECK(sleeps == 3);
 }
 
@@ -1619,18 +1652,4 @@ TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and
     CHECK_FALSE(lease_token_host("0"));
     CHECK_FALSE(lease_token_host("6|hostA"));  // no nonce
     CHECK_FALSE(lease_token_host("garbage|hostA|n"));
-}
-
-TEST_CASE("redis conn: read_epoch is empty before any lease and names the latest token after one", "[unit][sink]") {
-    Rig r;  // the rig acquired a lease as hostA
-    REQUIRE(r.data->read_epoch());
-    CHECK(*r.data->read_epoch() == r.token);
-    CHECK(lease_token_epoch(*r.data->read_epoch()) == 1);
-    CHECK(lease_token_host(*r.data->read_epoch()) == "hostA");
-
-    r.server.epoch.clear();
-    CHECK_FALSE(r.data->read_epoch());
-
-    r.data->down = true;
-    CHECK_THROWS_AS(r.data->read_epoch(), ConnError);
 }

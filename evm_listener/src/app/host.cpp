@@ -115,8 +115,7 @@ private:
     enum class Phase : int { WaitingRedis, Standby, Leader };
 
     // ---- io thread ----
-    void start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token,
-                       const std::optional<std::string>& old_host);
+    void start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant);
     net::awaitable<void> pipeline_loop();
     void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash);
     // WS heads -> the term's ReorgDetector (plan 5.H). All of these run on the io thread.
@@ -348,36 +347,24 @@ void Host::acquire_thread_main(bool first) {
             if (!report) return;  // stop requested while waiting; the beat sees the same flag and shuts down
         }
 
-        std::string token;
-        std::optional<std::string> old_host;  // the previous lease holder, when it was another host
+        sink::LeaseGrant grant;
         if (cfg_.lease.enabled) {
             phase_ = Phase::Standby;
             const sink::Keys keys(cfg_.shard.id);
             sink::RedisppConn conn(redis_url_, keys);
-            // Who led before us (plan 60 §5.3.3 Leader Changed source). Best effort: the read is not atomic with the
-            // acquire, and a failed read only skips the alert. The token is a fencing secret: never logged.
-            try {
-                if (const auto prev = conn.read_epoch()) {
-                    old_host = sink::lease_token_host(*prev);
-                    if (!old_host) log::warn("host", "epoch key is not a lease token: Leader Changed is skipped", {});
-                }
-            } catch (const sink::ConnError& e) {
-                log::warn("host", "epoch read failed: Leader Changed is skipped", {{"error", e.what()}});
-            }
             sink::AcquireOptions ao;
             ao.host_id = cfg_.shard.host_id;
             ao.ttl_ms = cfg_.lease.ttl_ms;
             ao.poll = std::chrono::milliseconds(cfg_.lease.renew_ms);  // plan 5.H: the standby polls every renew_ms
             ao.stop = stop;
             ao.sleep = sleep;
-            const auto t = sink::acquire_lease_blocking(conn, keys, ao);
-            if (!t) return;  // stop requested while on standby
-            token = *t;
-            if (old_host && *old_host == cfg_.shard.host_id) old_host.reset();  // a restart of this host is not a change
+            const auto g = sink::acquire_lease_blocking(conn, keys, ao);
+            if (!g) return;  // stop requested while on standby
+            grant = std::move(*g);
         } else {
-            token = sink::lease_disabled_token();
+            grant.token = sink::lease_disabled_token();
         }
-        net::post(ioc_, [this, report, token, old_host] { start_runtime(report, token, old_host); });
+        net::post(ioc_, [this, report, grant = std::move(grant)] { start_runtime(report, grant); });
     } catch (const sink::StartupFatal& e) {
         net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitUsage, "redis startup check failed: " + msg); });
     } catch (const std::exception& e) {
@@ -385,11 +372,10 @@ void Host::acquire_thread_main(bool first) {
     }
 }
 
-void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token,
-                         const std::optional<std::string>& old_host) {
+void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant) {
     if (stopping_) return;
-    epoch_n_ = sink::lease_token_epoch(token);  // nullopt with the lease disabled (token "0")
-    if (old_host) snapshots_.push_event(ops::leader_changed_event(*old_host, cfg_.shard.host_id));
+    epoch_n_ = grant.epoch_n;  // nullopt with the lease disabled (token "0")
+    if (grant.old_host) snapshots_.push_event(ops::leader_changed_event(*grant.old_host, cfg_.shard.host_id));
     try {
         if (rep && rep->misconfigured) {
             redis_misconfig_ = ops::RedisMisconfig{
@@ -407,7 +393,7 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         bump_head_epoch();
         rt_ = std::make_unique<Runtime>(cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
 
-        auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, token);
+        auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, grant.token);
         sopts.loop_beat = wd_.sink_beat_slot();
         sopts.host_id = cfg_.shard.host_id;
         sopts.heartbeat_ms = cfg_.ops.heartbeat_s * 1000;
@@ -433,15 +419,15 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         };
         h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
         h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
-        // The pool reports only the new WS provider; the previous one is remembered here for the failover alert's `from`.
-        auto prev_ws = std::make_shared<std::optional<std::string>>();
-        h.on_ws_active_changed = [this, prev_ws](const std::optional<std::string>& to, std::string_view reason) {
+        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to,
+                                        std::string_view reason) {
             // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
             if (!rt_) return;
-            const std::optional<std::string> from = std::exchange(*prev_ws, to);
-            // "failover" is ProviderBook's Forced decision, which always names a replacement; a move to no provider is
-            // "none_available" and raises no Provider Failover event (the no-healthy-provider alerts cover it).
-            if (reason == "failover" && to) {  // forced move off a failed provider: one alert event (plan 60 §5.3.3)
+            log::info("pool", "ws active provider changed",
+                      {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
+            // "failover" is ProviderBook's Forced decision and "switch_back" is SwitchBack, both naming a replacement;
+            // a move to no provider is "none_available" and raises no Provider Failover event (the no-healthy-provider alerts cover it).
+            if ((reason == "failover" || reason == "switch_back") && to) {
                 snapshots_.push_event(ops::provider_failover_event(from, *to, reason));
             }
             rt_->ring.reset();

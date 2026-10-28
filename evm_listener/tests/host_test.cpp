@@ -1029,3 +1029,95 @@ TEST_CASE("host: taking the lease over from another host fires Leader Changed on
     h.finish();
     CHECK(h.exit_code.load() == 0);
 }
+
+// infura (2nd in ws_order) gets the mock WS node; quicknode (1st) and alchemy stay dead.
+evml::core::EnvLookup infura_ws_env(const std::string& http_url, const std::string& ws_url) {
+    return [http_url, ws_url](const std::string& k) -> std::string {
+        if (k.rfind("BASE_RPC_URL", 0) == 0) return http_url;
+        if (k == "BASE_WSS_URL") return ws_url;
+        if (k.rfind("BASE_WSS_URL", 0) == 0) return "ws://127.0.0.1:9/";
+        if (k == "EVML_HOST_ID") return "test-host";
+        return "";
+    };
+}
+
+// Slow (about 70 s): the pool allows a voluntary switch only 60 s after the last one (Policy::min_voluntary_gap, not
+// configurable), and a Down provider is re-probed every 30 s (Policy::probe_interval).
+TEST_CASE("host: failing over and then switching back to the primary raises Provider Failover for both, told apart by reason",
+          "[integration]") {
+    evml::core::log::init("info");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-switchback-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    HeadFeed feed;
+    evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+    evml::test::MockWsServer ws(mock_ioc, head_script(feed));
+    std::vector<evml::test::MockRequest> posts;
+    evml::test::MockHttpServer webhook(mock_ioc, [&](const evml::test::MockRequest& r) {
+        posts.push_back(r);
+        return evml::test::MockReply{.body = "{}"};
+    });
+
+    // quicknode's WS is dead: three session failures take it Down, the pool fails over to infura (mock WS). Its HTTP
+    // answers the probe, so it comes back Up, and after prefer_primary_after the pool switches back to it. Heads keep
+    // flowing from infura (a base chain first, then one per second): a silent WS would be failed as stalled and the pool
+    // would cascade through every provider instead of settling on infura.
+    for (auto n = c0 + 297; n <= c0 + 310; ++n) feed.out.push_back(head_msg(n, hx('a', n), hx('a', n - 1)));
+    auto toml = host_toml(shard, spill, node.url(), 30000);
+    replace_once(toml, "prefer_primary_after_s = 600", "prefer_primary_after_s = 1");
+    auto cfg = evml::core::Config::parse(toml, "switchback.toml", infura_ws_env(node.url(), ws.url()));
+    ScopedEnv env;  // declared before the host so it is removed after the host thread has ended
+    env.set(cfg.ops.alert_webhook_env, webhook.url() + "hook");
+    env.set(cfg.ops.alert_webhook_token_env, "host-test-token");
+    RunningHost h(std::move(cfg));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    const auto find_reason = [&](const std::string& reason) -> std::optional<boost::json::object> {
+        for (const auto& p : posts) {
+            const auto body = boost::json::parse(p.body).as_object();
+            if (body.at("title").as_string() != "Provider Failover") continue;
+            const auto& d = body.at("details").as_object();
+            if (d.at("reason").as_string() == reason) return body;
+        }
+        return std::nullopt;
+    };
+
+    std::uint64_t next_head = c0 + 311;
+    auto last_head = std::chrono::steady_clock::now();
+    const auto keep_heads_flowing = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_head < 1s) return;
+        feed.out.push_back(head_msg(next_head, hx('a', next_head), hx('a', next_head - 1)));
+        ++next_head;
+        last_head = now;
+    };
+    REQUIRE(evml::test::run_until(
+        mock_ioc,
+        [&] {
+            keep_heads_flowing();
+            return find_reason("switch_back").has_value() || h.threw.load();
+        },
+        120s));
+    REQUIRE_FALSE(h.threw.load());
+
+    const auto failover = find_reason("failover");
+    REQUIRE(failover);
+    CHECK(failover->at("details").as_object().at("from").as_string() == "quicknode");
+    CHECK(failover->at("details").as_object().at("to").as_string() == "infura");
+    CHECK(failover->at("message").as_string() == "the WS provider failed over from quicknode to infura");
+
+    const auto back = find_reason("switch_back");
+    REQUIRE(back);
+    CHECK(back->at("details").as_object().at("from").as_string() == "infura");
+    CHECK(back->at("details").as_object().at("to").as_string() == "quicknode");
+    CHECK(back->at("message").as_string() == "the WS provider switched back from infura to quicknode");
+    CHECK(back->at("severity").as_string() == "warning");
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}

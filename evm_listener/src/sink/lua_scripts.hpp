@@ -58,7 +58,7 @@ ScriptCall ckpt_contracts_call(const Keys& k, const std::string& token, const st
 /// @brief Builds ScriptCall to trim released zset members strictly below finalized block.
 ScriptCall final_trim_call(const Keys& k, const std::string& token, std::uint64_t g_f);
 
-// lease.lua replies. acquire: the new token, or nil when a leader exists. renew: "OK", "RESUMED" or "FENCED".
+// lease.lua replies. acquire: "<token>\n<prev_epoch>", or nil when a leader exists. renew: "OK", "RESUMED" or "FENCED".
 // release: "OK" or "NOOP".
 /// @brief Builds ScriptCall for leader lease acquisition.
 ScriptCall lease_acquire_call(const Keys& k, const std::string& host, const std::string& nonce, std::uint32_t ttl_ms);

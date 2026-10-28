@@ -112,7 +112,7 @@ struct Live {
         ScriptRunner runner(admin);
         const auto got = runner.run(lease_acquire_call(keys, "hostA", "n1", lease_ttl_ms));
         REQUIRE(got.has_value());
-        token = *got;
+        token = got->substr(0, got->find('\n'));
     }
 
     void start(const std::function<void(RedisSinkOptions&)>& tweak = {}) {
@@ -610,8 +610,8 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
         o.ttl_ms = kTtlMs;
         o.poll = kPoll;
         o.stop = [&] { return stop.load(); };
-        if (auto token = acquire_lease_blocking(conn, keys, o)) {
-            out.token = *token;
+        if (auto grant = acquire_lease_blocking(conn, keys, o)) {
+            out.token = grant->token;
             out.done.store(true);
         }
     };
@@ -809,10 +809,10 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     L.sink.reset();
     {
         RedisppConn conn(L.direct_url, L.keys);
-        const auto token = try_acquire_lease(conn, L.keys, "hostA", "n2", L.lease_ttl_ms);
-        REQUIRE(token.has_value());
-        CHECK(*token != old_token);
-        L.token = *token;
+        const auto grant = try_acquire_lease(conn, L.keys, "hostA", "n2", L.lease_ttl_ms);
+        REQUIRE(grant.has_value());
+        CHECK(grant->token != old_token);
+        L.token = grant->token;
     }
     ScriptRunner runner(L.admin);
     CHECK(runner.run(emit_call(L.keys, mk("zombie", 112), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, old_token})) ==
@@ -829,7 +829,9 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     expect_streams_equal(L, expected);
 }
 
-TEST_CASE("redis sink integration 20: read_epoch on real Redis names the latest lease token", "[integration][sink]") {
+TEST_CASE("redis sink integration 20: try_acquire_lease on real Redis returns epoch_n and old_host atomically",
+          "[integration][sink]") {
+    evml::core::log::init("info");
     const std::string url = require_env("REDIS_URL");
     sw::redis::Redis admin{url};
     const Keys keys{random_shard()};
@@ -847,18 +849,24 @@ TEST_CASE("redis sink integration 20: read_epoch on real Redis names the latest 
         }
     } cleanup{admin, keys};
 
-    RedisppConn probe(url, keys);
-    CHECK_FALSE(probe.read_epoch());  // no lease was ever taken on this shard
-
-    ScriptRunner runner(admin);
-    const auto first = runner.run(lease_acquire_call(keys, "hostA", "n1", 2000));
+    RedisppConn conn(url, keys);
+    const auto first = try_acquire_lease(conn, keys, "hostA", "n1", 2000);
     REQUIRE(first.has_value());
-    REQUIRE(probe.read_epoch());
-    CHECK(*probe.read_epoch() == *first);
+    CHECK(first->token == "1|hostA|n1");
+    CHECK(first->epoch_n == 1);
+    CHECK_FALSE(first->old_host.has_value());  // no previous leader on this shard
 
     admin.del(keys.leader());  // the lease expires; the epoch key stays
-    const auto second = runner.run(lease_acquire_call(keys, "hostB", "n2", 2000));
+    const auto second = try_acquire_lease(conn, keys, "hostB", "n2", 2000);
     REQUIRE(second.has_value());
-    CHECK(lease_token_epoch(*probe.read_epoch()) == 2);
-    CHECK(lease_token_host(*probe.read_epoch()) == "hostB");
+    CHECK(second->token == "2|hostB|n2");
+    CHECK(second->epoch_n == 2);
+    CHECK(second->old_host == "hostA");
+
+    admin.del(keys.leader());  // hostB re-acquires after its own lease expired: not a leader change
+    const auto third = try_acquire_lease(conn, keys, "hostB", "n3", 2000);
+    REQUIRE(third.has_value());
+    CHECK(third->token == "3|hostB|n3");
+    CHECK(third->epoch_n == 3);
+    CHECK_FALSE(third->old_host.has_value());
 }
