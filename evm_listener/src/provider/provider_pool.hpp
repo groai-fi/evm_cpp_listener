@@ -191,7 +191,8 @@ public:
     std::optional<std::string> current_getlogs() const { return book_.pick_getlogs(Clock::now()); }
     /// @brief Returns current health state of named provider.
     State state(const std::string& provider) const { return book_.state(provider).state; }
-    /// @brief newHeads silence of the active WS provider, in ms. nullopt = no WS provider is active.
+    /// @brief newHeads silence, in ms, since the last head or the last WS provider change. Also counts while no WS
+    /// provider is active. nullopt = the pool is not running or does not subscribe to heads.
     std::optional<std::uint32_t> ms_since_head() const;
     /// @brief Health of every provider, in config order. Pure read; call on the pool's executor.
     std::vector<ProviderHealth> health() const;

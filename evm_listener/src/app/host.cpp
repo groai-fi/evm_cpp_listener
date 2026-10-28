@@ -740,7 +740,7 @@ void Host::ops_tick() {
             };
             const auto ws = rt_->pool->active_ws();
             const auto getlogs = rt_->pool->current_getlogs();
-            in.ws_provider = ws.value_or("");
+            in.ws_provider = ws.value_or(in.ms_since_head ? "none" : "");
             in.getlogs_provider = getlogs.value_or("");
             in.ws_safe = safe_of(ws);
             in.getlogs_safe = safe_of(getlogs);

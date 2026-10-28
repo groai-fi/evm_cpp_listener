@@ -650,3 +650,48 @@ TEST_CASE("pool: create() rejects an invalid pacing config", "[unit]") {
     cfg.reconcile_burst = 5;
     CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
 }
+
+TEST_CASE("pool: head silence keeps counting after every WS provider went Down, so a stall can still alert", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockWsServer wsA(ioc, [](MockWsConn& c) -> net::awaitable<void> {
+        co_await serve_setup(c);
+        c.drop();  // every session ends right after setup: three failures take A Down (Retry, not Quota/Auth)
+    });
+    MockHttpServer httpA(ioc, healthy(chain));
+
+    Rec rec;
+    auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", wsA.url(), httpA.url()}}, {"A"}, {"A"}), handlers(rec));
+    CHECK_FALSE(pool->ms_since_head());  // not started
+
+    pool->start();
+    REQUIRE(run_until(ioc, [&] { return pool->state("A") == State::Down && !pool->active_ws(); }, 8s));
+    const auto first = pool->ms_since_head();
+    REQUIRE(first);  // no active provider, but the silence is still measured
+    run_until(ioc, [] { return false; }, 300ms);
+    const auto later = pool->ms_since_head();
+    REQUIRE(later);
+    CHECK(*later >= *first + 250);
+
+    shutdown(ioc, pool);
+    CHECK_FALSE(pool->ms_since_head());  // stopped
+}
+
+TEST_CASE("pool: ms_since_head is unknown when the pool does not subscribe to heads", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockWsServer wsA(ioc, [](MockWsConn& c) -> net::awaitable<void> {
+        co_await serve_setup(c);
+        co_await c.sleep(30s);
+    });
+    MockHttpServer httpA(ioc, healthy(chain));
+
+    Rec rec;
+    auto cfg = base_cfg({{"A", wsA.url(), httpA.url()}}, {"A"}, {"A"});
+    cfg.subscribe_heads = false;  // logs only
+    auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
+    pool->start();
+    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "A"; }, 5s));
+    CHECK_FALSE(pool->ms_since_head());
+    shutdown(ioc, pool);
+}

@@ -247,7 +247,9 @@ void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kin
 }
 
 std::optional<std::uint32_t> ProviderPool::ms_since_head() const {
-    if (!book_.active_ws()) return std::nullopt;
+    // Silence is measured even with no active WS provider (every one Down): the baseline restarts at each provider
+    // change, so a pool stuck without a provider still reports growing silence and WebSocket Stalled can fire.
+    if (!running_ || !cfg_.subscribe_heads) return std::nullopt;
     const auto ms_silent = detector_.ws_head_silence(Clock::now()).count();
     return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms_silent, 0, std::numeric_limits<std::uint32_t>::max()));
 }
