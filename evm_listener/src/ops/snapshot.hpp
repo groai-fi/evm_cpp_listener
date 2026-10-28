@@ -38,6 +38,11 @@ struct SnapshotInputs {
     std::uint64_t safe_late_total{0};   // SweepStats::late
     std::uint64_t ws_missed_total{0};   // host counter of WS logs the sweep found and the WS missed
     std::vector<sink::ConsumerLag> consumers;
+    std::optional<std::uint32_t> ms_since_head;  // ProviderPool::ms_since_head()
+    std::string ws_provider;                     // active WS provider; empty = none
+    std::string getlogs_provider;                // current getLogs provider; empty = none
+    std::optional<std::uint64_t> ws_safe;        // that provider's last read `safe`
+    std::optional<std::uint64_t> getlogs_safe;
     std::vector<provider::ProviderHealth> providers;                  // ProviderPool::health()
     std::map<std::string, std::uint64_t> provider_inconsistent_total;  // ProviderPool::inconsistency_total() per provider
 };

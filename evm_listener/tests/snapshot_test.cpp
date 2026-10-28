@@ -252,3 +252,38 @@ TEST_CASE("snapshot: an increase of a provider's inconsistency total is one even
     in.provider_inconsistent_total = {{"infura", 2}, {"alchemy", 1}};
     CHECK(b.build(in).events.empty());  // no increase, no event
 }
+
+TEST_CASE("snapshot: head silence and the two safe tags reach the engine; a stalled WS and a lagging getLogs alert", "[snapshot]") {
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};  // head_stall_ms 30000, getlogs lag 30 blocks for 120 s
+    auto in = leader_inputs();
+    in.ms_since_head = 45'000;
+    in.ws_provider = "alchemy";
+    in.getlogs_provider = "infura";
+    in.ws_safe = 5000;
+    in.getlogs_safe = 4900;
+    const auto s0 = b.build(in);
+    CHECK(s0.ms_since_head == 45'000);
+    CHECK(s0.ws_provider == "alchemy");
+    CHECK(s0.getlogs_provider == "infura");
+    CHECK(s0.ws_safe == 5000);
+    CHECK(s0.getlogs_safe == 4900);
+
+    SnapshotBuilder b2;
+    AlertEngine e2{AlertThresholds{}};
+    bool stalled = false, lagging = false;
+    for (int i = 0; i <= 13; ++i) {  // 130 s of the same lag
+        auto x = in;
+        x.now = t0 + std::chrono::seconds(10 * i);
+        for (const auto& a : e2.evaluate(b2.build(x))) {
+            stalled |= a.title == "WebSocket Stalled";
+            lagging |= a.title == "getLogs Provider Lagging";
+        }
+    }
+    CHECK(stalled);
+    CHECK(lagging);
+
+    // Unset facts stay silent.
+    auto quiet = leader_inputs(t0 + 500s);
+    CHECK(engine.evaluate(b.build(quiet)).empty());
+}

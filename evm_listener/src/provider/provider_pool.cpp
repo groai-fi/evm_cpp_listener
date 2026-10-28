@@ -1,6 +1,7 @@
 #include "provider/provider_pool.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include <boost/asio/co_spawn.hpp>
@@ -243,6 +244,12 @@ void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kin
     if (kind != rpc::FailKind::QuotaExhausted && kind != rpc::FailKind::AuthFatal && kind != rpc::FailKind::ConfigFatal)
         return;
     nodes_.at(provider).fault = {http_status, rpc_code, message.substr(0, 200)};
+}
+
+std::optional<std::uint32_t> ProviderPool::ms_since_head() const {
+    if (!book_.active_ws()) return std::nullopt;
+    const auto ms_silent = detector_.ws_head_silence(Clock::now()).count();
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms_silent, 0, std::numeric_limits<std::uint32_t>::max()));
 }
 
 std::vector<ProviderHealth> ProviderPool::health() const {

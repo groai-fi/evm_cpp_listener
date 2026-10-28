@@ -689,6 +689,18 @@ void Host::ops_tick() {
             in.ws_missed_total = ws_missed_total_;
             in.consumers = rt_->sink->consumer_lag();
             in.providers = rt_->pool->health();
+            in.ms_since_head = rt_->pool->ms_since_head();
+            const auto safe_of = [&](const std::optional<std::string>& name) -> std::optional<std::uint64_t> {
+                if (!name) return std::nullopt;
+                const auto t = rt_->pool->cached_tag(*name, provider::Tag::Safe);
+                return t ? std::optional<std::uint64_t>(t->number) : std::nullopt;
+            };
+            const auto ws = rt_->pool->active_ws();
+            const auto getlogs = rt_->pool->current_getlogs();
+            in.ws_provider = ws.value_or("");
+            in.getlogs_provider = getlogs.value_or("");
+            in.ws_safe = safe_of(ws);
+            in.getlogs_safe = safe_of(getlogs);
             for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = rt_->pool->inconsistency_total(p.name);
         }
         for (const auto& a : engine_.evaluate(snapshots_.build(in))) {

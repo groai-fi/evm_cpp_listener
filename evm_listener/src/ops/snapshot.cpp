@@ -52,6 +52,12 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         s.consumers.push_back(std::move(f));
     }
 
+    s.ms_since_head = in.ms_since_head;
+    s.ws_provider = in.ws_provider;
+    s.getlogs_provider = in.getlogs_provider;
+    s.ws_safe = in.ws_safe;
+    s.getlogs_safe = in.getlogs_safe;
+
     // Cooldown = monthly quota used up, Disabled = credentials rejected (provider_book.hpp). Other states raise no
     // condition alert; Provider Failover is an event pushed by the host.
     bool any_up = in.providers.empty();  // no provider facts given: do not claim an outage

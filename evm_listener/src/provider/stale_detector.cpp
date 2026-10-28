@@ -63,6 +63,10 @@ void StaleDetector::evaluate(TimePoint now) {
     }
 }
 
+std::chrono::milliseconds StaleDetector::ws_head_silence(TimePoint now) const {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - ws_baseline_);
+}
+
 bool StaleDetector::ws_head_stalled(TimePoint now) const {
     // Triggers if elapsed time since last received newHeads block exceeds head_stall (default 15s).
     return now - ws_baseline_ >= t_.head_stall;

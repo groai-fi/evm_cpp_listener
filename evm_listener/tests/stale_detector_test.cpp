@@ -114,3 +114,12 @@ TEST_CASE("stale: custom thresholds are honoured") {
     CHECK_FALSE(d.ws_stale(at(4s)));
     CHECK(d.ws_stale(at(5s)));
 }
+
+TEST_CASE("stale: ws_head_silence is the time since the last head, or since start / reset") {
+    StaleDetector d(at(0s));
+    CHECK(d.ws_head_silence(at(7s)) == 7000ms);  // nothing received yet: counts from start
+    d.on_ws_head(1000, at(10s));
+    CHECK(d.ws_head_silence(at(12s)) == 2000ms);
+    d.reset_ws(at(20s));
+    CHECK(d.ws_head_silence(at(21s)) == 1000ms);
+}

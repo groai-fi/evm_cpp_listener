@@ -48,6 +48,8 @@ public:
 
     /// @brief Returns true if newHeads stream has been completely silent longer than head_stall threshold.
     bool ws_head_stalled(TimePoint now) const;  // newHeads silence
+    /// @brief Time since the last newHeads block (or since the last reset/start before the first one).
+    std::chrono::milliseconds ws_head_silence(TimePoint now) const;
     /// @brief Returns true if WS head has continuously lagged HTTP head by > ws_lag_blocks for > ws_lag_for.
     bool ws_stale(TimePoint now) const;         // WS head lags the getLogs provider's head
     /// @brief Returns true if HTTP safe tag has continuously lagged WS safe tag by > safe_lag_blocks for > safe_lag_for.
