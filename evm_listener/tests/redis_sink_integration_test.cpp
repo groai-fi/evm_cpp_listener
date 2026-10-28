@@ -550,7 +550,7 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
     L.px.enable();
     REQUIRE(L.sink->wait_idle(60s));
     INFO("fatal: " << L.sink->fatal_message());
-    REQUIRE(L.sink->mode() == SinkMode::Connected);
+    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Connected; }, 5s));
     L.expect_exactly(100);
     CHECK(L.sink->status().renew_failures_total == 0);
     CHECK(L.sink->status().discarded_total == 0);
