@@ -1502,3 +1502,100 @@ TEST_CASE("redis sink options: consumer groups need a positive probe interval; f
     REQUIRE(copied.consumer_groups.size() == 1);
     CHECK(copied.consumer_groups[0].group == "bot");
 }
+
+TEST_CASE("redis sink: oldest_record_age_s is the age of the oldest unacked write and falls to 0 when all are acked", "[unit][sink]") {
+    Rig r;
+    CHECK(r.sink->status().oldest_record_age_s == 0);  // nothing pending
+
+    r.data->down = true;
+    r.sink->emit(mk(id_of(0)));  // stamped at t0
+    r.advance(std::chrono::seconds(30));
+    r.sink->emit(mk(id_of(1)));  // stamped at t0 + 30 s
+    r.advance(std::chrono::seconds(30));
+    CHECK(r.sink->status().oldest_record_age_s == 60);  // still queued: the oldest is e0
+
+    r.sink->pump();  // Redis is down: the held batch / queue go to the spill
+    REQUIRE(r.sink->mode() == SinkMode::Degraded);
+    r.advance(std::chrono::seconds(10));
+    CHECK(r.sink->status().oldest_record_age_s == 70);  // spilled or held, the stamp of e0 is kept
+    CHECK(r.sink->status().pending_writes == 2);
+
+    r.data->down = false;
+    REQUIRE(r.settle());
+    CHECK(r.sink->status().pending_writes == 0);
+    CHECK(r.sink->status().oldest_record_age_s == 0);
+}
+
+TEST_CASE("redis sink: a partly acked batch moves oldest_record_age_s to the first item still pending", "[unit][sink]") {
+    RigCfg cfg;
+    cfg.max_batch = 1;  // one emit per batch: each ack removes exactly one stamp
+    Rig r(cfg);
+    r.sink->emit(mk(id_of(0)));
+    r.advance(std::chrono::seconds(20));
+    r.sink->emit(mk(id_of(1)));
+    r.advance(std::chrono::seconds(20));
+    CHECK(r.sink->status().oldest_record_age_s == 40);
+
+    r.sink->pump();  // sends and acks e0 only
+    REQUIRE(r.sink->status().pending_writes == 1);
+    CHECK(r.sink->status().oldest_record_age_s == 20);  // e1 was enqueued 20 s ago
+}
+
+TEST_CASE("redis sink: Fenced discards every stamp, and writes dropped afterwards leave none behind", "[unit][sink]") {
+    Rig r;
+    r.server.leader = "2|hostB|n2";  // another host acquired the lease
+    r.server.epoch = "2|hostB|n2";
+    for (int i = 0; i < 4; ++i) r.sink->emit(mk(id_of(i)));
+    r.advance(std::chrono::seconds(15));
+    CHECK(r.sink->status().oldest_record_age_s == 15);
+    r.sink->pump();
+    REQUIRE(r.sink->mode() == SinkMode::Fenced);
+    CHECK(r.sink->status().pending_writes == 0);
+    CHECK(r.sink->status().oldest_record_age_s == 0);
+
+    r.sink->emit(mk("late"));  // refused in a terminal mode: never stamped
+    CHECK(r.sink->status().oldest_record_age_s == 0);
+}
+
+TEST_CASE("redis sink: a Failed sink keeps the stamp of the older held write when the newer queued one is discarded", "[unit][sink]") {
+    Rig r;
+    r.sink->checkpoint(CheckpointKind::Finalized, 50);  // stamped at t0; finalized with no safe cursor: ckpt.lua refuses (I2)
+    r.advance(std::chrono::seconds(20));
+    r.sink->emit(mk("after"));                          // stamped at t0 + 20 s, stays queued behind the barrier
+    r.advance(std::chrono::seconds(10));
+    CHECK(r.sink->status().oldest_record_age_s == 30);
+
+    r.sink->pump();  // the barrier is held, sent and refused: the sink fails; the held write stays pending
+    REQUIRE(r.sink->mode() == SinkMode::Failed);
+    CHECK(r.sink->status().pending_writes == 2);
+    CHECK(r.sink->status().oldest_record_age_s == 30);
+
+    r.advance(std::chrono::seconds(5));
+    r.sink->pump();  // terminal: the queued write is discarded, the held one is not
+    CHECK(r.sink->status().discarded_total == 1);
+    CHECK(r.sink->status().pending_writes == 1);
+    CHECK(r.sink->status().oldest_record_age_s == 35);  // still the held write's age, not the discarded one's (15 s)
+}
+
+TEST_CASE("redis sink: Fenced with pending writes in the held batch, spill and queue leaves no stamp behind", "[unit][sink]") {
+    RigCfg cfg;
+    cfg.max_batch = 1;
+    Rig r(cfg);
+    r.data->down = true;
+    r.sink->emit(mk(id_of(0)));
+    r.sink->emit(mk(id_of(1)));
+    r.sink->pump();  // Redis is down: everything goes to the spill (and one item is held)
+    REQUIRE(r.sink->mode() == SinkMode::Degraded);
+    r.advance(std::chrono::seconds(12));
+    r.sink->emit(mk(id_of(2)));  // still in the queue
+    CHECK(r.sink->status().oldest_record_age_s == 12);
+    CHECK(r.sink->status().pending_writes == 3);
+
+    r.data->down = false;
+    r.server.leader = "2|hostB|n2";  // another host took the lease during the outage
+    r.server.epoch = "2|hostB|n2";
+    REQUIRE(r.settle());
+    REQUIRE(r.sink->mode() == SinkMode::Fenced);
+    CHECK(r.sink->status().pending_writes == 0);
+    CHECK(r.sink->status().oldest_record_age_s == 0);
+}

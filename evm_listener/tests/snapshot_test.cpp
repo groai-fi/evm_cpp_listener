@@ -318,3 +318,10 @@ TEST_CASE("snapshot: host-local Redis facts are copied in any role, and raise Re
     AlertEngine e2{AlertThresholds{}};
     CHECK(e2.evaluate(b2.build(in)).empty());
 }
+
+TEST_CASE("snapshot: the sink's oldest pending write age becomes oldest_record_age_s", "[snapshot]") {
+    SnapshotBuilder b;
+    auto in = leader_inputs();
+    in.sink.oldest_record_age_s = 420;
+    CHECK(b.build(in).oldest_record_age_s == 420);
+}

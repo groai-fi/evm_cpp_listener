@@ -261,6 +261,7 @@ void RedisSink::enqueue(WriteItem item) {
             return;
         }
         queue_.emplace_back(std::move(item));
+        stamps_.push_back(now());
         ++queue_depth_;
         ++pending_;
     }
@@ -405,6 +406,13 @@ SinkStatus RedisSink::status() const {
     s.spill_records = spill_records_.load();
     s.spill_bytes = spill_bytes_.load();
     s.pending_writes = pending_.load();
+    {
+        std::lock_guard lk(mu_);
+        if (!stamps_.empty()) {
+            const auto age = std::chrono::duration_cast<std::chrono::seconds>(now() - stamps_.front());
+            s.oldest_record_age_s = age.count() > 0 ? static_cast<std::uint64_t>(age.count()) : 0;
+        }
+    }
     s.dup_total = dup_total_.load();
     s.below_finalized_total = below_finalized_total_.load();
     s.discarded_total = discarded_total_.load();
@@ -468,14 +476,32 @@ bool RedisSink::drain_terminal() {
     const std::uint64_t dropped = discard_queue();
     discarded_total_ += dropped;
     pending_ -= dropped;
+    // No stamp work here: only the queue (the newest items) was dropped, and discard_queue() removed its stamps.
+    // On Failed the held batch and the spill stay pending, with their older stamps.
     return dropped != 0;
+}
+
+void RedisSink::drop_queue_stamps(std::size_t end, std::uint64_t n) {
+    std::lock_guard lk(mu_);
+    if (end > stamps_.size() || n > end) throw std::logic_error("RedisSink: queue stamps out of range");
+    const auto last = stamps_.begin() + static_cast<std::ptrdiff_t>(end);
+    stamps_.erase(last - static_cast<std::ptrdiff_t>(n), last);
+}
+
+void RedisSink::drop_stamps(std::uint64_t n) {
+    std::lock_guard lk(mu_);
+    // Every pending item has exactly one stamp; running out means the two lists drifted apart (a bug): fail loudly.
+    if (n > stamps_.size()) throw std::logic_error("RedisSink: dropping more stamps than pending items");
+    stamps_.erase(stamps_.begin(), stamps_.begin() + static_cast<std::ptrdiff_t>(n));
 }
 
 std::uint64_t RedisSink::discard_queue() {
     std::deque<QueueItem> taken;
+    std::size_t stamps_at_swap = 0;  // the taken writes own the last stamps below this index
     {
         std::lock_guard lk(mu_);
         taken.swap(queue_);
+        stamps_at_swap = stamps_.size();
     }
     std::uint64_t writes = 0;
     for (auto& qi : taken) {
@@ -486,15 +512,18 @@ std::uint64_t RedisSink::discard_queue() {
             --queue_depth_;
         }
     }
+    drop_queue_stamps(stamps_at_swap, writes);
     return writes;
 }
 
 /// @brief Spills pending in-memory write queue to disk WAL during Redis outage or replaying mode.
 bool RedisSink::queue_to_spill() {
     std::deque<QueueItem> taken;
+    std::size_t stamps_at_swap = 0;  // the taken writes own the last stamps below this index
     {
         std::lock_guard lk(mu_);
         taken.swap(queue_);
+        stamps_at_swap = stamps_.size();
     }
     if (taken.empty()) return false;
 
@@ -521,6 +550,8 @@ bool RedisSink::queue_to_spill() {
         queue_depth_ -= lost;
         pending_ -= lost;
         discarded_total_ += lost;
+        // The lost writes are the newest of the taken ones; items enqueued since the swap sit behind them.
+        drop_queue_stamps(stamps_at_swap, lost);
         refresh_spill_atomics();
         throw;
     }
@@ -682,6 +713,7 @@ bool RedisSink::send_held() {
     // Erase acked prefix from held_ queue and decrement pending write counter.
     held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(acked));
     pending_ -= acked;
+    drop_stamps(acked);
     if (acked > 0) {
         reload_streak_ = 0;
         fence_streak_ = 0;
@@ -829,8 +861,9 @@ void RedisSink::enter_fenced() {
     std::uint64_t dropped = held_.size();
     held_.clear();
     dropped += spill_.discard_all();
+    drop_stamps(dropped);  // the held batch and the spill are the oldest pending items: a prefix of stamps_
     refresh_spill_atomics();
-    dropped += discard_queue();
+    dropped += discard_queue();  // removes the queue's own stamps (the newest ones)
     discarded_total_ += dropped;
     pending_ -= dropped;
     mode_.store(SinkMode::Fenced);

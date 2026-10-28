@@ -96,6 +96,9 @@ struct SinkStatus {
     std::uint64_t heartbeat_failures_total{};
     std::uint64_t consumer_lag_failures_total{};
     std::uint64_t reconnects_total{};
+    // Age of the oldest accepted write that is neither acked nor discarded (queue, current batch or spill); 0 when
+    // nothing is pending. Measured on the injected steady clock. Plan 60 §5.3.3 `oldest_record_age_s`.
+    std::uint64_t oldest_record_age_s{};
 };
 
 namespace detail {
@@ -257,6 +260,10 @@ private:
     ScriptCall to_call(const detail::WriteItem& item) const;
     Verdict classify(const detail::WriteItem& item, const CallOutcome& outcome);
     std::uint64_t discard_queue();
+    void drop_stamps(std::uint64_t n);  // the n oldest pending items were acked or discarded; sink thread
+    // `n` taken-from-the-queue writes were lost or discarded: they own the stamps just below index `end` (stamps_.size()
+    // when the queue was swapped out). Newer items enqueued since sit at or after `end`. Sink thread.
+    void drop_queue_stamps(std::size_t end, std::uint64_t n);
 
     void go_degraded(const std::string& reason);
     void schedule_next_probe();
@@ -275,6 +282,10 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::deque<detail::QueueItem> queue_;
+    // Enqueue time of every pending WriteItem, oldest first: the same population and order as `pending_` (current batch,
+    // then spill, then queue), so a stamp leaves exactly when its item is acked or discarded. A separate list keeps the
+    // Spill's on-disk format untouched. Producers push, the sink thread pops: both under mu_.
+    std::deque<TimePoint> stamps_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
 

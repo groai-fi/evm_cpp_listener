@@ -37,6 +37,7 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
     s.sink_saturated = in.sink_saturated;
     s.spill_bytes = in.sink.spill_bytes;
     s.spill_max_bytes = in.spill_max_bytes;
+    s.oldest_record_age_s = in.sink.oldest_record_age_s;
     s.safe_late_total = in.safe_late_total;
 
     for (const auto& c : in.consumers) {
