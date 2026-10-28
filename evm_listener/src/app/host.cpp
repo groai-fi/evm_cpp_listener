@@ -86,6 +86,7 @@ struct Runtime {
     std::unique_ptr<pipeline::PipelineDriver> driver;
     std::optional<std::uint64_t> last_g_s;
     std::optional<std::chrono::steady_clock::time_point> last_g_s_advance;
+    std::optional<std::uint64_t> ws_live_from_block;
 };
 
 /// A WS head and the provider that delivered it.
@@ -680,6 +681,7 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
                 snapshots_.push_event(ops::provider_failover_event(from, *to, reason));
             }
             rt_->ring.reset();
+            if (rt_->source) rt_->source->clear_cache();
             bump_head_epoch();
         };
         rt_->pool = provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
@@ -714,6 +716,9 @@ net::awaitable<void> Host::pipeline_loop() {
     try {
         for (;;) {
             const auto r = co_await driver.tick();
+            if (!rt_->ws_live_from_block && driver.status().state == pipeline::PipelineState::Live) {
+                rt_->ws_live_from_block = driver.status().c_s + 1;
+            }
             if (r.done || stopping_ || demoting_) break;
             if (r.wait.count() > 0) {
                 sleep_timer_.expires_after(r.wait);
@@ -789,14 +794,32 @@ void Host::on_sweep_page(core::Finality kind, const pipeline::BlockRange& range,
         const auto* route = cfg_.route(l.address, l.topics.at(0));  // stage() only admits routed logs
         return route != nullptr && (route->finality == core::Finality::Safe) == want_safe;
     };
-    const auto cc = rt_->pending.reconcile(range.from, range.to, logs, in_scope);
+    // Historical catch-up pages below ws_live_from_block cannot be delivered by eth_subscribe("logs"), which only
+    // streams new blocks from subscription time onwards. Evict any staged entries in that range without counting misses.
+    if (!rt_->ws_live_from_block || range.to < *rt_->ws_live_from_block) {
+        (void)rt_->pending.reconcile(range.from, range.to, logs, in_scope);
+        return;
+    }
+    pipeline::BlockRange check_range = range;
+    const std::vector<rpc::Log>* check_logs = &logs;
+    std::vector<rpc::Log> filtered_logs;
+    if (range.from < *rt_->ws_live_from_block) {
+        (void)rt_->pending.reconcile(range.from, *rt_->ws_live_from_block - 1, {}, in_scope);
+        check_range.from = *rt_->ws_live_from_block;
+        filtered_logs.reserve(logs.size());
+        for (const auto& l : logs) {
+            if (l.block_number >= *rt_->ws_live_from_block) filtered_logs.push_back(l);
+        }
+        check_logs = &filtered_logs;
+    }
+    const auto cc = rt_->pending.reconcile(check_range.from, check_range.to, *check_logs, in_scope);
     ws_missed_total_ += cc.ws_missed;
     ws_extra_total_ += cc.ws_extra;
     if (cc.ws_missed != 0 || cc.ws_extra != 0) {
         log::warn("host", "ws cross-check mismatch",
                   {{"kind", want_safe ? "safe" : "finalized"},
-                   {"from", std::to_string(range.from)},
-                   {"to", std::to_string(range.to)},
+                   {"from", std::to_string(check_range.from)},
+                   {"to", std::to_string(check_range.to)},
                    {"ws_missed", std::to_string(cc.ws_missed)},
                    {"ws_extra", std::to_string(cc.ws_extra)}});
     }
@@ -830,7 +853,11 @@ void Host::resync_ring(const chain::BlockRef& head, const std::string& why) {
     log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
     rt_->ring.reset();
     rt_->ring.on_head(head);
+    if (rt_->source) rt_->source->clear_cache();
     rt_->pending.purge_from(0);  // the old branch is unknown: staged logs cannot be trusted
+    if (rt_->ws_live_from_block) {
+        rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, head.number);
+    }
     rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
 }
 
@@ -890,7 +917,10 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                        {"old_top", std::to_string(info->old_top)},
                        {"c_s", std::to_string(c_s)}});
             // depth 0 = a gap that was only filled: nothing was replaced.
-            if (info->depth > 0) rt_->pending.purge_from(info->fork_point + 1);  // orphaned branch's WS logs
+            if (info->depth > 0) {
+                rt_->pending.purge_from(info->fork_point + 1);  // orphaned branch's WS logs
+                if (rt_->source) rt_->source->clear_cache();
+            }
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
                 log::warn("host", "head fork below C_s",
                           {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
@@ -1076,6 +1106,7 @@ void Host::demote(const std::string& why) {
     log::warn("host", "demoting to standby",
               {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
     rt_->driver->request_drain();
+    if (rt_->pool) rt_->pool->stop();
     sleep_timer_.cancel();  // pipeline_loop ends and posts end_term()
 }
 
@@ -1111,6 +1142,7 @@ void Host::begin_shutdown(int code, const std::string& why) {
     request_exit(code, why);
     if (rt_ && rt_->driver) {
         rt_->driver->request_drain();
+        if (rt_->pool) rt_->pool->stop();
         sleep_timer_.cancel();  // pipeline_loop ends and calls finish()
     } else {
         finish();

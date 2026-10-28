@@ -287,3 +287,39 @@ TEST_CASE("pool log source: no independent provider means nullopt, never the log
 TEST_CASE("pool log source: a null pool is rejected", "[unit][pool_log_source]") {
     CHECK_THROWS_AS(app::PoolLogSource(nullptr, nullptr), std::invalid_argument);
 }
+
+TEST_CASE("pool log source: block() caches verified blocks and invalidates on clear_cache or ring mismatch",
+          "[integration][pool_log_source]") {
+    Fixture f;
+    chain::ReorgDetector ring(16);
+    app::PoolLogSource src(f.pool, &ring);
+    REQUIRE(run_sync(f.ioc, src.get_logs(range(), filter())).provider == "P1");
+
+    // First lookup fetches from P2 over HTTP and caches the result.
+    const auto b1 = run_sync(f.ioc, src.block(kBlock));
+    REQUIRE(b1.has_value());
+    CHECK(b1->hash == hash_of('a'));
+    CHECK(b1->timestamp == 1234);
+    CHECK(f.n2.block_calls == 1);
+
+    // Second lookup for the same block is served from the verified-block cache with zero RPC calls.
+    const auto b2 = run_sync(f.ioc, src.block(kBlock));
+    REQUIRE(b2.has_value());
+    CHECK(b2->hash == hash_of('a'));
+    CHECK(b2->timestamp == 1234);
+    CHECK(f.n2.block_calls == 1);
+
+    // clear_cache() forces the next lookup to re-fetch.
+    src.clear_cache();
+    const auto b3 = run_sync(f.ioc, src.block(kBlock));
+    REQUIRE(b3.has_value());
+    CHECK(f.n2.block_calls == 2);
+
+    // A ring entry with a different hash (and timestamp == 0) invalidates the cached hash and triggers re-verification.
+    f.n2.block_hash = 'e';
+    ring.on_head(chain::BlockRef{kBlock, hash_of('e'), hash_of('b'), 0});
+    const auto b4 = run_sync(f.ioc, src.block(kBlock));
+    REQUIRE(b4.has_value());
+    CHECK(b4->hash == hash_of('e'));
+    CHECK(f.n2.block_calls == 3);
+}

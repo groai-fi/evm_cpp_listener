@@ -1,8 +1,12 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "chain/reorg_detector.hpp"
@@ -30,13 +34,20 @@ public:
     boost::asio::awaitable<std::optional<pipeline::BlockInfo>> block(std::uint64_t number) override;
     std::optional<std::string> current_provider() const override;
     void report_bad(const std::string& provider, const std::string& reason) override;
+    void clear_cache();
+
+    static constexpr std::size_t kMaxBlockCache = 4096;
 
 private:
+    void cache_block(std::uint64_t number, const pipeline::BlockInfo& info);
+
     std::shared_ptr<provider::ProviderPool> pool_;
     const chain::ReorgDetector* ring_;
     rpc::Decoder dec_;                      // used only synchronously (never across a co_await)
     std::unordered_set<std::string> avoid_; // providers reported bad since the last get_logs
     std::string logs_provider_;             // who answered the last successful get_logs
+    std::unordered_map<std::uint64_t, pipeline::BlockInfo> block_cache_;
+    std::deque<std::uint64_t> cache_order_;
 };
 
 }  // namespace evml::app

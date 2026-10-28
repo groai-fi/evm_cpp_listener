@@ -25,6 +25,22 @@ void PoolLogSource::report_bad(const std::string& provider, const std::string& r
     avoid_.insert(provider);
 }
 
+void PoolLogSource::cache_block(std::uint64_t number, const pipeline::BlockInfo& info) {
+    if (block_cache_.find(number) == block_cache_.end()) {
+        while (block_cache_.size() >= kMaxBlockCache && !cache_order_.empty()) {
+            block_cache_.erase(cache_order_.front());
+            cache_order_.pop_front();
+        }
+        cache_order_.push_back(number);
+    }
+    block_cache_[number] = info;
+}
+
+void PoolLogSource::clear_cache() {
+    block_cache_.clear();
+    cache_order_.clear();
+}
+
 net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range,
                                                             const core::LogFilter& filter) {
     std::unordered_set<std::string> tried = std::move(avoid_);  // steer this call away from providers reported bad
@@ -75,9 +91,20 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uin
     std::optional<core::Hash32> ring_hash;
     if (ring_) {
         if (const auto ref = ring_->ref_at(number)) {
-            if (ref->timestamp != 0) co_return pipeline::BlockInfo{ref->hash, ref->timestamp};
+            if (ref->timestamp != 0) {
+                const pipeline::BlockInfo info{ref->hash, ref->timestamp};
+                cache_block(number, info);
+                co_return info;
+            }
             ring_hash = ref->hash;  // hash known, timestamp not: read the block and cross-check the hash
         }
+    }
+
+    if (const auto it = block_cache_.find(number); it != block_cache_.end()) {
+        if (!ring_hash || *ring_hash == it->second.hash) {
+            co_return it->second;
+        }
+        block_cache_.erase(it);
     }
 
     std::unordered_set<std::string> tried;
@@ -110,7 +137,9 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uin
                                               " disagrees with the head ring (" + ring_hash->to_hex() + ")");
             co_return std::nullopt;
         }
-        co_return pipeline::BlockInfo{head->hash, head->timestamp};
+        const pipeline::BlockInfo info{head->hash, head->timestamp};
+        cache_block(number, info);
+        co_return info;
     }
 }
 

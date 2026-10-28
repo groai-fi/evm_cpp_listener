@@ -951,6 +951,39 @@ TEST_CASE("host: a log only WS delivered is counted as WS extra", "[integration]
     CHECK(t.extra == 1);
 }
 
+TEST_CASE("host: historical logs swept during CatchingUp do not count as WS misses", "[integration]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    // Place historical logs in [c0 + 1, c0 + 250] and in the pre-live released window (c0 + 250, c0 + 300].
+    const std::uint64_t n1 = r.c0 + 200;
+    const std::string h1 = hx('a', n1);
+    r.ns.blocks[n1] = head_json(n1, h1, hx('a', n1 - 1));
+    r.ns.logs.emplace_back(n1, cfg_log_json(r.host.cfg, n1, h1, 0));
+
+    const std::uint64_t n2 = r.c0 + 280;
+    const std::string h2 = hx('a', n2);
+    r.ns.blocks[n2] = head_json(n2, h2, hx('a', n2 - 1));
+    r.ns.logs.emplace_back(n2, cfg_log_json(r.host.cfg, n2, h2, 0));
+
+    r.host.start();
+    REQUIRE(r.live());
+    r.quiet();
+    CHECK(r.host.ws_missed.load() == 0);
+    CHECK(r.host.ws_extra.load() == 0);
+
+    // Advance finalized across the pre-live / post-live boundary [c0 + 251, c0 + 330]; n2 at c0 + 280 is pre-live.
+    r.ns.safe = r.c0 + 340;
+    r.ns.finalized = r.c0 + 330;
+    REQUIRE(r.until([&] { return r.host.status().c_f >= r.c0 + 330 || r.host.threw.load(); }, 30s));
+    REQUIRE_FALSE(r.host.threw.load());
+    r.quiet();
+    CHECK(r.host.ws_missed.load() == 0);
+    CHECK(r.host.ws_extra.load() == 0);
+
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+}
+
 #if defined(EVML_TEST_HOOKS)
 TEST_CASE("host: a frozen io thread makes the watchdog abort the process (SIGABRT)", "[integration]") {
     const std::string shard = "t_host_" + random_tag();
