@@ -828,3 +828,37 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     REQUIRE(L.sink->mode() == SinkMode::Connected);
     expect_streams_equal(L, expected);
 }
+
+TEST_CASE("redis sink integration 20: read_epoch on real Redis names the latest lease token", "[integration][sink]") {
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin{url};
+    const Keys keys{random_shard()};
+    struct Cleanup {
+        sw::redis::Redis& admin;
+        const Keys& keys;
+        ~Cleanup() {
+            try {
+                std::vector<std::string> mine;
+                admin.keys(keys.pattern(), std::back_inserter(mine));
+                if (!mine.empty()) admin.del(mine.begin(), mine.end());
+            } catch (const std::exception& e) {
+                std::cerr << "scenario 20 cleanup failed: " << e.what() << "\n";
+            }
+        }
+    } cleanup{admin, keys};
+
+    RedisppConn probe(url, keys);
+    CHECK_FALSE(probe.read_epoch());  // no lease was ever taken on this shard
+
+    ScriptRunner runner(admin);
+    const auto first = runner.run(lease_acquire_call(keys, "hostA", "n1", 2000));
+    REQUIRE(first.has_value());
+    REQUIRE(probe.read_epoch());
+    CHECK(*probe.read_epoch() == *first);
+
+    admin.del(keys.leader());  // the lease expires; the epoch key stays
+    const auto second = runner.run(lease_acquire_call(keys, "hostB", "n2", 2000));
+    REQUIRE(second.has_value());
+    CHECK(lease_token_epoch(*probe.read_epoch()) == 2);
+    CHECK(lease_token_host(*probe.read_epoch()) == "hostB");
+}

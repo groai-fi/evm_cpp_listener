@@ -347,3 +347,22 @@ TEST_CASE("snapshot: the Provider Failover event carries from, to and reason", "
     CHECK(alerts[0].title == "Provider Failover");
     CHECK(alerts[0].details.at("from").as_string() == "alchemy");
 }
+
+TEST_CASE("snapshot: the Leader Changed event names the old and new host, and alerts once in any role", "[snapshot]") {
+    const auto e = evml::ops::leader_changed_event("hostB", "hostA");
+    CHECK(e.kind == AlertEvent::Kind::LeaderChanged);
+    CHECK(e.details.at("old_host").as_string() == "hostB");
+    CHECK(e.details.at("new_host").as_string() == "hostA");
+
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};
+    SnapshotInputs in;  // a host that is not leading yet: the event is host-local
+    in.now = t0;
+    in.chain = "base";
+    b.push_event(e);
+    const auto alerts = engine.evaluate(b.build(in));
+    REQUIRE(alerts.size() == 1);
+    CHECK(alerts[0].title == "Leader Changed");
+    CHECK(alerts[0].details.at("old_host").as_string() == "hostB");
+    CHECK(engine.evaluate(b.build(in)).empty());  // once per occurrence
+}

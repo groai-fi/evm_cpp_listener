@@ -10,6 +10,26 @@
 
 namespace evml::sink {
 
+std::optional<std::uint64_t> lease_token_epoch(const std::string& token) {
+    const auto bar = token.find('|');
+    if (bar == std::string::npos || bar == 0) return std::nullopt;
+    std::uint64_t n = 0;
+    for (std::size_t i = 0; i < bar; ++i) {
+        if (token[i] < '0' || token[i] > '9') return std::nullopt;
+        if (n > (UINT64_MAX - 9) / 10) return std::nullopt;  // would overflow
+        n = n * 10 + static_cast<std::uint64_t>(token[i] - '0');
+    }
+    return n;
+}
+
+std::optional<std::string> lease_token_host(const std::string& token) {
+    if (!lease_token_epoch(token)) return std::nullopt;
+    const auto first = token.find('|');
+    const auto last = token.rfind('|');
+    if (last == first) return std::nullopt;  // "n|host" has no nonce
+    return token.substr(first + 1, last - first - 1);  // a host id may itself contain '|': only the outer bars split
+}
+
 namespace {
 
 // Runs one lease script call; a flushed script cache (NOSCRIPT) reloads and retries once. Returns the reply.

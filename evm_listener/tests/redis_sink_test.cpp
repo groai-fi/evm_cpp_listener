@@ -244,6 +244,12 @@ public:
         if (load_fixes_cache) server.scripts_valid = true;
     }
 
+    std::optional<std::string> read_epoch() override {
+        if (down) throw ConnError("fake: connection down");
+        if (server.epoch.empty()) return std::nullopt;
+        return server.epoch;
+    }
+
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override {
         if (down) throw ConnError("fake: connection down");
         if (aux_throws) throw std::runtime_error("fake: NOPERM this user has no permissions");
@@ -1598,4 +1604,33 @@ TEST_CASE("redis sink: Fenced with pending writes in the held batch, spill and q
     REQUIRE(r.sink->mode() == SinkMode::Fenced);
     CHECK(r.sink->status().pending_writes == 0);
     CHECK(r.sink->status().oldest_record_age_s == 0);
+}
+
+TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and anything else is refused", "[unit][sink]") {
+    CHECK(lease_token_epoch("6|hostA|abc123") == 6);
+    CHECK(lease_token_host("6|hostA|abc123") == "hostA");
+    CHECK(lease_token_host("12|rack|3|node|abc") == "rack|3|node");  // a host id may contain '|'
+
+    CHECK_FALSE(lease_token_epoch("0"));  // the lease-disabled token has no epoch
+    CHECK_FALSE(lease_token_epoch(""));
+    CHECK_FALSE(lease_token_epoch("|hostA|n"));
+    CHECK_FALSE(lease_token_epoch("x|hostA|n"));
+    CHECK_FALSE(lease_token_epoch("99999999999999999999999|hostA|n"));  // would overflow
+    CHECK_FALSE(lease_token_host("0"));
+    CHECK_FALSE(lease_token_host("6|hostA"));  // no nonce
+    CHECK_FALSE(lease_token_host("garbage|hostA|n"));
+}
+
+TEST_CASE("redis conn: read_epoch is empty before any lease and names the latest token after one", "[unit][sink]") {
+    Rig r;  // the rig acquired a lease as hostA
+    REQUIRE(r.data->read_epoch());
+    CHECK(*r.data->read_epoch() == r.token);
+    CHECK(lease_token_epoch(*r.data->read_epoch()) == 1);
+    CHECK(lease_token_host(*r.data->read_epoch()) == "hostA");
+
+    r.server.epoch.clear();
+    CHECK_FALSE(r.data->read_epoch());
+
+    r.data->down = true;
+    CHECK_THROWS_AS(r.data->read_epoch(), ConnError);
 }

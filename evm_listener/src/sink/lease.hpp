@@ -24,6 +24,12 @@ std::optional<std::string> try_acquire_lease(RedisConn& conn, const Keys& keys, 
 /// @return True if successfully released; false if token had already expired or was superseded.
 bool release_lease(RedisConn& conn, const Keys& keys, const std::string& token);
 
+/// @brief The `n` of a lease token "n|host|nonce" (the epoch counter). nullopt for a token that does not start with
+/// digits and '|', e.g. the lease-disabled token "0".
+std::optional<std::uint64_t> lease_token_epoch(const std::string& token);
+/// @brief The `host` of a lease token "n|host|nonce". nullopt when the token has no two '|' separators.
+std::optional<std::string> lease_token_host(const std::string& token);
+
 /// @brief Options for standby leader election loop with backoff and jitter.
 struct AcquireOptions {
     std::string host_id;

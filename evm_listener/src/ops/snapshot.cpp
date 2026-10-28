@@ -15,6 +15,14 @@ AlertEvent provider_failover_event(const std::optional<std::string>& from, const
     return e;
 }
 
+AlertEvent leader_changed_event(const std::string& old_host, const std::string& new_host) {
+    AlertEvent e;
+    e.kind = AlertEvent::Kind::LeaderChanged;
+    e.message = "leadership moved from " + old_host + " to " + new_host;
+    e.details = {{"old_host", old_host}, {"new_host", new_host}};
+    return e;
+}
+
 void SnapshotBuilder::push_event(AlertEvent e) { pending_.push_back(std::move(e)); }
 
 OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {

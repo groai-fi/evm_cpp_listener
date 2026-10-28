@@ -4,7 +4,7 @@
 //
 // Besides copying values it turns running counters into events: a counter that went up since the last build is one
 // alert event (Safe Reorg, Sink Invariant, WS Missed Logs). Counters restart per leadership term, so the baseline is
-// dropped whenever the host is not leader. Host-local events (Sink Fenced, later Leader Changed) are queued with
+// dropped whenever the host is not leader. Host-local events (Sink Fenced, Leader Changed) are queued with
 // push_event() and delivered with the next build.
 //
 // Facts that have no source yet are left unset, so their rules stay silent rather than guess (see plan 60, 5-E4a).
@@ -56,6 +56,9 @@ struct SnapshotInputs {
 /// @brief The Provider Failover event (plan 60 §5.3.3, details `from`, `to`, `reason`). `from` is null when no WS
 /// provider was active before; `reason` is the pool's reason name (e.g. "failover").
 AlertEvent provider_failover_event(const std::optional<std::string>& from, const std::string& to, std::string_view reason);
+
+/// @brief The Leader Changed event (plan 60 §5.3.3, details `old_host`, `new_host`): fired by the new leader on acquire.
+AlertEvent leader_changed_event(const std::string& old_host, const std::string& new_host);
 
 class SnapshotBuilder {
 public:

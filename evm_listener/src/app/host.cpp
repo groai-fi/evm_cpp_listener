@@ -115,7 +115,8 @@ private:
     enum class Phase : int { WaitingRedis, Standby, Leader };
 
     // ---- io thread ----
-    void start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token);
+    void start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token,
+                       const std::optional<std::string>& old_host);
     net::awaitable<void> pipeline_loop();
     void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash);
     // WS heads -> the term's ReorgDetector (plan 5.H). All of these run on the io thread.
@@ -171,6 +172,7 @@ private:
     std::mutex redis_wait_mu_;
     std::string redis_wait_family_;
     std::optional<ops::RedisMisconfig> redis_misconfig_;  // io thread; from the startup report
+    std::optional<std::uint64_t> epoch_n_;                // io thread; the `n` of this term's lease token
     std::optional<std::chrono::steady_clock::time_point> sink_degraded_since_;  // io thread
     bool demoting_{false};
     // Head handling: a walk in flight defers newer heads (the ring must not change under it); `head_epoch_` ends stale
@@ -347,10 +349,21 @@ void Host::acquire_thread_main(bool first) {
         }
 
         std::string token;
+        std::optional<std::string> old_host;  // the previous lease holder, when it was another host
         if (cfg_.lease.enabled) {
             phase_ = Phase::Standby;
             const sink::Keys keys(cfg_.shard.id);
             sink::RedisppConn conn(redis_url_, keys);
+            // Who led before us (plan 60 §5.3.3 Leader Changed source). Best effort: the read is not atomic with the
+            // acquire, and a failed read only skips the alert. The token is a fencing secret: never logged.
+            try {
+                if (const auto prev = conn.read_epoch()) {
+                    old_host = sink::lease_token_host(*prev);
+                    if (!old_host) log::warn("host", "epoch key is not a lease token: Leader Changed is skipped", {});
+                }
+            } catch (const sink::ConnError& e) {
+                log::warn("host", "epoch read failed: Leader Changed is skipped", {{"error", e.what()}});
+            }
             sink::AcquireOptions ao;
             ao.host_id = cfg_.shard.host_id;
             ao.ttl_ms = cfg_.lease.ttl_ms;
@@ -360,10 +373,11 @@ void Host::acquire_thread_main(bool first) {
             const auto t = sink::acquire_lease_blocking(conn, keys, ao);
             if (!t) return;  // stop requested while on standby
             token = *t;
+            if (old_host && *old_host == cfg_.shard.host_id) old_host.reset();  // a restart of this host is not a change
         } else {
             token = sink::lease_disabled_token();
         }
-        net::post(ioc_, [this, report, token] { start_runtime(report, token); });
+        net::post(ioc_, [this, report, token, old_host] { start_runtime(report, token, old_host); });
     } catch (const sink::StartupFatal& e) {
         net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitUsage, "redis startup check failed: " + msg); });
     } catch (const std::exception& e) {
@@ -371,8 +385,11 @@ void Host::acquire_thread_main(bool first) {
     }
 }
 
-void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token) {
+void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token,
+                         const std::optional<std::string>& old_host) {
     if (stopping_) return;
+    epoch_n_ = sink::lease_token_epoch(token);  // nullopt with the lease disabled (token "0")
+    if (old_host) snapshots_.push_event(ops::leader_changed_event(*old_host, cfg_.shard.host_id));
     try {
         if (rep && rep->misconfigured) {
             redis_misconfig_ = ops::RedisMisconfig{
@@ -671,8 +688,7 @@ void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_heartbeat_) return;
     next_heartbeat_ = now + std::chrono::seconds(cfg_.ops.heartbeat_s);
-    // null = not known yet (no gate read, empty head ring, no healthy getLogs provider). `epoch_n` of plan 4.7 is
-    // left out: the sink has no epoch read yet (5-E).
+    // null = not known yet (no gate read, empty head ring, no healthy getLogs provider, no lease epoch).
     const auto opt_u64 = [](const std::optional<std::uint64_t>& v) {
         return v ? boost::json::value(*v) : boost::json::value(nullptr);
     };
@@ -687,6 +703,7 @@ void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
     o["C_s"] = st.c_s;
     o["C_f"] = st.c_f;
     o["active_provider"] = provider ? boost::json::value(*provider) : boost::json::value(nullptr);
+    o["epoch_n"] = opt_u64(epoch_n_);
     o["version"] = core::version_string();
     rt_->sink->set_heartbeat(boost::json::serialize(o));
 }

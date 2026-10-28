@@ -827,7 +827,7 @@ TEST_CASE("host: the leader publishes the plan 4.7 heartbeat payload under hb:<h
     CHECK(hb.at("C_f").to_number<std::uint64_t>() == r.c0 + 250);
     CHECK_FALSE(hb.at("active_provider").as_string().empty());
     CHECK_FALSE(hb.at("version").as_string().empty());
-    CHECK_FALSE(hb.contains("epoch_n"));  // deferred to 5-E
+    CHECK(hb.at("epoch_n").is_null());  // lease disabled: there is no epoch
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count();
     CHECK(static_cast<std::int64_t>(now_ms) - hb.at("ts").to_number<std::int64_t>() < 10000);
@@ -964,3 +964,68 @@ TEST_CASE("host: a frozen io thread makes the watchdog abort the process (SIGABR
     CHECK(child_log.find("io_tick") != std::string::npos);  // the abort line names the stale heartbeat
 }
 #endif
+
+TEST_CASE("host: taking the lease over from another host fires Leader Changed once and the heartbeat carries epoch_n", "[integration]") {
+    evml::core::log::init("info");
+    const std::string redis_url = require_env("REDIS_URL");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-leader-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    // The previous term (epoch 5) belonged to hostOld and its lease key has expired: only the epoch key remains.
+    sw::redis::Redis admin{redis_url};
+    const evml::sink::Keys keys{shard};
+    admin.set(keys.epoch(), "5|hostOld|oldnonce");
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+    std::vector<evml::test::MockRequest> posts;
+    evml::test::MockHttpServer webhook(mock_ioc, [&](const evml::test::MockRequest& r) {
+        posts.push_back(r);
+        return evml::test::MockReply{.body = "{}"};
+    });
+
+    auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true), "leader.toml",
+                                         provider_env(node.url(), "hostA"));
+    ScopedEnv env;  // declared before the host so it is removed after the host thread has ended
+    env.set(cfg.ops.alert_webhook_env, webhook.url() + "hook");
+    env.set(cfg.ops.alert_webhook_token_env, "host-test-token");
+    RunningHost h(std::move(cfg));
+    h.start();
+
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !posts.empty() || h.threw.load(); }, 30s));  // first evaluation
+    REQUIRE_FALSE(h.threw.load());
+
+    const auto body = boost::json::parse(posts.front().body).as_object();
+    CHECK(body.at("title").as_string() == "Leader Changed");
+    CHECK(body.at("severity").as_string() == "warning");
+    CHECK(body.at("details").as_object().at("old_host").as_string() == "hostOld");
+    CHECK(body.at("details").as_object().at("new_host").as_string() == "hostA");
+
+    // This term is epoch 6: the heartbeat says so.
+    boost::json::object hb;
+    REQUIRE(evml::test::run_until(
+        mock_ioc,
+        [&] {
+            const auto v = admin.get(keys.hb("hostA"));
+            if (!v) return false;
+            hb = boost::json::parse(*v).as_object();
+            return true;
+        },
+        15s));
+    CHECK(hb.at("epoch_n").to_number<std::uint64_t>() == 6);
+
+    // Once per occurrence: nothing more is posted for it.
+    evml::test::run_until(mock_ioc, [] { return false; }, 12s);
+    int leader_changed = 0;
+    for (const auto& p : posts) {
+        if (boost::json::parse(p.body).as_object().at("title").as_string() == "Leader Changed") ++leader_changed;
+    }
+    CHECK(leader_changed == 1);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}

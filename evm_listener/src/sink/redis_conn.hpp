@@ -83,6 +83,10 @@ public:
     // stream or group is reported in the result, not thrown. Throws ConnError on transport failure.
     /// @brief Collects consumer group metrics from Redis stream introspection commands.
     virtual GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) = 0;
+    // GET of the epoch key: the latest lease token ("n|host|nonce"), which stays after the lease key expires. nullopt =
+    // no lease was ever taken on this shard. Read-only; for the Leader Changed alert (plan 60 §5.3.3). Throws ConnError.
+    /// @brief Reads the latest lease token from the epoch key.
+    virtual std::optional<std::string> read_epoch() = 0;
 };
 
 }  // namespace evml::sink

@@ -41,6 +41,8 @@ public:
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override;
     /// @brief Queries stream consumer group statistics using XINFO, XRANGE, XPENDING, and TIME.
     GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override;
+    /// @brief Reads the latest lease token with GET on the epoch key.
+    std::optional<std::string> read_epoch() override;
 
 private:
     sw::redis::Redis redis_;

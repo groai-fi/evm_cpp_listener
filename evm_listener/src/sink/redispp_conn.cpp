@@ -118,6 +118,10 @@ void RedisppConn::set_with_ttl(const std::string& key, const std::string& value,
     });
 }
 
+std::optional<std::string> RedisppConn::read_epoch() {
+    return guarded([&] { return redis_.get(keys_.epoch()); });
+}
+
 std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& calls) {
     if (!loaded_) load_scripts();
     return guarded([&] {
