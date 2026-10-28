@@ -27,6 +27,14 @@ GateSignal FinalityGate::on_safe(const std::string& provider, std::uint64_t numb
             sig = GateSignal::SafeHashMismatch;
         }
     }
+    if (sig == GateSignal::None) {
+        for (const auto& [other, seen] : safe_by_provider_) {
+            if (other != provider && seen.number == number && !(seen.hash == hash)) {
+                sig = GateSignal::SafeHashMismatch;
+                break;
+            }
+        }
+    }
     safe_by_provider_[provider] = {number, hash};  // always track the provider's latest reality
     latest_safe_ = number;
     return sig;
@@ -47,6 +55,16 @@ GateSignal FinalityGate::on_finalized(const std::string& provider, std::uint64_t
             // Finalized block changed canonical hash: catastrophic violation of EVM finality
             sig = GateSignal::FinalizedAnomaly;
             frozen_reason_ = provider + ": finalized block " + std::to_string(number) + " changed hash";
+        }
+    }
+    if (sig == GateSignal::None) {
+        for (const auto& [other, seen] : finalized_by_provider_) {
+            if (other != provider && seen.number == number && !(seen.hash == hash)) {
+                sig = GateSignal::FinalizedAnomaly;
+                frozen_reason_ = provider + ": finalized block " + std::to_string(number) +
+                                 " hash disagrees with " + other;
+                break;
+            }
         }
     }
     if (sig == GateSignal::FinalizedAnomaly) frozen_ = true; // Invariant I5: freeze release permanently

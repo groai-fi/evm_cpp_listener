@@ -700,3 +700,31 @@ TEST_CASE("sweep: on_page fires once per advanced page with the in-scope logs on
     CHECK(run(r.sw->safe_step(120)).status == StepStatus::Retry);
     CHECK(pages.size() == 2);
 }
+
+TEST_CASE("sweep: a failed or paused step does not pollute recent dedup state before retry", "[unit][sweep]") {
+    Rig r;
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    r.add(mklog(r.cfg, kSafeA, 106, 2, 0), 2);
+    r.add(mklog(r.cfg, kGauge, 107, 3, 0), 3);
+
+    // Block 106 is unreadable on the first safe_step attempt: neither 105 nor 106 may be admitted to recent_.
+    r.src.unreadable_blocks.insert(106);
+    CHECK(run(r.sw->safe_step(110)).status == StepStatus::Retry);
+    CHECK(r.sink.emitted.empty());
+
+    // Retry after block 106 becomes readable: both 105 and 106 must be emitted with zero false dedups.
+    r.src.unreadable_blocks.clear();
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    CHECK(r.sink.emitted.size() == 2);
+    CHECK(r.sw->stats().deduped == 0);
+
+    // In final_step, if the sink's released_range() is unreadable after fetch_page() succeeded, nothing is admitted.
+    r.sink.readable_flag = false;
+    CHECK(run(r.sw->final_step(110)).status == StepStatus::Paused);
+    CHECK(r.sink.emitted.size() == 2);
+
+    r.sink.readable_flag = true;
+    REQUIRE(run(r.sw->final_step(110)).status == StepStatus::Advanced);
+    CHECK(r.sink.emitted.size() == 3);
+    CHECK(r.sw->stats().deduped == 0);
+}

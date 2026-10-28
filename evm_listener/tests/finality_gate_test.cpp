@@ -74,4 +74,17 @@ TEST_CASE("gate: a finalized regression or hash change freezes release permanent
         CHECK(g.frozen());
         CHECK(g.frozen_reason().find("changed hash") != std::string::npos);
     }
+    SECTION("cross-provider same height hash mismatch") {
+        FinalityGate g;
+        CHECK(g.on_safe("infura", 100, hash_of(1)) == GateSignal::None);
+        CHECK(g.on_safe("ankr", 100, hash_of(1)) == GateSignal::None);
+        CHECK(g.on_safe("alchemy", 100, hash_of(2)) == GateSignal::SafeHashMismatch);
+        CHECK_FALSE(g.frozen());
+
+        CHECK(g.on_finalized("infura", 90, hash_of(3)) == GateSignal::None);
+        CHECK(g.on_finalized("ankr", 90, hash_of(3)) == GateSignal::None);
+        CHECK(g.on_finalized("alchemy", 90, hash_of(4)) == GateSignal::FinalizedAnomaly);
+        CHECK(g.frozen());
+        CHECK(g.frozen_reason().find("disagrees with") != std::string::npos);
+    }
 }
