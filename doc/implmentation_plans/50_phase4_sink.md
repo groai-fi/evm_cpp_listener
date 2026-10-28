@@ -87,7 +87,7 @@ return id
 **`released_range(from, to)`** = `ZRANGEBYSCORE` + `HMGET released_data`. A member without data is a contract violation → explicit error.
 
 **`lease.lua` (r6, P3)**, KEYS: 1 leader, 2 epoch.
-- `acquire <host> <nonce> <ttl>`: if `EXISTS leader` → nil. Else `n = 1 + (number prefix of GET epoch, or 0)`, `token = n|host|nonce`, `SET epoch token`, `SET leader token PX ttl`, return token.
+- `acquire <host> <nonce> <ttl>`: if `EXISTS leader` → nil. Else `e = GET epoch`, `n = 1 + (number prefix of e, or 0)`, `token = n|host|nonce`, `SET epoch token`, `SET leader token PX ttl`, return `token .. '\n' .. (e or '')` (the new token on line 1, the previous epoch token on line 2 so `Leader Changed` is detected atomically).
 - `renew <token> <ttl>`: if `GET leader == token` → `PEXPIRE`, `OK`. If leader is absent **and** `GET epoch == token` → `SET leader token PX ttl`, `RESUMED` (nobody took over during a blip). Otherwise `FENCED`.
 - `release <token>`: if `GET leader == token` → `DEL`, `OK`; otherwise `NOOP`.
 
