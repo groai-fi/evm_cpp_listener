@@ -127,7 +127,7 @@ See plan 60 "results and deviations".
 - [x] **D3 Gate bridge (G2), re-scoped:** the bridge itself (`on_tag`, `FinalityGate` → `set_gates`, reorg / frozen signals) was delivered in D1. D3 added host-level tests for `SafeRegression` → reverify, `FinalizedAnomaly` → frozen driver, and a failover where the new getLogs provider reports lower tags (plan 60, 5-D3).
   - **Accept:** the driver leaves Recovering on real tag polls.
 - [x] **D4 Heads → `ReorgDetector`:** fork walk via `call_to` on the WS provider; a crossing below `C_s` → `on_safe_reorg_signal`. Also fills `BlockRef::timestamp` and passes the ring to `PoolLogSource`. Walk capped at 16 blocks; longer gaps or deeper forks resync the ring and re-verify (plan 60, 5-D4).
-- [ ] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
+- [x] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
 - [ ] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
 
 ### ⬜ 5-E Alert engine + transport + dead-man (§5.3)
