@@ -172,6 +172,7 @@ struct NodeState {
     int getlogs_calls{0};
     std::map<std::uint64_t, std::string> blocks{};  // eth_getBlockByNumber(<hex number>): block JSON; absent -> null
     std::vector<std::uint64_t> block_requests{};     // every numeric eth_getBlockByNumber, in order
+    std::vector<std::pair<std::uint64_t, std::string>> logs{};  // eth_getLogs: (block number, log JSON), served by range
 };
 
 evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
@@ -190,6 +191,19 @@ evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
                 return evml::test::MockReply{.body = rpc_reply(id, it == s.blocks.end() ? "null" : it->second)};
             }
         }
+        if (method == "eth_getLogs" && !s.logs.empty()) {
+            const auto& p = v.at("params").as_array().at(0).as_object();
+            const auto from = std::stoull(std::string(p.at("fromBlock").as_string()), nullptr, 16);
+            const auto to = std::stoull(std::string(p.at("toBlock").as_string()), nullptr, 16);
+            std::string arr = "[";
+            for (const auto& [n, json] : s.logs) {
+                if (n < from || n > to) continue;
+                if (arr.size() > 1) arr += ",";
+                arr += json;
+            }
+            arr += "]";
+            return evml::test::MockReply{.body = rpc_reply(static_cast<std::uint64_t>(v.at("id").as_int64()), arr)};
+        }
         return healthy_node(s.safe, s.finalized)(r);
     };
 }
@@ -202,6 +216,9 @@ struct RunningHost {
     std::atomic<int> exit_code{-1};
     std::atomic<int> leader_events{0};
     std::atomic<int> demoted_events{0};
+    std::atomic<std::uint64_t> ws_missed{0};  // latest on_cross_check totals
+    std::atomic<std::uint64_t> ws_extra{0};
+    std::atomic<int> cross_checks{0};         // on_cross_check calls (one per swept page)
     std::atomic<bool> threw{false};
     std::string what;
     std::mutex mu;
@@ -225,6 +242,11 @@ struct RunningHost {
                     ++demoted_events;
                     state = -1;
                 }
+            };
+            opt.on_cross_check = [this](std::uint64_t missed, std::uint64_t extra) {
+                ws_missed = missed;
+                ws_extra = extra;
+                ++cross_checks;
             };
             try {
                 exit_code = evml::app::run_host(cfg, opt);
@@ -266,6 +288,21 @@ std::string head_json(std::uint64_t n, const std::string& hash, const std::strin
 std::string head_msg(std::uint64_t n, const std::string& hash, const std::string& parent) {
     return std::string(R"({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":")") + kHeadsSub +
            R"(","result":)" + head_json(n, hash, parent) + "}}";
+}
+
+// A log of config contract 0 (a safe-class pool) at `n` under block hash `hash`; the JSON an eth_getLogs result or a WS
+// `logs` frame carries.
+std::string cfg_log_json(const evml::core::Config& cfg, std::uint64_t n, const std::string& hash, std::uint64_t idx) {
+    const auto& c = cfg.contracts.at(0);
+    return R"({"address":")" + c.address.to_hex() + R"(","topics":[")" + c.topics.at(0).to_hex() +
+           R"("],"data":"0x","blockNumber":")" + evml::core::to_hex_u64(n) + R"(","blockHash":")" + hash +
+           R"(","transactionHash":"0x)" + std::string(64, 'e') + R"(","transactionIndex":"0x0","logIndex":")" +
+           evml::core::to_hex_u64(idx) + R"(","removed":false})";
+}
+
+std::string logs_msg(const std::string& log_json) {
+    return std::string(R"({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":")") + kLogsSub +
+           R"(","result":)" + log_json + "}}";
 }
 
 struct HeadFeed {
@@ -691,6 +728,67 @@ TEST_CASE("host: a head gap too long to walk resyncs the ring and makes the driv
     REQUIRE(r.until([&] { return !r.host.status().reverify_pending && r.host.live(); }, 15s));
     r.host.finish();
     CHECK(r.host.exit_code.load() == 0);
+}
+
+namespace {
+struct CrossCheckTotals {
+    std::uint64_t missed;
+    std::uint64_t extra;
+    int pages;
+};
+
+// Live host at c0 + 300; then one log at block c0 + 320 is (optionally) delivered over WS and (optionally) served by
+// eth_getLogs, and the gates move past it so the safe and the final sweep both cover it. Returns the cross-check totals.
+CrossCheckTotals run_cross_check(bool via_ws, bool via_sweep) {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+    r.quiet();
+
+    const std::uint64_t n = r.c0 + 320;
+    const std::string hash = hx('a', n);
+    const std::string log = cfg_log_json(r.host.cfg, n, hash, 0);
+    r.ns.blocks[n] = head_json(n, hash, hx('a', n - 1));  // the canonical block the sweep validates the log against
+    if (via_sweep) r.ns.logs.emplace_back(n, log);
+    if (via_ws) {
+        r.feed.out.push_back(logs_msg(log));
+        REQUIRE(r.until([&] { return r.feed.out.empty(); }, 10s));
+        r.wait(500ms);
+    }
+
+    const int before = r.host.cross_checks.load();
+    r.ns.safe = r.c0 + 340;
+    r.ns.finalized = r.c0 + 330;
+    REQUIRE(r.until([&] { return r.host.status().c_f >= r.c0 + 330 || r.host.threw.load(); }, 30s));
+    REQUIRE_FALSE(r.host.threw.load());
+    r.quiet();
+    const CrossCheckTotals out{r.host.ws_missed.load(), r.host.ws_extra.load(), r.host.cross_checks.load() - before};
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+    return out;
+}
+}  // namespace
+
+TEST_CASE("host: a WS log that the sweep also returns is a clean cross-check", "[integration]") {
+    const auto t = run_cross_check(true, true);
+    CHECK(t.pages >= 2);  // the safe page and the final page
+    CHECK(t.missed == 0);
+    CHECK(t.extra == 0);
+}
+
+TEST_CASE("host: a log only the sweep returns is counted as a WS miss", "[integration]") {
+    const auto t = run_cross_check(false, true);
+    CHECK(t.pages >= 2);
+    CHECK(t.missed == 1);
+    CHECK(t.extra == 0);
+}
+
+TEST_CASE("host: a log only WS delivered is counted as WS extra", "[integration]") {
+    const auto t = run_cross_check(true, false);
+    CHECK(t.pages >= 2);
+    CHECK(t.missed == 0);
+    CHECK(t.extra == 1);
 }
 
 #if defined(EVML_TEST_HOOKS)
