@@ -651,3 +651,51 @@ TEST_CASE("reverify: a sink that is not readable pauses it without fetching", "[
     r.sink.readable_flag = true;
     CHECK(run(r.sw->reverify_released()).status == StepStatus::Advanced);
 }
+
+TEST_CASE("sweep: on_page fires once per advanced page with the in-scope logs only", "[unit][sweep]") {
+    struct Page {
+        Finality kind;
+        BlockRange range;
+        std::vector<std::uint64_t> blocks;
+    };
+    std::vector<Page> pages;
+    SweeperOptions opt;
+    opt.on_page = [&pages](Finality kind, const BlockRange& range, const std::vector<evml::rpc::Log>& logs) {
+        Page p{kind, range, {}};
+        for (const auto& l : logs) p.blocks.push_back(l.block_number);
+        pages.push_back(std::move(p));
+    };
+    Rig r(load_base_config(), opt);
+    r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
+    r.add(mklog(r.cfg, kGauge, 106, 2, 0), 2);
+
+    // NoWork and Paused: no call
+    CHECK(run(r.sw->safe_step(100)).status == StepStatus::NoWork);
+    r.sink.saturated_flag = true;
+    CHECK(run(r.sw->safe_step(110)).status == StepStatus::Paused);
+    r.sink.saturated_flag = false;
+    CHECK(pages.empty());
+
+    // safe page: the safe-class log only, after the checkpoint
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    REQUIRE(pages.size() == 1);
+    CHECK(pages[0].kind == Finality::Safe);
+    CHECK(pages[0].range == BlockRange{101, 110});
+    CHECK(pages[0].blocks == std::vector<std::uint64_t>{105});
+
+    // final page: the finalized-class log only (the matched safe log is not in scope)
+    REQUIRE(run(r.sw->final_step(108)).status == StepStatus::Advanced);
+    REQUIRE(pages.size() == 2);
+    CHECK(pages[1].kind == Finality::Finalized);
+    CHECK(pages[1].range == BlockRange{101, 108});
+    CHECK(pages[1].blocks == std::vector<std::uint64_t>{106});
+
+    // a retry does not call it
+    LogResult bad;
+    bad.provider = "infura";
+    bad.kind = evml::rpc::FailKind::Retry;
+    bad.error = "boom";
+    r.src.overrides.push_back(bad);
+    CHECK(run(r.sw->safe_step(120)).status == StepStatus::Retry);
+    CHECK(pages.size() == 2);
+}

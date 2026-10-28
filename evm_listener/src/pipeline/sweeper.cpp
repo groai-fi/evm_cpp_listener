@@ -230,6 +230,7 @@ boost::asio::awaitable<StepResult> Sweeper::safe_step(std::uint64_t g_s) {
     }
     sink_.checkpoint(CheckpointKind::Safe, f.range.to); // Invariant I3: advance safe checkpoint
     c_s_ = f.range.to; // Invariant I1: advance in-memory safe cursor
+    if (opt_.on_page) opt_.on_page(core::Finality::Safe, f.range, f.logs);
     co_return StepResult{StepStatus::Advanced, f.range, {}, false};
 }
 
@@ -288,6 +289,12 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
     sink_.final_trim(f.range.to);                       // Trim released ZSET <= C_f to bound memory
     sink_.checkpoint(CheckpointKind::Finalized, f.range.to); // Advance finalized checkpoint in Redis
     c_f_ = f.range.to;                                  // Invariant I2: advance finalized cursor
+    if (opt_.on_page) {
+        std::vector<rpc::Log> final_logs;
+        for (const auto& l : f.logs)
+            if (!is_safe_class(cfg_, l)) final_logs.push_back(l);
+        opt_.on_page(core::Finality::Finalized, f.range, final_logs);
+    }
     co_return StepResult{StepStatus::Advanced, f.range, {}, !diff.vanished.empty()};
 }
 

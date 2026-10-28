@@ -68,6 +68,10 @@ struct SweeperOptions {
     // Soft memory cap: a page with more logs than this still goes out, but the next page is smaller (rev 5, G6).
     // Phase 5 wires it to sink queue capacity / 2.
     std::size_t max_page_logs{5000};
+    // Observer, default empty (no behaviour change). Called once per Advanced page, after its emissions and
+    // checkpoint. `logs` are the page's in-scope logs: safe-class for Finality::Safe, finalized-class for
+    // Finality::Finalized. Not called for Retry/Paused/NoWork/Stalled or by reverify_released. Must not throw.
+    std::function<void(core::Finality kind, const BlockRange& range, const std::vector<rpc::Log>& logs)> on_page;
 };
 
 // The two sweeps (plan 3.5) over one LogSource and one Sink. Single-threaded: call from one executor, and do not
