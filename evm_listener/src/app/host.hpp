@@ -25,6 +25,9 @@ struct HostOptions {
     std::function<void(const pipeline::DriverStatus&)> on_status;
     /// Called on the io thread when a leadership term starts ("leader") and when a fenced term ends ("demoted").
     std::function<void(std::string_view)> on_event;
+    /// Called on the io thread after each swept page is cross-checked against the WS logs, with the running totals
+    /// (ws_missed_logs_total, ws_extra_logs_total) since the host started. Metrics export is 5-F.
+    std::function<void(std::uint64_t ws_missed_total, std::uint64_t ws_extra_total)> on_cross_check;
     /// Test hook (`--test-freeze-io-after`, only reachable from the CLI when built with EVML_TEST_HOOKS): blocks the io
     /// thread after this long, so the watchdog must abort the process.
     std::optional<std::chrono::seconds> test_freeze_io_after;

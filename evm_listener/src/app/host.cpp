@@ -29,6 +29,7 @@
 #include "ops/metrics.hpp"
 #include "ops/ops_http_server.hpp"
 #include "ops/watchdog.hpp"
+#include "pipeline/pending_buffer.hpp"
 #include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
 #include "rpc/codec.hpp"
@@ -64,11 +65,13 @@ std::uint64_t wall_ms() {
 /// Everything that exists only while the pipeline runs. Members are declared in dependency order, so the reverse
 /// destruction order tears down the driver first and the sink last.
 struct Runtime {
-    Runtime(const std::string& shard, std::size_t ring_size) : keys(shard), ring(ring_size) {}
+    Runtime(const std::string& shard, std::size_t ring_size, std::size_t pending_max)
+        : keys(shard), ring(ring_size), pending(pending_max) {}
     sink::Keys keys;
     std::unique_ptr<sink::RedisSink> sink;
     chain::FinalityGate gate;
     chain::ReorgDetector ring;  // fed by WS heads on the io thread; read by `source` (also io thread)
+    pipeline::PendingBuffer pending;  // WS logs awaiting their sweep (cross-check only, never emitted); io thread
     std::shared_ptr<provider::ProviderPool> pool;
     std::unique_ptr<PoolLogSource> source;
     std::unique_ptr<pipeline::Sweeper> sweeper;
@@ -112,6 +115,9 @@ private:
     net::awaitable<void> walk_fork(std::uint64_t epoch, HeadEvent e);
     void resync_ring(const chain::BlockRef& head, const std::string& why);
     void bump_head_epoch();
+    // WS logs -> PendingBuffer, and the per-page cross-check against the sweep (plan 3.4, G3). io thread.
+    void on_ws_log(const rpc::Log& log, const std::string& provider);
+    void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs);
     void schedule_beat();
     void on_beat();
     void request_exit(int code, const std::string& why);  // first reason wins
@@ -146,6 +152,8 @@ private:
     bool walking_{false};
     std::optional<HeadEvent> deferred_head_;
     std::uint64_t head_epoch_{0};
+    std::uint64_t ws_missed_total_{0};  // io thread; metrics export is 5-F
+    std::uint64_t ws_extra_total_{0};
     bool finished_{false};
     bool exit_set_{false};
     int exit_code_{0};
@@ -314,7 +322,7 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         }
 
         bump_head_epoch();
-        rt_ = std::make_unique<Runtime>(cfg_.shard.id, cfg_.chain.hash_ring_size);
+        rt_ = std::make_unique<Runtime>(cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
 
         auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, token);
         sopts.loop_beat = wd_.sink_beat_slot();
@@ -336,6 +344,7 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
             on_tag(p, tag, n, hash);
         };
         h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
+        h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
         h.on_ws_active_changed = [this](const std::optional<std::string>&, std::string_view) {
             // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
             if (!rt_) return;
@@ -349,6 +358,9 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         pipeline::SweeperOptions sw;
         sw.min_range = cfg_.backfill.min_range;
         sw.max_page_logs = std::max<std::size_t>(1, cfg_.sink.queue_capacity / 2);  // plan 3.5 G6
+        sw.on_page = [this](core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
+            on_sweep_page(kind, range, logs);
+        };
         const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
         rt_->sweeper = std::make_unique<pipeline::Sweeper>(cfg_, ctx, *rt_->source, *rt_->sink, wall_ms, sw);
 
@@ -423,6 +435,39 @@ void Host::bump_head_epoch() {
     deferred_head_.reset();
 }
 
+void Host::on_ws_log(const rpc::Log& log, const std::string& provider) {
+    if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
+    if (log.topics.empty() || cfg_.route(log.address, log.topics.front()) == nullptr) {
+        log::warn("host", "ws log matches no configured route, not staged",
+                  {{"provider", provider}, {"block", std::to_string(log.block_number)}});
+        return;
+    }
+    rt_->pending.stage(log, provider);
+}
+
+void Host::on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
+    if (!rt_) return;
+    // `logs` holds one class (safe for a safe page, finalized for a final page), so only staged logs of that class
+    // are in scope; the other class waits for its own sweep.
+    const bool want_safe = kind == core::Finality::Safe;
+    const auto in_scope = [this, want_safe](const rpc::Log& l) {
+        const auto* route = cfg_.route(l.address, l.topics.at(0));  // stage() only admits routed logs
+        return route != nullptr && (route->finality == core::Finality::Safe) == want_safe;
+    };
+    const auto cc = rt_->pending.reconcile(range.from, range.to, logs, in_scope);
+    ws_missed_total_ += cc.ws_missed;
+    ws_extra_total_ += cc.ws_extra;
+    if (cc.ws_missed != 0 || cc.ws_extra != 0) {
+        log::warn("host", "ws cross-check mismatch",
+                  {{"kind", want_safe ? "safe" : "finalized"},
+                   {"from", std::to_string(range.from)},
+                   {"to", std::to_string(range.to)},
+                   {"ws_missed", std::to_string(cc.ws_missed)},
+                   {"ws_extra", std::to_string(cc.ws_extra)}});
+    }
+    if (opt_.on_cross_check) opt_.on_cross_check(ws_missed_total_, ws_extra_total_);
+}
+
 void Host::on_head(const rpc::Head& h, const std::string& provider) {
     if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
     HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
@@ -450,6 +495,7 @@ void Host::resync_ring(const chain::BlockRef& head, const std::string& why) {
     log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
     rt_->ring.reset();
     rt_->ring.on_head(head);
+    rt_->pending.purge_from(0);  // the old branch is unknown: staged logs cannot be trusted
     rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
 }
 
@@ -509,6 +555,7 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                        {"old_top", std::to_string(info->old_top)},
                        {"c_s", std::to_string(c_s)}});
             // depth 0 = a gap that was only filled: nothing was replaced.
+            if (info->depth > 0) rt_->pending.purge_from(info->fork_point + 1);  // orphaned branch's WS logs
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
                 log::warn("host", "head fork below C_s",
                           {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
