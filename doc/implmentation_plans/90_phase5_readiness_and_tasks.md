@@ -134,7 +134,8 @@ See plan 60 "results and deviations".
 - [x] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.
 - [x] **E2 `src/ops/alert_sender`:** exact JSON schema and `X-API-Key`; 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`; token and URL never in logs.
 - [x] **E3 `src/ops/deadman`:** pings only when leader and healthy (§5.3.2); 10 s timeout; failures counted; empty URL → `"deadman":"disabled"` in `/readyz`.
-- [ ] **E4 Tests:** every row of §5.3.3 by kind (one Provider Failover → exactly 1 POST, none on the next tick); transport schema, header, retry count, failure metric, token absent from captured logs; dead-man leader / standby / saturated cases.
+- [x] **E4a Host wiring (split from E4, 2026-10-28):** `ops/snapshot` builds the `OpsSnapshot` from live host state every 10 s; the host feeds the engine, the sender and the dead-man; counter-delta events (Safe Reorg, Sink Invariant, WS Missed Logs) and Sink Fenced.
+- [ ] **E4b Remaining facts and rule tests:** provider facts (auth / quota / failover / inconsistent events, `any_healthy_provider`), `ms_since_head`, `getlogs_safe` / `ws_safe`, `oldest_record_age_s`, Redis unreachable / misconfigured, the `epoch` read for Leader Changed + heartbeat `epoch_n`; then the original E4 tests: every row of §5.3.3 by kind (one Provider Failover → exactly 1 POST, none on the next tick); transport schema, header, retry count, failure metric, token absent from captured logs; dead-man leader / standby / saturated cases.
 
 ### ⬜ 5-F Metrics + `/readyz` wiring
 - [ ] Register the §5.4 list plus existing sink and sweeper totals; update every 10 s and on scrape.
