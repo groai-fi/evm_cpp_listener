@@ -6,6 +6,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include "core/error.hpp"
@@ -118,8 +119,17 @@ void ProviderPool::start() {
 
 void ProviderPool::stop() {
     running_ = false;
+    stopped_ = true;
     tick_timer_.cancel();
     end_session_quiet();
+    for (auto& [_, n] : nodes_) {
+        for (auto* t : n.wait_timers) {
+            t->cancel();
+        }
+        if (n.http) {
+            n.http->cancel();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -459,14 +469,28 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
     const auto self = shared_from_this();
     std::unordered_set<std::string> tried;
     RpcOutcome last;
+    if (stopped_) {
+        last.error = "pool stopped";
+        co_return last;
+    }
     last.error = "no getLogs provider is usable";
     for (;;) {
+        if (stopped_) {
+            last.ok = false;
+            last.error = "pool stopped";
+            co_return last;
+        }
         // Pick next usable HTTP provider, skipping already tried endpoints during this request.
         const auto p = book_.pick_getlogs(Clock::now(), tried);
         if (!p) co_return last;
         tried.insert(*p);
         const auto id = next_id_++;
         auto o = co_await call_on(*p, build(id), id);
+        if (stopped_) {
+            o.ok = false;
+            o.error = "pool stopped";
+            co_return o;
+        }
         note(*p, o);
         // Return immediately on success or RangeTooLarge (caller adjusts range without provider failover).
         if (o.ok || o.kind == rpc::FailKind::RangeTooLarge) co_return o;
@@ -477,14 +501,38 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
 net::awaitable<RpcOutcome> ProviderPool::call_to(std::string provider, RequestBuilder build) {
     const auto self = shared_from_this();
     Node& n = nodes_.at(provider);  // nodes_ is never modified after construction: the reference stays valid
+    if (stopped_) {
+        RpcOutcome o;
+        o.provider = provider;
+        o.error = "pool stopped";
+        co_return o;
+    }
     const auto wait = n.bucket.reserve(Clock::now());
     if (wait > Clock::duration::zero()) {
         ++n.throttled;
         net::steady_timer timer(exec_, wait);
-        co_await timer.async_wait(net::use_awaitable);
+        n.wait_timers.push_back(&timer);
+        struct TimerGuard {
+            std::vector<net::steady_timer*>& list;
+            net::steady_timer* t;
+            ~TimerGuard() { list.erase(std::remove(list.begin(), list.end(), t), list.end()); }
+        } guard{n.wait_timers, &timer};
+        boost::system::error_code ec;
+        co_await timer.async_wait(net::redirect_error(net::use_awaitable, ec));
+        if (stopped_ || ec) {
+            RpcOutcome o;
+            o.provider = provider;
+            o.error = "pool stopped";
+            co_return o;
+        }
     }
     const auto id = next_id_++;
     auto o = co_await call_on(provider, build(id), id);
+    if (stopped_) {
+        o.ok = false;
+        o.error = "pool stopped";
+        co_return o;
+    }
     note(provider, o);
     co_return o;
 }
@@ -499,9 +547,11 @@ void ProviderPool::report_bad(const std::string& provider, const std::string& re
 
 net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string provider, Tag tag) {
     const auto self = shared_from_this();
+    if (stopped_) co_return std::nullopt;
     const auto id = next_id_++;
     // Fetch block by tag name ("safe" or "finalized") via eth_getBlockByNumber.
     auto o = co_await call_on(provider, rpc::build_get_block_by_number(id, tag_name(tag), false), id);
+    if (stopped_) co_return std::nullopt;
 
     std::optional<rpc::Head> head;
     if (o.ok) {
@@ -595,8 +645,9 @@ net::awaitable<void> ProviderPool::poll([[maybe_unused]] std::shared_ptr<Provide
             o.error = std::string("undecodable block number: ") + e.what();
         }
     }
+    if (!running_) co_return;
     note(provider, o);
-    if (!running_ || !head) co_return;
+    if (!head) co_return;
     // Feed latest HTTP head block to StaleDetector for cross-provider divergence checking.
     if (last_getlogs_ == provider) detector_.on_http_head(*head, Clock::now());
 

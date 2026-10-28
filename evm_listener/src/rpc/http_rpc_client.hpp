@@ -7,6 +7,7 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include "rpc/classify.hpp"
@@ -66,19 +67,25 @@ public:
     /// @brief Closes the active socket connection if open (safe to call at any time).
     void close();
 
+    /// @brief Cancels any in-flight request or queued waiters and closes the active connection.
+    void cancel();
+
     /// @brief Provider identifier name.
     const std::string& name() const { return cfg_.name; }
 
 private:
-    boost::asio::awaitable<std::unique_ptr<detail::HttpConn>> open();
+    boost::asio::awaitable<std::shared_ptr<detail::HttpConn>> open();
 
     boost::asio::any_io_executor exec_;
     HttpRpcClientConfig cfg_;
     ParsedUrl url_;
     std::string redacted_;
-    std::unique_ptr<detail::HttpConn> conn_;
+    std::shared_ptr<detail::HttpConn> conn_;
+    boost::asio::ip::tcp::resolver* active_resolver_{nullptr};
+    detail::HttpConn* opening_conn_{nullptr};
     boost::asio::steady_timer lock_timer_;  // wake-up channel of the FIFO request lock
     bool locked_{false};
+    bool cancelled_{false};
 };
 
 }  // namespace evml::rpc

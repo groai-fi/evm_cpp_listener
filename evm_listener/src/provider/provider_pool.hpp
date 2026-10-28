@@ -222,6 +222,7 @@ private:
         TokenBucket bucket;
         std::uint64_t inconsistent{0};
         std::uint64_t throttled{0};
+        std::vector<boost::asio::steady_timer*> wait_timers;
         // The last Quota / Auth / Config failure, kept so health() can say why a provider is in Cooldown / Disabled.
         struct Fault {
             int http_status{0};
@@ -267,6 +268,7 @@ private:
 
     bool started_{false};
     bool running_{false};
+    bool stopped_{false};
     std::uint64_t next_id_{1};
 
     std::shared_ptr<rpc::WsSession> session_;

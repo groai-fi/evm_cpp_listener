@@ -86,7 +86,7 @@ struct PlainConn final : HttpConn {
         beast::error_code ec;
         // Graceful shutdown before close
         stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-        stream.socket().close(ec);
+        stream.close();
     }
     beast::tcp_stream stream;
 };
@@ -103,7 +103,7 @@ struct TlsConn final : HttpConn {
         // Direct socket shutdown without async close_notify (for dead connections or process exit)
         beast::error_code ec;
         beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
-        beast::get_lowest_layer(stream).socket().close(ec);
+        beast::get_lowest_layer(stream).close();
     }
     beast::ssl_stream<beast::tcp_stream> stream;
 };
@@ -136,7 +136,7 @@ HttpRpcClient::HttpRpcClient(net::any_io_executor executor, HttpRpcClientConfig 
       lock_timer_(exec_, net::steady_timer::time_point::max()) {}
 
 /// @brief Cleans up socket connections on destruction.
-HttpRpcClient::~HttpRpcClient() { close(); }
+HttpRpcClient::~HttpRpcClient() { cancel(); }
 
 /// @brief Explicitly shuts down and resets the active socket connection.
 void HttpRpcClient::close() {
@@ -147,23 +147,54 @@ void HttpRpcClient::close() {
     }
 }
 
+/// @brief Cancels any in-flight request or queued waiters and closes the active connection.
+void HttpRpcClient::cancel() {
+    cancelled_ = true;
+    lock_timer_.cancel();
+    if (active_resolver_) {
+        active_resolver_->cancel();
+    }
+    if (opening_conn_) {
+        opening_conn_->close();
+    }
+    close();
+}
+
 /// @brief Asynchronously resolves DNS and opens either plain TCP or verified TLS connection.
-net::awaitable<std::unique_ptr<detail::HttpConn>> HttpRpcClient::open() {
+net::awaitable<std::shared_ptr<detail::HttpConn>> HttpRpcClient::open() {
+    if (cancelled_) {
+        throw TransportError(cfg_.name + ": client cancelled");
+    }
     tcp::resolver resolver(exec_);
+    struct ResolverGuard {
+        HttpRpcClient& self;
+        ResolverGuard(HttpRpcClient& s, tcp::resolver& r) : self(s) { self.active_resolver_ = &r; }
+        ~ResolverGuard() { self.active_resolver_ = nullptr; }
+    };
+    struct OpeningGuard {
+        HttpRpcClient& self;
+        OpeningGuard(HttpRpcClient& s, detail::HttpConn* c) : self(s) { self.opening_conn_ = c; }
+        ~OpeningGuard() { self.opening_conn_ = nullptr; }
+    };
     tcp::resolver::results_type endpoints;
     try {
+        ResolverGuard rg(*this, resolver);
         // Resolve host to IP endpoints
         endpoints = co_await resolver.async_resolve(url_.host, url_.port, net::use_awaitable);
     } catch (const boost::system::system_error& e) {
         throw TransportError(cfg_.name + ": resolve failed for " + redacted_ + ": " + e.code().message());
     }
+    if (cancelled_) {
+        throw TransportError(cfg_.name + ": client cancelled");
+    }
 
     // Unencrypted HTTP path (for anvil / hardhat local testing)
     if (!url_.tls) {
-        auto c = std::make_unique<detail::PlainConn>(exec_);
+        auto c = std::make_shared<detail::PlainConn>(exec_);
+        OpeningGuard og(*this, c.get());
         c->stream.expires_after(cfg_.timeout);
         co_await phase(cfg_.name + " " + redacted_, "connect", c->stream.async_connect(endpoints, net::use_awaitable));
-        co_return std::move(c);
+        co_return c;
     }
 
     // TLS 1.2/1.3 client context with system trust store and peer verification
@@ -171,7 +202,8 @@ net::awaitable<std::unique_ptr<detail::HttpConn>> HttpRpcClient::open() {
     auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
     ctx->set_default_verify_paths();
     ctx->set_verify_mode(ssl::verify_peer);
-    auto c = std::make_unique<detail::TlsConn>(exec_, *ctx);
+    auto c = std::make_shared<detail::TlsConn>(exec_, *ctx);
+    OpeningGuard og(*this, c.get());
     // Configure SNI extension for cloud proxy / CDN routing
     if (!SSL_set_tlsext_host_name(c->stream.native_handle(), url_.host.c_str())) {
         throw TransportError(cfg_.name + ": cannot set TLS SNI for " + redacted_);
@@ -182,18 +214,27 @@ net::awaitable<std::unique_ptr<detail::HttpConn>> HttpRpcClient::open() {
     // Connect TCP socket with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);
     co_await phase(who, "connect", beast::get_lowest_layer(c->stream).async_connect(endpoints, net::use_awaitable));
+    if (cancelled_) {
+        throw TransportError(cfg_.name + ": client cancelled");
+    }
     // Complete TLS handshake with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);
     co_await phase(who, "TLS handshake", c->stream.async_handshake(ssl::stream_base::client, net::use_awaitable));
-    co_return std::move(c);
+    co_return c;
 }
 
 /// @brief Sends a JSON-RPC request over the persistent connection, serializing callers FIFO.
 net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
+    if (cancelled_) {
+        throw TransportError(cfg_.name + ": client cancelled");
+    }
     // FIFO lock: waiters park on lock_timer_ and are woken one at a time by cancel_one().
     while (locked_) {
         boost::system::error_code ignored;
         co_await lock_timer_.async_wait(net::redirect_error(net::use_awaitable, ignored));
+        if (cancelled_) {
+            throw TransportError(cfg_.name + ": client cancelled");
+        }
     }
     locked_ = true;
     // RAII guard ensuring lock is released and next waiter woken on exit
@@ -218,11 +259,15 @@ net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
 
     const std::string who = cfg_.name + " " + redacted_;
     for (int attempt = 0;; ++attempt) {
+        if (cancelled_) {
+            throw TransportError(cfg_.name + ": client cancelled");
+        }
         const bool reused = conn_ != nullptr;
         try {
             // Lazy connect or reconnect if connection dropped
             if (!conn_) conn_ = co_await open();
-            auto res = co_await conn_->roundtrip(req, cfg_.timeout, who);
+            const auto conn = conn_;
+            auto res = co_await conn->roundtrip(req, cfg_.timeout, who);
             const bool keep = res.keep_alive();
             HttpResult out;
             out.status = static_cast<int>(res.result_int());
@@ -236,6 +281,7 @@ net::awaitable<HttpResult> HttpRpcClient::call(std::string json_body) {
             co_return out;
         } catch (const PhaseError& e) {
             close();
+            if (cancelled_) throw;
             // A reused connection that died while idle is the only retryable case, and only once.
             if (attempt == 0 && reused && !e.timeout) continue;
             throw;

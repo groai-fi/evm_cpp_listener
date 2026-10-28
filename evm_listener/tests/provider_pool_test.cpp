@@ -696,3 +696,54 @@ TEST_CASE("pool: ms_since_head is unknown when the pool does not subscribe to he
     CHECK_FALSE(pool->ms_since_head());
     shutdown(ioc, pool);
 }
+
+TEST_CASE("pool: stop() cancels in-flight HTTP call and token-bucket sleep immediately", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockHttpServer h1(ioc, [](const MockRequest&) {
+        MockReply r;
+        r.hang = true;
+        return r;
+    });
+    MockHttpServer h2(ioc, healthy(chain));
+
+    auto cfg = base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"});
+    cfg.http_timeout = 10s;
+    cfg.reconcile_rps = 1;
+    cfg.reconcile_burst = 1;
+    cfg.policy.failover_after = 1;
+    auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), {});
+
+    std::optional<RpcOutcome> call_out;
+    std::optional<RpcOutcome> paced_out;
+    net::co_spawn(
+        ioc,
+        [&]() -> net::awaitable<void> {
+            call_out = co_await pool->call(get_logs_request());
+        },
+        net::detached);
+    // Exhaust burst with one request on H2, then queue a second call_to on H2 that must wait ~1s on token-bucket timer
+    CHECK(run_sync(ioc, pool->call_to("H2", get_logs_request())).ok);
+    ioc.restart();
+    net::co_spawn(
+        ioc,
+        [&]() -> net::awaitable<void> {
+            paced_out = co_await pool->call_to("H2", get_logs_request());
+        },
+        net::detached);
+
+    REQUIRE(run_until(ioc, [&] { return h1.requests() == 1 && pool->throttled_total("H2") == 1; }, 2s));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    pool->stop();
+    REQUIRE(run_until(ioc, [&] { return call_out.has_value() && paced_out.has_value(); }, 200ms));
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    CHECK(elapsed < 200ms);
+    CHECK_FALSE(call_out->ok);
+    CHECK(call_out->error == "pool stopped");
+    CHECK_FALSE(paced_out->ok);
+    CHECK(paced_out->error == "pool stopped");
+    // Cancellation on stop must not mutate breaker state or fail over to H2
+    CHECK(pool->state("H1") == State::Up);
+    CHECK(h2.requests() == 1);
+}
