@@ -131,8 +131,8 @@ See plan 60 "results and deviations".
 - [x] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
 
 ### ⬜ 5-E Alert engine + transport + dead-man (§5.3)
-- [ ] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.
-- [ ] **E2 `src/ops/alert_sender`:** exact JSON schema and `X-API-Key`; 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`; token and URL never in logs.
+- [x] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.
+- [x] **E2 `src/ops/alert_sender`:** exact JSON schema and `X-API-Key`; 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`; token and URL never in logs.
 - [ ] **E3 `src/ops/deadman`:** pings only when leader and healthy (§5.3.2); 10 s timeout; failures counted; empty URL → `"deadman":"disabled"` in `/readyz`.
 - [ ] **E4 Tests:** every row of §5.3.3 by kind (one Provider Failover → exactly 1 POST, none on the next tick); transport schema, header, retry count, failure metric, token absent from captured logs; dead-man leader / standby / saturated cases.
 
