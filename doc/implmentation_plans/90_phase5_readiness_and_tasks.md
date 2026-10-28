@@ -154,14 +154,14 @@ See plan 60 "results and deviations".
 - [x] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
 - [x] **Accept:** `make prod-image` succeeds and `--version` runs in the image.
 
-### ⬜ 5-H.5 Pre-Chaos & Pre-Shadow Hardening (Stage 3: between `5-H` and `5-I`)
-- [ ] **[P0-2] Coroutine & socket teardown (`ProviderPool::stop()` + `Deadman`):** Cancel `call_to` timers / close `HttpRpcClient` on `stop()`, and hold shared state in `Deadman::tick()` so leadership demotion and shutdown (`kShutdownGrace = 300 ms`) cannot use-after-free or leak sockets into the next term.
-- [ ] **[P0-1] & [P1-2] Catch-up behavior (`PoolLogSource` + `PendingBuffer`):**
-  - Skip `PendingBuffer::reconcile` (`ws_missed_total_` increments) for historical blocks below the first WS head seen in the term (prevents false `WS Missed Logs` alerts during `CatchingUp`).
-  - Avoid stalling `safe_step` / `final_step` on the 2 RPS `call_to` bucket when a historical catch-up page has many distinct blocks (e.g. cache verified block metadata across sweeps or separate primary vs. reconcile pacing).
-- [ ] **[P1-1] & [P1-4] Pipeline edge cases (`FinalityGate` + `Sweeper` / `emit.lua`):**
-  - `FinalityGate`: check cross-provider safe regression (`G_s < C_s`) / same-height hash mismatch across provider failovers.
-  - `Sweeper`: record Layer-1 dedup (`recent_.admit`) after `sink_.emit()` / clear on retry, and verify `BELOW_FINALIZED` handling in `emit.lua`.
+### ✅ 5-H.5 Pre-Chaos & Pre-Shadow Hardening (Stage 3: between `5-H` and `5-I`, done 2026-10-28, see plan 60 "5-H.5")
+- [x] **[P0-2] Coroutine & socket teardown (`ProviderPool::stop()` + `Deadman`):** Cancel `call_to` timers / close `HttpRpcClient` on `stop()`, and hold shared state in `Deadman::tick()` so leadership demotion and shutdown (`kShutdownGrace = 300 ms`) cannot use-after-free or leak sockets into the next term.
+- [x] **[P0-1] & [P1-2] Catch-up behavior (`PoolLogSource` + `PendingBuffer`):**
+  - Skip `PendingBuffer::reconcile` (`ws_missed_total_` increments) for historical blocks below the live watermark (`ws_live_from_block = c_s + 1` latched on first `Live` transition) in the term (prevents false `WS Missed Logs` alerts during `CatchingUp`).
+  - Avoid stalling `safe_step` / `final_step` on the 2 RPS `call_to` bucket when a historical catch-up page has many distinct blocks (bounded 4,096-entry verified-block cache in `PoolLogSource::block()` cleared on reorg / ring resync / WS failover).
+- [x] **[P1-1] & [P1-4] Pipeline edge cases (`FinalityGate` + `Sweeper` / `emit.lua`):**
+  - `FinalityGate`: check cross-provider same-height hash mismatch across provider failovers (`SafeHashMismatch` on `on_safe`, `FinalizedAnomaly` on `on_finalized`).
+  - `Sweeper`: verified Layer-1 dedup (`recent_.admit`) runs only after `fetch_page()` and `released_range()` succeed immediately before `sink_.emit()`, and verified `BELOW_FINALIZED` handling in `emit.lua`.
 
 ### ⬜ 5-I Chaos / end-to-end (§Tests)
 - [ ] toxiproxy on provider and Redis links → recovery with an exact stream.
@@ -198,7 +198,7 @@ graph LR
   D2 --> F["5-F metrics/readyz ✅"]
   D2 --> G["5-G tools (Stage 2) ✅"]
   B --> H["5-H image/railway (Stage 2) ✅"]
-  E --> H5["5-H.5 hardening (Stage 3)"]
+  E --> H5["5-H.5 hardening (Stage 3) ✅"]
   F --> H5
   G --> H5
   H --> H5
