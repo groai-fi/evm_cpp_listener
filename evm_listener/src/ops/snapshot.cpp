@@ -58,12 +58,17 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
     s.c_f = d.c_f;
     s.frozen = d.frozen;
     s.frozen_reason = d.frozen_reason;
-    if (d.stalled) s.stalled_detail = d.stall_detail;
+    if (d.stalled) {
+        s.stalled_detail = d.stall_detail;
+        s.stalled_provider = in.getlogs_provider;
+    }
     s.sink_saturated = in.sink_saturated;
     s.spill_bytes = in.sink.spill_bytes;
     s.spill_max_bytes = in.spill_max_bytes;
     s.oldest_record_age_s = in.sink.oldest_record_age_s;
     s.safe_late_total = in.safe_late_total;
+    s.safe_late_last_block = in.safe_late_last_block;
+    s.safe_late_provider = in.getlogs_provider;
 
     for (const auto& c : in.consumers) {
         if (c.probed_at_ms == 0) continue;  // never probed: nothing to judge yet
@@ -78,6 +83,8 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         f.lag = c.lag ? static_cast<std::int64_t>(*c.lag) : -1;
         f.retention_s = in.retention_s;
         f.trimmed_unread = c.trimmed_unread;
+        f.last_delivered_id = c.last_delivered_id;
+        f.max_deleted_id = c.max_deleted_id;
         s.consumers.push_back(std::move(f));
     }
 
@@ -126,6 +133,7 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         if (cur.ws_missed > prev_->ws_missed) {
             AlertEvent e;
             e.kind = AlertEvent::Kind::WsMissedLogs;
+            e.subject = in.ws_provider.empty() ? "ws" : in.ws_provider;
             e.message = "the sweep found logs the WS stream never delivered";
             e.details = {{"new_missed", cur.ws_missed - prev_->ws_missed},
                          {"total", cur.ws_missed},

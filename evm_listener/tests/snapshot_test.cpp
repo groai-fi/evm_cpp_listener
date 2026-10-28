@@ -69,13 +69,18 @@ TEST_CASE("snapshot: a leader's driver, sink and ring facts are copied", "[snaps
     CHECK(s.events.empty());
 }
 
-TEST_CASE("snapshot: stalled_detail is set only while the driver reports a stalled sweep", "[snapshot]") {
+TEST_CASE("snapshot: stalled_detail and stalled_provider are set only while the driver reports a stalled sweep", "[snapshot]") {
     SnapshotBuilder b;
     auto in = leader_inputs();
+    in.getlogs_provider = "infura";
     in.driver.stall_detail = "old detail";
-    CHECK(b.build(in).stalled_detail.empty());  // not stalled: a leftover detail is not reported
+    const auto s0 = b.build(in);
+    CHECK(s0.stalled_detail.empty());  // not stalled: a leftover detail is not reported
+    CHECK(s0.stalled_provider.empty());
     in.driver.stalled = true;
-    CHECK(b.build(in).stalled_detail == "old detail");
+    const auto s1 = b.build(in);
+    CHECK(s1.stalled_detail == "old detail");
+    CHECK(s1.stalled_provider == "infura");
 }
 
 TEST_CASE("snapshot: a standby carries no leader facts but still delivers queued events once", "[snapshot]") {
@@ -124,6 +129,7 @@ TEST_CASE("snapshot: counter increases become one event each; the first leader b
     CHECK(inv->details.at("new_refusals").as_uint64() == 3);
     const auto* miss = find(s, AlertEvent::Kind::WsMissedLogs);
     REQUIRE(miss);
+    CHECK(miss->subject == "alchemy");
     CHECK(miss->details.at("new_missed").as_uint64() == 1);
     CHECK(miss->details.at("provider").as_string() == "alchemy");
 

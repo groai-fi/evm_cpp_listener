@@ -280,6 +280,7 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
         if (safe_class) {
             ev.finality = core::Finality::Finalized;  // it is final now; no `released` record needed
             ++stats_.late;
+            stats_.last_late_block = ev.block_number;
         }
         sink_.emit(make_emission(ev, std::nullopt)); // Finalized logs bypass released tracking
         ++stats_.emitted_final;

@@ -145,7 +145,9 @@ std::optional<StartupReport> await_redis_ready(const std::string& redis_url, con
         try {
             sw::redis::Redis redis(copts, pool);
             // Verify server response and evaluate version/config constraints.
-            return evaluate_startup(gather(redis), opts.require_noeviction);
+            auto rep = evaluate_startup(gather(redis), opts.require_noeviction);
+            rep.address_family = address_family(copts.host, copts.port);
+            return rep;
         } catch (const StartupFatal&) {
             throw;
         } catch (const sw::redis::ReplyError& e) {

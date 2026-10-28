@@ -1388,11 +1388,19 @@ TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreac
     server.epoch = "1|hostA|n1";
 
     int sleeps = 0;
+    int waiting_calls = 0;
+    int reachable_calls = 0;
     AcquireOptions o;
     o.host_id = "hostB";
     o.ttl_ms = 15000;
     o.probe_min = milliseconds(0);
     o.probe_max = milliseconds(0);
+    o.on_waiting = [&](const std::string& err, milliseconds waited) {
+        CHECK_FALSE(err.empty());
+        CHECK(waited >= milliseconds(0));
+        ++waiting_calls;
+    };
+    o.on_reachable = [&] { ++reachable_calls; };
     o.sleep = [&](milliseconds) {
         if (++sleeps == 2) conn.down = true;
     };
@@ -1400,6 +1408,8 @@ TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreac
 
     CHECK_FALSE(acquire_lease_blocking(conn, keys, o).has_value());
     CHECK(sleeps == 4);
+    CHECK(reachable_calls == 2);  // the first two polls reached Redis while hostA held the lease
+    CHECK(waiting_calls == 2);    // the next two polls hit ConnError
 
     AcquireOptions bad;
     bad.host_id = "";

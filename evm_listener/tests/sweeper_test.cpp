@@ -355,6 +355,7 @@ TEST_CASE("sweep: a safe-class log the safe sweep missed is emitted late as fina
     CHECK(field(r.sink.emitted[0], "type") == "log");
     CHECK_FALSE(r.sink.emitted[0].released_block.has_value());
     CHECK(r.sw->stats().late == 1);
+    CHECK(r.sw->stats().last_late_block == 105);
 }
 
 TEST_CASE("sweep: a released safe log that is no longer canonical is reverted and replaced", "[unit][sweep]") {

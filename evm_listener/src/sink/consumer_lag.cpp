@@ -39,6 +39,8 @@ ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const Group
         return out;
     }
     out.lag = f.lag;
+    out.last_delivered_id = f.last_delivered_id;
+    out.max_deleted_id = f.max_deleted_id;
     // Calculate waiting age in seconds from entry arrival timestamp in Redis.
     if (f.first_undelivered_id) out.undelivered_age_s = age_s(*f.first_undelivered_id, f.now_ms);
     if (f.smallest_pending_id) out.pending_age_s = age_s(*f.smallest_pending_id, f.now_ms);

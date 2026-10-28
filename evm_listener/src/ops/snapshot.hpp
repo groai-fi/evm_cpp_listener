@@ -41,8 +41,9 @@ struct SnapshotInputs {
     bool sink_saturated{false};
     std::uint64_t spill_max_bytes{0};
     std::uint64_t retention_s{0};
-    std::uint64_t safe_late_total{0};   // SweepStats::late
-    std::uint64_t ws_missed_total{0};   // host counter of WS logs the sweep found and the WS missed
+    std::uint64_t safe_late_total{0};       // SweepStats::late
+    std::uint64_t safe_late_last_block{0};  // SweepStats::last_late_block
+    std::uint64_t ws_missed_total{0};       // host counter of WS logs the sweep found and the WS missed
     std::vector<sink::ConsumerLag> consumers;
     std::optional<std::uint32_t> ms_since_head;  // ProviderPool::ms_since_head()
     std::string ws_provider;                     // active WS provider; empty = none

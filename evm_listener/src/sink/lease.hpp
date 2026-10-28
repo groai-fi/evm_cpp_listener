@@ -47,6 +47,10 @@ struct AcquireOptions {
     std::function<bool()> stop;                           // true = give up (shutdown)
     std::function<void(std::chrono::milliseconds)> sleep;  // empty = std::this_thread::sleep_for; tests inject
     std::function<std::string()> nonce;                   // empty = random 128-bit hex
+    // Optional reachability callbacks while in standby: `on_waiting(error, waited)` fires on each ConnError with elapsed
+    // wait since the first consecutive failure; `on_reachable()` fires when Redis responds (lease acquired or held).
+    std::function<void(const std::string& error, std::chrono::milliseconds waited)> on_waiting;
+    std::function<void()> on_reachable;
 };
 
 // The standby loop: asks until it gets a token. Returns nullopt only when `stop` fired. The standby never writes.

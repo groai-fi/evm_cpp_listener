@@ -46,6 +46,7 @@ struct StartupReport {
     // A verified violation: a policy other than noeviction (only reachable with require_noeviction off) or
     // appendonly "no". A refused CONFIG GET is not one (config_denied says it could not be checked).
     bool misconfigured{false};
+    std::string address_family;  // "ipv6", "ipv4", "other" or "unresolved" (set by await_redis_ready)
 };
 
 // The decision table of plan 4.3, with no I/O. Throws StartupFatal for: redis_version < 7.0 (the Lua scripts use the

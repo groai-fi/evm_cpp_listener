@@ -50,6 +50,7 @@ struct SweepStats {
     std::uint64_t deduped{0};          // skipped by the in-process layer
     std::uint64_t reverts{0};
     std::uint64_t late{0};             // safe-class logs the safe sweep missed (safe_missed_total)
+    std::uint64_t last_late_block{0};  // block number of the latest safe-class log the safe sweep missed
     std::uint64_t matched{0};
     std::uint64_t inconsistent{0};     // discarded responses (provider_inconsistency_total)
     std::uint64_t range_shrinks{0};    // RangeTooLarge

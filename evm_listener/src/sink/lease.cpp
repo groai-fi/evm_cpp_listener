@@ -99,17 +99,21 @@ std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& ke
     std::mt19937_64 rng{std::random_device{}()};
     std::uint32_t failures = 0;
     bool announced_standby = false;
+    std::optional<std::chrono::steady_clock::time_point> wait_since;
 
     while (!(opts.stop && opts.stop())) {
         try {
             // Generate random 128-bit hex nonce for lease fencing token generation.
             const std::string nonce = opts.nonce ? opts.nonce() : random_nonce();
             if (auto grant = try_acquire_lease(conn, keys, opts.host_id, nonce, opts.ttl_ms)) {
+                if (opts.on_reachable) opts.on_reachable();
                 // Successfully acquired lease; host transitions from standby to active leader.
                 core::log::info("lease", "lease acquired", {{"host", opts.host_id}});
                 return grant;
             }
             failures = 0;
+            wait_since.reset();
+            if (opts.on_reachable) opts.on_reachable();
             if (!announced_standby) {
                 // Another active leader currently holds lease; enter polling standby loop.
                 core::log::info("lease", "another host holds the lease: standby", {{"host", opts.host_id}});
@@ -117,6 +121,10 @@ std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& ke
             }
             sleep(opts.poll);
         } catch (const ConnError& e) {
+            const auto now = std::chrono::steady_clock::now();
+            if (!wait_since) wait_since = now;
+            if (opts.on_waiting)
+                opts.on_waiting(e.what(), std::chrono::duration_cast<std::chrono::milliseconds>(now - *wait_since));
             core::log::warn("lease", "lease acquire failed, redis unreachable", {{"error", e.what()}});
             // Exponential backoff with random jitter on Redis network disconnects.
             const auto ceiling = std::min<std::chrono::milliseconds::rep>(

@@ -55,6 +55,8 @@ struct ConsumerLag {
     std::uint64_t pending_age_s{0};         // age of the oldest delivered-but-unacked entry; 0 if none
     std::optional<std::uint64_t> lag;       // entry count, for the metric only (nil when Redis cannot compute it)
     bool trimmed_unread{false};             // entries were trimmed before this group read or acked them: data loss happened
+    std::string last_delivered_id;          // XINFO GROUPS last-delivered-id
+    std::string max_deleted_id;             // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
     std::uint64_t probed_at_ms{0};          // listener wall clock when the probe ran (set by the sink): age of this snapshot
 };
 
