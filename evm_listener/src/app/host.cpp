@@ -17,6 +17,7 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/json.hpp>
 
 #include "app/pool_config.hpp"
 #include "app/pool_log_source.hpp"
@@ -115,6 +116,8 @@ private:
     net::awaitable<void> walk_fork(std::uint64_t epoch, HeadEvent e);
     void resync_ring(const chain::BlockRef& head, const std::string& why);
     void bump_head_epoch();
+    // plan 4.7: the payload the sink writes as `hb:<host_id>` every [ops].heartbeat_s. io thread.
+    void publish_heartbeat(const pipeline::DriverStatus& st);
     // WS logs -> PendingBuffer, and the per-page cross-check against the sweep (plan 3.4, G3). io thread.
     void on_ws_log(const rpc::Log& log, const std::string& provider);
     void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs);
@@ -152,6 +155,7 @@ private:
     bool walking_{false};
     std::optional<HeadEvent> deferred_head_;
     std::uint64_t head_epoch_{0};
+    std::chrono::steady_clock::time_point next_heartbeat_{};  // io thread; reset per term so the first beat publishes
     std::uint64_t ws_missed_total_{0};  // io thread; metrics export is 5-F
     std::uint64_t ws_extra_total_{0};
     bool finished_{false};
@@ -326,6 +330,11 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
 
         auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, token);
         sopts.loop_beat = wd_.sink_beat_slot();
+        sopts.host_id = cfg_.shard.host_id;
+        sopts.heartbeat_ms = cfg_.ops.heartbeat_s * 1000;
+        // The key must outlive a few missed writes (the sink rejects a TTL <= the interval).
+        sopts.heartbeat_ttl_s = std::max<std::uint32_t>(sopts.heartbeat_ttl_s, cfg_.ops.heartbeat_s * 3);
+        next_heartbeat_ = {};
         rt_->sink = std::make_unique<sink::RedisSink>(std::move(sopts), rt_->keys,
                                                       std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys),
                                                       std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys));
@@ -588,6 +597,30 @@ void Host::schedule_beat() {
     });
 }
 
+void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_heartbeat_) return;
+    next_heartbeat_ = now + std::chrono::seconds(cfg_.ops.heartbeat_s);
+    // null = not known yet (no gate read, empty head ring, no healthy getLogs provider). `epoch_n` of plan 4.7 is
+    // left out: the sink has no epoch read yet (5-E).
+    const auto opt_u64 = [](const std::optional<std::uint64_t>& v) {
+        return v ? boost::json::value(*v) : boost::json::value(nullptr);
+    };
+    const auto provider = rt_->pool->current_getlogs();
+    boost::json::object o;
+    o["ts"] = wall_ms();
+    o["role"] = "leader";
+    o["state"] = pipeline::to_string(st.state);
+    o["head"] = opt_u64(rt_->ring.top());
+    o["G_s"] = opt_u64(st.g_s);
+    o["G_f"] = opt_u64(st.g_f);
+    o["C_s"] = st.c_s;
+    o["C_f"] = st.c_f;
+    o["active_provider"] = provider ? boost::json::value(*provider) : boost::json::value(nullptr);
+    o["version"] = core::version_string();
+    rt_->sink->set_heartbeat(boost::json::serialize(o));
+}
+
 void Host::on_beat() {
     wd_.beat_io();
     ops::Watchdog::State s;
@@ -608,6 +641,7 @@ void Host::on_beat() {
                        {"c_f", std::to_string(st.c_f)}});
             last_state_ = st.state;
         }
+        publish_heartbeat(st);
         if (opt_.on_status) opt_.on_status(st);
     }
     wd_.publish_state(s);
