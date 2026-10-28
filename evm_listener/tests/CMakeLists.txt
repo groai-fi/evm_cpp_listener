@@ -41,6 +41,8 @@ add_executable(evml_tests
     consumer_lag_test.cpp
     watchdog_test.cpp
     metrics_test.cpp
+    alert_sender_test.cpp
+    alerts_test.cpp
     ops_http_server_test.cpp
     http_client_test.cpp
     host_test.cpp

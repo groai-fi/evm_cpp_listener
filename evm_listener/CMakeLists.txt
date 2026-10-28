@@ -115,6 +115,8 @@ add_library(evml_core STATIC
     src/ops/metrics.cpp
     src/ops/ops_http_server.cpp
     src/ops/http_client.cpp
+    src/ops/alert_sender.cpp
+    src/ops/alerts.cpp
 )
 target_include_directories(evml_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
