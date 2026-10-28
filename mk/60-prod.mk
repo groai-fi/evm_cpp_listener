@@ -10,8 +10,8 @@ prod-build: ## Build project in stripped Release mode (-O3, no sanitizers)
 
 .PHONY: prod-image
 prod-image: ## Build minimal production Docker image (~80MB Debian slim)
-	@echo "$(GREEN)==> Building production Docker image ($(PROD_IMAGE_TAG))...$(RESET)"
-	docker build -f docker/Dockerfile.prod -t $(PROD_IMAGE_TAG) --build-arg VERSION=$(GIT_DESC) .
+	@echo "$(GREEN)==> Building production Docker image ($(PROD_IMAGE_TAG), evm-listener:prod)...$(RESET)"
+	docker build -f docker/Dockerfile.prod -t $(PROD_IMAGE_TAG) -t evm-listener:prod --build-arg VERSION=$(GIT_DESC) .
 
 .PHONY: prod-audit
 prod-audit: prod-image ## Audit production container (binary version and shared libraries)

@@ -39,6 +39,42 @@ services:
     depends_on:
       - redis
 
+  listener-a:
+    profiles: ["listeners"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.prod
+    image: evm-listener:prod
+    container_name: evm_cpp_listener_a
+    restart: always
+    env_file:
+      - path: ../evm_listener/.env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      EVML_HOST_ID: a
+    depends_on:
+      - redis
+      - toxiproxy
+
+  listener-b:
+    profiles: ["listeners"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.prod
+    image: evm-listener:prod
+    container_name: evm_cpp_listener_b
+    restart: always
+    env_file:
+      - path: ../evm_listener/.env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      EVML_HOST_ID: b
+    depends_on:
+      - redis
+      - toxiproxy
+
 volumes:
   redis-data:
   conan-cache:
