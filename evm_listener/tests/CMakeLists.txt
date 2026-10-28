@@ -43,6 +43,8 @@ add_executable(evml_tests
     metrics_test.cpp
     alert_sender_test.cpp
     alerts_test.cpp
+    deadman_test.cpp
+    snapshot_test.cpp
     ops_http_server_test.cpp
     http_client_test.cpp
     host_test.cpp
