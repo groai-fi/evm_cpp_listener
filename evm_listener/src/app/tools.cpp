@@ -8,6 +8,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <thread>
 #include <variant>
 
 #include <boost/asio/co_spawn.hpp>
@@ -18,14 +19,23 @@
 
 #include "app/host.hpp"
 #include "app/pool_config.hpp"
+#include "app/pool_log_source.hpp"
 #include "core/env.hpp"
 #include "core/error.hpp"
 #include "core/keccak.hpp"
 #include "core/log.hpp"
 #include "core/version.hpp"
+#include "pipeline/coverage.hpp"
+#include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
+#include "rpc/backoff.hpp"
 #include "rpc/blocking_http.hpp"
 #include "rpc/codec.hpp"
+#include "sink/keys.hpp"
+#include "sink/lease.hpp"
+#include "sink/redispp_conn.hpp"
+#include "sink/redis_sink.hpp"
+#include "sink/redis_startup.hpp"
 
 namespace evml::app {
 
@@ -311,21 +321,280 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     return st.ok ? kExitOk : kExitFailure;
 }
 
+int check_redis(const Config& cfg) {
+    const std::string redis_url = core::env::get(cfg.sink.redis_url_env);
+    if (redis_url.empty()) {
+        std::cerr << "FAIL  environment variable " << cfg.sink.redis_url_env << " is not set\n";
+        return kExitFailure;
+    }
+
+    bool failed = false;
+    std::string wait_error;
+    std::string wait_family;
+    sink::StartupOptions opts;
+    opts.require_noeviction = cfg.sink.require_noeviction;
+    opts.on_waiting = [&](const std::string& err, const std::string& fam, std::chrono::milliseconds) {
+        wait_error = err;
+        wait_family = fam;
+        failed = true;
+    };
+    opts.stop = [&] { return failed; };
+    opts.sleep = [](std::chrono::milliseconds) {};
+
+    try {
+        const auto rep = sink::await_redis_ready(redis_url, opts);
+        if (!rep) {
+            std::cerr << "FAIL  redis unreachable (address_family=" << wait_family << "): " << wait_error << "\n";
+            return kExitFailure;
+        }
+        std::cout << "ok    redis version=" << rep->version.major << "." << rep->version.minor << "." << rep->version.patch
+                  << " address_family=" << rep->address_family
+                  << " maxmemory_policy=" << (rep->maxmemory_policy.empty() ? "unknown" : rep->maxmemory_policy)
+                  << " appendonly=" << (rep->appendonly.empty() ? "unknown" : rep->appendonly) << "\n";
+        for (const auto& w : rep->warnings) std::cout << "warn  " << w << "\n";
+        return kExitOk;
+    } catch (const sink::StartupFatal& e) {
+        std::cerr << "FATAL " << e.what() << "\n";
+        return kExitFailure;
+    } catch (const std::exception& e) {
+        std::cerr << "FAIL  " << e.what() << "\n";
+        return kExitFailure;
+    }
+}
+
+namespace {
+
+Config single_contract_config(const Config& base, const core::ContractCfg& target, core::Finality finality) {
+    Config out = base;
+    core::ContractCfg one = target;
+    one.finality = finality;
+    out.contracts = {one};
+    out.routes.clear();
+    for (const auto& [k, v] : base.routes) {
+        if (k.address == target.address) {
+            core::EventRoute r = v;
+            r.finality = finality;
+            out.routes.emplace(k, std::move(r));
+        }
+    }
+    return out;
+}
+
+std::uint64_t wall_now_ms() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
+
+int backfill_contract(const Config& cfg, std::string_view contract_name, std::chrono::milliseconds lease_timeout) {
+    namespace net = boost::asio;
+    core::log::init("info");
+
+    const core::ContractCfg* target = nullptr;
+    for (const auto& c : cfg.contracts) {
+        if (c.name == contract_name) {
+            target = &c;
+            break;
+        }
+    }
+    if (!target) {
+        throw core::ConfigError("unknown contract '" + std::string(contract_name) + "'");
+    }
+
+    const std::string redis_url = core::env::get(cfg.sink.redis_url_env);
+    if (redis_url.empty()) {
+        std::cerr << "FAIL  environment variable " << cfg.sink.redis_url_env << " is not set\n";
+        return kExitFailure;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + lease_timeout;
+    const auto sleep_until_deadline = [&](std::chrono::milliseconds d) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < deadline) {
+            std::this_thread::sleep_for(std::min(d, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+        }
+    };
+
+    sink::StartupOptions so;
+    so.require_noeviction = cfg.sink.require_noeviction;
+    so.stop = [&] { return std::chrono::steady_clock::now() >= deadline; };
+    so.sleep = sleep_until_deadline;
+    try {
+        const auto rep = sink::await_redis_ready(redis_url, so);
+        if (!rep) {
+            std::cerr << "FAIL  redis unreachable within timeout\n";
+            return kExitFailure;
+        }
+    } catch (const sink::StartupFatal& e) {
+        std::cerr << "FATAL " << e.what() << "\n";
+        return kExitFailure;
+    }
+
+    const sink::Keys keys{cfg.shard.id};
+    std::string token;
+    if (cfg.lease.enabled) {
+        sink::RedisppConn conn(redis_url, keys);
+        sink::AcquireOptions ao;
+        ao.host_id = cfg.shard.host_id;
+        ao.ttl_ms = cfg.lease.ttl_ms;
+        ao.poll = std::min<std::chrono::milliseconds>(std::chrono::milliseconds(cfg.lease.renew_ms),
+                                                      std::chrono::milliseconds(250));
+        ao.stop = [&] { return std::chrono::steady_clock::now() >= deadline; };
+        ao.sleep = sleep_until_deadline;
+        const auto grant = sink::acquire_lease_blocking(conn, keys, ao);
+        if (!grant) {
+            std::cerr << "FAIL  could not acquire lease for shard " << cfg.shard.id
+                      << " within timeout (held by another host)\n";
+            return kExitFailure;
+        }
+        token = grant->token;
+    } else {
+        token = sink::lease_disabled_token();
+    }
+
+    auto sopts = sink::RedisSinkOptions::from_config(cfg.sink, cfg.lease, token);
+    sink::RedisSink sink(std::move(sopts), keys, std::make_unique<sink::RedisppConn>(redis_url, keys),
+                         std::make_unique<sink::RedisppConn>(redis_url, keys));
+    sink.start();
+
+    net::io_context ioc;
+    auto pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), {});
+    PoolLogSource source(pool, nullptr);
+
+    pipeline::SweeperOptions sw_opt;
+    sw_opt.min_range = cfg.backfill.min_range;
+    sw_opt.max_page_logs = std::max<std::size_t>(1, cfg.sink.queue_capacity / 2);
+    const pipeline::EventContext ectx{cfg.shard.id, cfg.shard.host_id, core::version_string()};
+
+    int rc = kExitOk;
+    std::optional<std::vector<std::string>> ck_contracts;
+
+    net::co_spawn(
+        ioc,
+        [&]() -> net::awaitable<void> {
+            const auto ck = co_await sink.load_checkpoint();
+            if (!ck || !ck->safe || !ck->finalized || !ck->contracts || *ck->finalized > *ck->safe) {
+                std::cerr << "FAIL  checkpoint is missing or incomplete in Redis\n";
+                rc = kExitFailure;
+                ioc.stop();
+                co_return;
+            }
+            ck_contracts = ck->contracts;
+            const std::uint64_t c_f = *ck->finalized;
+            const std::uint64_t c_s = *ck->safe;
+
+            const auto drive = [&](auto step_fn) -> net::awaitable<bool> {
+                rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
+                std::uint32_t retries = 0;
+                for (;;) {
+                    if (sink.mode() == sink::SinkMode::Fenced || sink.mode() == sink::SinkMode::Failed) {
+                        std::cerr << "FAIL  sink entered " << sink::to_string(sink.mode()) << " during backfill\n";
+                        co_return false;
+                    }
+                    const pipeline::StepResult r = co_await step_fn();
+                    if (r.status == pipeline::StepStatus::NoWork) co_return true;
+                    if (r.status == pipeline::StepStatus::Advanced) {
+                        backoff.reset();
+                        retries = 0;
+                        continue;
+                    }
+                    if (r.status == pipeline::StepStatus::Stalled) {
+                        std::cerr << "FAIL  backfill stalled: " << r.detail << "\n";
+                        co_return false;
+                    }
+                    if (r.status == pipeline::StepStatus::Retry && ++retries > 10) {
+                        std::cerr << "FAIL  backfill exceeded retry limit: " << r.detail << "\n";
+                        co_return false;
+                    }
+                    net::steady_timer timer(ioc);
+                    timer.expires_after(r.status == pipeline::StepStatus::Paused ? std::chrono::milliseconds(100)
+                                                                                 : backoff.next());
+                    co_await timer.async_wait(net::use_awaitable);
+                }
+            };
+
+            if (target->start_block && *target->start_block <= c_s) {
+                const std::uint64_t start = *target->start_block;
+                const std::uint64_t start_cursor = start > 0 ? start - 1 : 0;
+                if (start <= c_f) {
+                    const auto final_cfg = single_contract_config(cfg, *target, core::Finality::Finalized);
+                    pipeline::Sweeper sw(final_cfg, ectx, source, sink, wall_now_ms, sw_opt);
+                    sw.set_cursors(c_f, start_cursor);
+                    if (!(co_await drive([&] { return sw.final_step(c_f); }))) {
+                        rc = kExitFailure;
+                        ioc.stop();
+                        co_return;
+                    }
+                }
+                if (target->finality == core::Finality::Safe && c_s > c_f) {
+                    const std::uint64_t safe_cursor = std::max<std::uint64_t>(start_cursor, c_f);
+                    if (safe_cursor < c_s) {
+                        const auto safe_cfg = single_contract_config(cfg, *target, core::Finality::Safe);
+                        pipeline::Sweeper sw(safe_cfg, ectx, source, sink, wall_now_ms, sw_opt);
+                        sw.set_cursors(safe_cursor, c_f);
+                        if (!(co_await drive([&] { return sw.safe_step(c_s); }))) {
+                            rc = kExitFailure;
+                            ioc.stop();
+                            co_return;
+                        }
+                    }
+                }
+            }
+            ioc.stop();
+        },
+        net::detached);
+    ioc.run();
+
+    if (rc != kExitOk || !ck_contracts) {
+        sink.drain(std::chrono::seconds(5));
+        return kExitFailure;
+    }
+
+    // Update the manifest only after the last page is acknowledged (§5.6a).
+    if (!sink.wait_idle(std::chrono::seconds(30)) || sink.mode() != sink::SinkMode::Connected) {
+        std::cerr << "FAIL  sink did not acknowledge backfill emissions\n";
+        sink.drain(std::chrono::seconds(5));
+        return kExitFailure;
+    }
+
+    std::vector<std::string> updated = *ck_contracts;
+    const std::string prefix = target->address.to_hex() + ":";
+    updated.erase(
+        std::remove_if(updated.begin(), updated.end(), [&](const std::string& e) { return e.rfind(prefix, 0) == 0; }),
+        updated.end());
+    const auto one_manifest = pipeline::contract_manifest(single_contract_config(cfg, *target, target->finality));
+    updated.insert(updated.end(), one_manifest.begin(), one_manifest.end());
+    std::sort(updated.begin(), updated.end());
+    sink.set_contracts(std::move(updated));
+
+    const auto drained = sink.drain(std::chrono::seconds(25));
+    if (!drained.flushed || sink.mode() != sink::SinkMode::Connected) {
+        std::cerr << "FAIL  sink failed to flush updated contract manifest\n";
+        return kExitFailure;
+    }
+
+    std::cout << "ok    backfilled " << target->name << "\n";
+    return kExitOk;
+}
+
 /// @brief Command-line interface dispatcher for offline audits and pre-flight probes.
 int run_cli(int argc, char** argv) {
     const auto usage = [] {
         std::cerr << "usage: evm_listener --version\n"
                      "       evm_listener --config <file>                        (run the listener)\n"
                      "       evm_listener --config <file> --check-config\n"
+                     "       evm_listener --config <file> --check-redis\n"
                      "       evm_listener --config <file> --find-deploy-block <address>\n"
-                     "       evm_listener --config <file> --probe-transport <seconds>\n";
+                     "       evm_listener --config <file> --probe-transport <seconds>\n"
+                     "       evm_listener --config <file> --backfill-contract <name>\n";
         return kExitUsage;
     };
 
-    std::optional<std::string> config_path, find_addr;
+    std::optional<std::string> config_path, find_addr, backfill_name;
     std::optional<unsigned> probe_seconds;
     std::optional<std::chrono::seconds> freeze_io_after;  // test hook, see EVML_TEST_HOOKS
-    bool version = false, check = false;
+    bool version = false, check = false, check_redis_flag = false;
     // Parse command line arguments.
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -333,10 +602,15 @@ int run_cli(int argc, char** argv) {
             version = true;
         } else if (a == "--check-config") {
             check = true;
+        } else if (a == "--check-redis") {
+            check_redis_flag = true;
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
         } else if (a == "--find-deploy-block" && i + 1 < argc) {
             find_addr = argv[++i];
+        } else if (a == "--backfill-contract" && i + 1 < argc) {
+            backfill_name = argv[++i];
+            if (backfill_name->empty()) return usage();
         } else if (a == "--probe-transport" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v.empty() || v.size() > 4 || !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); })) {
@@ -361,8 +635,10 @@ int run_cli(int argc, char** argv) {
         std::cout << core::version_string() << '\n';
         return kExitOk;
     }
-    // The three tool actions are mutually exclusive; none of them means "run the listener".
-    const int actions = static_cast<int>(check) + static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value());
+    // The tool actions are mutually exclusive; none of them means "run the listener".
+    const int actions = static_cast<int>(check) + static_cast<int>(check_redis_flag) +
+                        static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value()) +
+                        static_cast<int>(backfill_name.has_value());
     if (actions > 1) return usage();
     if (!config_path) {
         std::cerr << "--config <file> is required\n";
@@ -378,7 +654,9 @@ int run_cli(int argc, char** argv) {
             print_config_summary(cfg);
             return check_config_online(cfg);
         }
+        if (check_redis_flag) return check_redis(cfg);
         if (probe_seconds) return probe_transport(cfg, *probe_seconds);
+        if (backfill_name) return backfill_contract(cfg, *backfill_name);
         if (!find_addr) return run_listener(cfg, freeze_io_after);
         const auto addr = Address20::from_hex(*find_addr);
         std::cout << find_deploy_block(cfg, addr) << "\n";

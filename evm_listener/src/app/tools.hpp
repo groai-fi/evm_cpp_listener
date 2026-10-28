@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include "core/config.hpp"
 #include "core/hex.hpp"
@@ -57,6 +59,26 @@ std::uint64_t find_deploy_block(const core::Config& cfg, const core::Address20& 
 /// @param seconds Duration in seconds to run the live probe.
 /// @return kExitOk if heads were streamed and all verification queries succeeded; otherwise kExitFailure.
 int probe_transport(const core::Config& cfg, unsigned seconds);
+
+/// @brief Connects to Redis, runs the §4.3 startup checks, and prints the resolved address family.
+///
+/// @param cfg Validated core configuration.
+/// @return kExitOk if Redis is reachable and startup checks pass; otherwise kExitFailure.
+int check_redis(const core::Config& cfg);
+
+/// @brief Backfills a single contract's historical events up to the stored Redis checkpoint and updates the manifest (§5.6a, D8).
+///
+/// When `[lease].enabled = true`, acquires the shard lease (blocking up to `lease_timeout`), runs fenced, and releases
+/// the lease on completion. Emits `[start_block, C_f]` at `finality=finalized`, and for safe-class contracts emits
+/// `(C_f, C_s]` at `finality=safe` (tracked in `released`). Updates `ckpt.contracts` only after the last page is acked.
+///
+/// @param cfg Validated core configuration.
+/// @param contract_name Name of the contract in `cfg.contracts` to backfill.
+/// @param lease_timeout Maximum time to wait for the shard lease before exiting with kExitFailure (default 60 s).
+/// @return kExitOk on success, or kExitFailure on lease timeout, missing checkpoint, or sweep stall.
+/// @throws core::ConfigError If `contract_name` is not in `cfg.contracts`.
+int backfill_contract(const core::Config& cfg, std::string_view contract_name,
+                      std::chrono::milliseconds lease_timeout = std::chrono::seconds(60));
 
 /// @brief Primary command-line interface entry point invoked from `main()`.
 ///

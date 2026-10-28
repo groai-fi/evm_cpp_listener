@@ -1385,3 +1385,159 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
         CHECK(h.exit_code.load() == 0);
     }
 }
+
+// ---- 5-G: operator tools (--check-redis and --backfill-contract with D8 lease fencing) ----
+
+TEST_CASE("tools: --check-redis prints address_family and startup check results, and exits 1 when unreachable",
+          "[integration][tools]") {
+    using Catch::Matchers::ContainsSubstring;
+    const auto cfg = evml::test::load_base_config();
+
+    std::ostringstream captured;
+    auto* old_cout = std::cout.rdbuf(captured.rdbuf());
+    const int rc_ok = evml::app::check_redis(cfg);
+    std::cout.rdbuf(old_cout);
+
+    CHECK(rc_ok == evml::app::kExitOk);
+    CHECK_THAT(captured.str(), ContainsSubstring("address_family=ipv"));
+    CHECK_THAT(captured.str(), ContainsSubstring("maxmemory_policy=noeviction"));
+
+    // Unreachable Redis fails fast on the first attempt and exits 1.
+    ScopedEnv env;
+    env.set("EVML_TEST_DEAD_REDIS_URL", "redis://127.0.0.1:9");
+    auto bad_cfg = cfg;
+    bad_cfg.sink.redis_url_env = "EVML_TEST_DEAD_REDIS_URL";
+    CHECK(evml::app::check_redis(bad_cfg) == evml::app::kExitFailure);
+}
+
+TEST_CASE("tools: --backfill-contract emits finalized below C_f and safe/released in C_f..C_s, updates manifest, is idempotent, and enforces D8 lease fencing",
+          "[integration][tools]") {
+    evml::core::log::init("info");
+    const std::string shard = "host_backfill_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-backfill-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns;
+    ns.safe = c0 + 300;
+    ns.finalized = c0 + 250;
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+
+    // 1. Cold-start the listener with the base contracts so Redis has ckpt {safe=c0+300, finalized=c0+250, contracts}.
+    const std::string base_toml = host_toml(shard, spill, node.url(), 30000, true, 10000, 500);
+    {
+        auto cfg1 = evml::core::Config::parse(base_toml, "bf_init.toml", provider_env(node.url(), "hostA"));
+        RunningHost h(std::move(cfg1));
+        h.start();
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE_FALSE(h.threw.load());
+        h.finish();
+        CHECK(h.exit_code.load() == 0);
+    }
+
+    // 2. Add a new safe-class contract with start_block = c0 + 100 (<= C_s = c0 + 300).
+    const std::string extra_addr = "0x1111111111111111111111111111111111111111";
+    std::string expanded_toml = base_toml + R"toml(
+[[contracts]]
+name        = "backfill_pool"
+address     = ")toml" + extra_addr + R"toml("
+finality    = "safe"
+stream      = "events"
+start_block = )toml" + std::to_string(c0 + 100) + R"toml(
+events = [
+  "Swap(address,address,int256,int256,uint160,uint128,int24)",
+]
+)toml";
+    auto cfg2 = evml::core::Config::parse(expanded_toml, "bf_expanded.toml", provider_env(node.url(), "hostA"));
+    const evml::core::ContractCfg* bf_contract = nullptr;
+    for (const auto& c : cfg2.contracts) {
+        if (c.name == "backfill_pool") bf_contract = &c;
+    }
+    REQUIRE(bf_contract != nullptr);
+
+    // Starting the host before backfilling exits 2 (uncovered contract).
+    {
+        RunningHost h(cfg2);
+        h.start();
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.exit_code.load() != -1 || h.threw.load(); }, 15s));
+        h.finish();
+        CHECK(h.exit_code.load() == evml::app::kExitUsage);
+    }
+
+    // Seed two logs for `backfill_pool`: one at c0 + 200 (<= C_f) and one at c0 + 280 (in (C_f, C_s]).
+    const auto mk_bf_log = [&](std::uint64_t n) {
+        const std::string bh = hx('a', n);
+        ns.blocks[n] = head_json(n, bh, hx('a', n - 1));
+        return R"({"address":")" + bf_contract->address.to_hex() + R"(","topics":[")" +
+               bf_contract->topics.at(0).to_hex() + R"("],"data":"0x","blockNumber":")" + evml::core::to_hex_u64(n) +
+               R"(","blockHash":")" + bh + R"(","transactionHash":"0x)" + std::string(64, 'd') +
+               R"(","transactionIndex":"0x0","logIndex":"0x0","removed":false})";
+    };
+    ns.logs = {{c0 + 200, mk_bf_log(c0 + 200)}, {c0 + 280, mk_bf_log(c0 + 280)}};
+
+    sw::redis::Redis admin{require_env("REDIS_URL")};
+    const evml::sink::Keys keys{shard};
+
+    // 3. D8: while another host holds the lease, --backfill-contract exits 1 within timeout and writes nothing.
+    admin.set(keys.leader(), "9|other-host|nonce9", 30s);
+    admin.set(keys.epoch(), "9|other-host|nonce9");
+    {
+        std::atomic<int> bf_rc{-1};
+        std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 600ms); });
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 5s));
+        t.join();
+        CHECK(bf_rc.load() == evml::app::kExitFailure);
+        CHECK(admin.xlen(keys.stream(evml::core::StreamKind::Events)) == 0);
+    }
+    admin.del(keys.leader());  // free the lease
+
+    // 4. With the lease free, --backfill-contract acquires the lease, emits [start_block, C_f] as finalized and
+    // (C_f, C_s] as safe (tracked in released), updates ckpt.contracts, and releases the lease on completion.
+    {
+        std::atomic<int> bf_rc{-1};
+        std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 10s); });
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
+        t.join();
+        REQUIRE(bf_rc.load() == evml::app::kExitOk);
+    }
+    CHECK(admin.exists(keys.leader()) == 0);  // lease released at the end
+    CHECK(admin.exists(keys.epoch()) == 1);
+
+    using StreamEntry = std::pair<std::string, std::unordered_map<std::string, std::string>>;
+    std::vector<StreamEntry> entries;
+    admin.xrange(keys.stream(evml::core::StreamKind::Events), "-", "+", std::back_inserter(entries));
+    REQUIRE(entries.size() == 2);
+    CHECK(entries[0].second.at("contract") == "backfill_pool");
+    CHECK(std::stoull(entries[0].second.at("block_number")) == c0 + 200);
+    CHECK(entries[0].second.at("finality") == "finalized");
+    CHECK(entries[1].second.at("contract") == "backfill_pool");
+    CHECK(std::stoull(entries[1].second.at("block_number")) == c0 + 280);
+    CHECK(entries[1].second.at("finality") == "safe");
+
+    // Only the safe-window event (c0 + 280) is tracked in `released`.
+    std::vector<std::string> rel_members;
+    admin.zrangebyscore(keys.released(), sw::redis::UnboundedInterval<double>{}, std::back_inserter(rel_members));
+    REQUIRE(rel_members.size() == 1);
+    CHECK(rel_members[0] == entries[1].second.at("event_id"));
+
+    // 5. Running --backfill-contract a second time adds 0 entries (idempotent via dedup).
+    {
+        std::atomic<int> bf_rc{-1};
+        std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 10s); });
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
+        t.join();
+        REQUIRE(bf_rc.load() == evml::app::kExitOk);
+    }
+    CHECK(admin.xlen(keys.stream(evml::core::StreamKind::Events)) == 2);
+
+    // 6. The next host startup with the expanded config now passes coverage and reaches Live.
+    {
+        RunningHost h(cfg2);
+        h.start();
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE_FALSE(h.threw.load());
+        h.finish();
+        CHECK(h.exit_code.load() == 0);
+    }
+}
