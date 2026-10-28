@@ -274,6 +274,26 @@ struct RunningHost {
     ~RunningHost() { finish(); }
 };
 
+struct OpsReply {
+    int status{};
+    std::string body;
+};
+
+OpsReply ops_get(std::uint16_t port, std::string_view target) {
+    REQUIRE(port != 0);
+    net::io_context ioc;
+    net::ip::tcp::socket sock(ioc);
+    sock.connect(net::ip::tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
+    boost::beast::http::request<boost::beast::http::empty_body> req{boost::beast::http::verb::get, target, 11};
+    req.set(boost::beast::http::field::host, "127.0.0.1");
+    req.set(boost::beast::http::field::connection, "close");
+    boost::beast::http::write(sock, req);
+    boost::beast::flat_buffer buf;
+    boost::beast::http::response<boost::beast::http::string_body> res;
+    boost::beast::http::read(sock, buf, res);
+    return OpsReply{static_cast<int>(res.result_int()), res.body()};
+}
+
 // ---- 5-D4 helpers: a WS node that pushes newHeads the test queues, and block hashes per branch ----
 
 constexpr const char* kHeadsSub = "0x9ce59a13059e417087c02d3236a0b1cc";
@@ -522,6 +542,12 @@ TEST_CASE("host: losing the lease demotes the host to standby and it leads again
     INFO("host threw: " << h.what);
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(demoted);
+
+    const auto m = ops_get(h.ops_port.load(), "/metrics");
+    CHECK(m.status == 200);
+    CHECK_THAT(m.body, Catch::Matchers::ContainsSubstring("evml_role{role=\"standby\"} 1"));
+    CHECK_THAT(m.body, Catch::Matchers::ContainsSubstring("evml_role{role=\"leader\"} 0"));
+    CHECK_THAT(m.body, Catch::Matchers::ContainsSubstring("evml_checkpoint_block{class=\"safe\"} 0"));
 
     const bool relead = evml::test::run_until(
         mock_ioc, [&] { return (h.leader_events.load() >= 2 && h.live()) || h.threw.load(); }, 30s);
@@ -1138,30 +1164,6 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
     h.finish();
     CHECK(h.exit_code.load() == 0);
 }
-
-namespace {
-
-struct OpsReply {
-    int status{};
-    std::string body;
-};
-
-OpsReply ops_get(std::uint16_t port, std::string_view target) {
-    REQUIRE(port != 0);
-    net::io_context ioc;
-    net::ip::tcp::socket sock(ioc);
-    sock.connect(net::ip::tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
-    boost::beast::http::request<boost::beast::http::empty_body> req{boost::beast::http::verb::get, target, 11};
-    req.set(boost::beast::http::field::host, "127.0.0.1");
-    req.set(boost::beast::http::field::connection, "close");
-    boost::beast::http::write(sock, req);
-    boost::beast::flat_buffer buf;
-    boost::beast::http::response<boost::beast::http::string_body> res;
-    boost::beast::http::read(sock, buf, res);
-    return OpsReply{static_cast<int>(res.result_int()), res.body()};
-}
-
-}  // namespace
 
 TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and updates on scrape", "[integration][host]") {
     using Catch::Matchers::ContainsSubstring;
