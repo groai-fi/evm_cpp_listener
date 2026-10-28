@@ -130,13 +130,13 @@ See plan 60 "results and deviations".
 - [x] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
 - [x] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
 
-### ⬜ 5-E Alert engine + transport + dead-man (§5.3)
+### ✅ 5-E Alert engine + transport + dead-man (§5.3)
 - [x] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.
 - [x] **E2 `src/ops/alert_sender`:** exact JSON schema and `X-API-Key`; 3 retries with jittered backoff, then ERROR + `evml_alert_send_failures_total`; token and URL never in logs.
 - [x] **E3 `src/ops/deadman`:** pings only when leader and healthy (§5.3.2); 10 s timeout; failures counted; empty URL → `"deadman":"disabled"` in `/readyz`.
 - [x] **E4a Host wiring (split from E4, 2026-10-28):** `ops/snapshot` builds the `OpsSnapshot` from live host state every 10 s; the host feeds the engine, the sender and the dead-man; counter-delta events (Safe Reorg, Sink Invariant, WS Missed Logs) and Sink Fenced.
 - [x] **E4b Remaining facts (done 2026-10-28, see plan 60 "5-E4b"):** provider facts (auth / quota / failover + `switch_back` / inconsistent events, `any_healthy_provider`, `WsDecision::from`), `ms_since_head` (`last_head_at_` separate from `session_baseline_`, active while all WS providers are `Down`), `getlogs_safe` / `ws_safe`, `oldest_record_age_s`, Redis unreachable / misconfigured, atomic `LeaseGrant` (`lease.lua` `acquire` returns `token\n<prev_epoch>`) for `Leader Changed` + heartbeat `epoch_n`.
-- [x] **E4c Full §5.3.3 contract test suite (done 2026-10-28, see plan 60 "5-E4c"):** every row of §5.3.3 by kind and details keys (`alert_contract_test.cpp`); one Provider Failover → exactly 1 POST (switch_back host test); transport and dead-man cases were already covered by E2 / E3. **Open decision:** six rows lack some `details` keys of the table (Safe Reorg, Sink Fenced, Sink Invariant, WS Missed Logs, Gate Regressed, Provider Inconsistent): add the facts or change the table (plan 60, 5-E4c).
+- [x] **E4c Full §5.3.3 contract test suite (done 2026-10-28, see plan 60 "5-E4c"):** every row of §5.3.3 by kind and 100% of its `details` keys (`alert_contract_test.cpp`); one Provider Failover → exactly 1 POST (switch_back host test); transport and dead-man cases were already covered by E2 / E3.
 
 ### ⬜ 5-F Metrics + `/readyz` wiring
 - [ ] Register the §5.4 list plus existing sink and sweeper totals; update every 10 s and on scrape.

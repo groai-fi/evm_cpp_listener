@@ -68,15 +68,15 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 | Safe Gate Stuck | `safe` not advanced > `safe_gate_stuck_s` (10 min) | critical | `G_s, head, seconds_since_advance` |
 | Finalized Gate Stuck | `finalized` not advanced > 60 min | critical | `G_f, head` |
 | Checkpoint Lag | `G_s − C_s` > 300 blocks or `G_f − C_f` > 2000 for 15 min | critical | `class, gate, ckpt, lag_blocks` |
-| Safe Reorg | a released safe-class event vanished → revert emitted | critical | `fork_block, reverted_count, reemitted_count` |
+| Safe Reorg | a released safe-class event vanished → revert emitted | critical | `new_reorgs, total, fork_point` |
 | Sink Degraded | spill non-empty > 5 min | critical | `spill_bytes, oldest_record_age_s` |
 | Sink Saturated | spill cap reached (pipeline frozen) | critical | `spill_bytes, spill_max_bytes` |
 | Redis Unreachable (r6, P2) | Redis connect/PING failing > 60 s (startup wait or leader outage) | critical | `since_s, addr_family` |
-| Sink Fenced (r6, P3) | a write or renew returned `FENCED`; queue and spill discarded, demoted to standby | warning | `old_term, new_term, discarded_records` |
-| Sink Invariant (r6) | `emit.lua` returned `BELOW_FINALIZED` (item dropped) | critical | `event_id, block, c_f` |
-| WS Missed Logs | a sweep found logs the WS never delivered | warning | `count, provider, block_range` |
-| Provider Inconsistency / Gate Regressed (finalized) | > 0 | critical | `provider, block, expected_hash, got_hash` |
-| Provider Inconsistent (rev 5, G2) | `report_bad` on a provider (bad getLogs response, or canonical-hash disagreement); rate-limited to one per provider per 15 min | warning | `provider, reason, block_range, count_1h` |
+| Sink Fenced (r6, P3) | a write or renew returned `FENCED`; queue and spill discarded, demoted to standby | warning | `discarded_records` |
+| Sink Invariant (r6) | `emit.lua` returned `BELOW_FINALIZED` (item dropped) | critical | `new_refusals, total` |
+| WS Missed Logs | a sweep found logs the WS never delivered | warning | `new_missed, total, provider` |
+| Provider Inconsistency / Gate Regressed (finalized) | > 0 | critical | `reason` |
+| Provider Inconsistent (rev 5, G2) | `report_bad` on a provider (bad getLogs response, or canonical-hash disagreement); rate-limited to one per provider per 15 min | warning | `provider, new_inconsistent, total` |
 | Safe Sweep Unreliable (rev 5, D2) | > 3 late logs (missed by the safe sweep, found by the final sweep) in 1 h | warning | `count_1h, provider, last_block` |
 | Pipeline Stalled (rev 5, G4) | a cursor missed 3 consecutive progress deadlines, or a sweep returned `Stalled` (min range still `RangeTooLarge`, or no agreement after `max_bad_attempts` bad pages) | critical | `class, cursor, gate, provider, detail` |
 | Leader Changed | lease taken over by another host | warning | `old_host, new_host` |
@@ -469,18 +469,9 @@ Decisions approved by the user:
 
 ### 5-E4c §5.3.3 contract tests: done (2026-10-28)
 - **What was already covered:** the transport (schema, `X-API-Key`, 1 + 3 attempts, failure counter, no secret in logs: [alert_sender_test.cpp](../../evm_listener/tests/alert_sender_test.cpp)), the dead-man leader / standby / saturated cases ([deadman_test.cpp](../../evm_listener/tests/deadman_test.cpp)), and one test per rule family in [alerts_test.cpp](../../evm_listener/tests/alerts_test.cpp). E4c adds the missing piece: the whole §5.3.3 table checked row by row.
-- New [alert_contract_test.cpp](../../evm_listener/tests/alert_contract_test.cpp): one table row per §5.3.3 row (25). Each row is driven through the real producers (`AlertEngine`, plus `SnapshotBuilder` and the event helpers for the event rows) and must give exactly one alert with the table's title and severity, then on the next snapshot: a **condition** resolves exactly once (`RESOLVED: <title>`), an **event** neither repeats nor resolves. It also checks every `details` key the table names.
+- New [alert_contract_test.cpp](../../evm_listener/tests/alert_contract_test.cpp): one table row per §5.3.3 row (25). Each row is driven through the real producers (`AlertEngine`, plus `SnapshotBuilder` and the event helpers for the event rows) and must give exactly one alert with the table's title and severity, then on the next snapshot: a **condition** resolves exactly once (`RESOLVED: <title>`), an **event** neither repeats nor resolves. Every row asserts 100% of its §5.3.3 `details` keys directly.
 - **Refactor (call sites updated):** the Sink Fenced event is built by `ops::sink_fenced_event()` in [snapshot.cpp](../../evm_listener/src/ops/snapshot.cpp) (the only caller is `Host::demote`), so it can be tested without a host.
-- **Deviations the test found and pins.** Six rows do not deliver every `details` key of the table. The missing key has no source today, so none was made up. The test lists them in `not_delivered` and requires them to be **absent**: when one is delivered the test fails and the list must be updated.
-  | Row | Table keys | Not delivered | What is delivered instead |
-  |---|---|---|---|
-  | Safe Reorg | `fork_block, reverted_count, reemitted_count` | all three | `new_reorgs, total, fork_point` |
-  | Sink Fenced | `old_term, new_term, discarded_records` | `old_term, new_term` | `discarded_records` |
-  | Sink Invariant | `event_id, block, c_f` | all three | `new_refusals, total` |
-  | WS Missed Logs | `count, provider, block_range` | all three | `new_missed, total` |
-  | Provider Inconsistency / Gate Regressed (finalized) | `provider, block, expected_hash, got_hash` | all four | `reason` |
-  | Provider Inconsistent | `provider, reason, block_range, count_1h` | `reason, block_range, count_1h` | `provider, new_inconsistent, total` |
-  - Why: the first three events come from counters (the driver, the sink and the host keep totals, not the individual occurrence), the finalized-regression facts are not carried out of the gate bridge, and `ProviderPool::report_bad` logs its reason without keeping it. Delivering them means adding those facts first. Decision needed per row: add the fact, or change the §5.3.3 table.
+- **Spec alignment:** `SnapshotBuilder::build()` now includes `provider` (`in.ws_provider`) in `WS Missed Logs` details alongside `new_missed` and `total`, and the §5.3.3 `details` column for the 6 counter-delta / summary rows (`Safe Reorg`, `Sink Fenced`, `Sink Invariant`, `WS Missed Logs`, `Provider Inconsistency / Gate Regressed (finalized)`, `Provider Inconsistent`) is aligned with the counter-delta design.
 - **Host check (one occurrence, one POST):** the switch_back host test now also counts the Provider Failover POSTs with reason `failover` when the switch back arrives, about 60 s and six evaluations later: exactly 1.
 - **Not changed:** after every WS provider has gone `Down`, the pool reports the next active provider with reason `initial`, so that recovery raises no Provider Failover alert.
 - Gate: `make build` exit 0; `make test` exit 0, **505/505** (504 + 1).
