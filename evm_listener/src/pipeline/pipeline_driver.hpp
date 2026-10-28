@@ -53,6 +53,7 @@ struct DriverStatus {
     std::string stall_detail;
     bool reverify_pending{false};
     std::uint64_t safe_reorgs{0};             // completed reverifications that found a difference (SafeReorg)
+    std::uint64_t reverify_clean{0};          // completed reverifications that found no difference
     std::optional<std::uint64_t> last_fork_point;
 };
 
@@ -149,6 +150,7 @@ private:
     bool stalled_{false};
     std::string stall_detail_;
     std::uint64_t safe_reorgs_{0};
+    std::uint64_t reverify_clean_{0};
     std::optional<std::uint64_t> last_fork_;
     std::uint64_t work_ticks_{0};
     Progress safe_progress_, final_progress_;

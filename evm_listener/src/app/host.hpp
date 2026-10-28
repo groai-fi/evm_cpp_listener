@@ -26,8 +26,10 @@ struct HostOptions {
     /// Called on the io thread when a leadership term starts ("leader") and when a fenced term ends ("demoted").
     std::function<void(std::string_view)> on_event;
     /// Called on the io thread after each swept page is cross-checked against the WS logs, with the running totals
-    /// (ws_missed_logs_total, ws_extra_logs_total) since the host started. Metrics export is 5-F.
+    /// (ws_missed_logs_total, ws_extra_logs_total) since the host started.
     std::function<void(std::uint64_t ws_missed_total, std::uint64_t ws_extra_total)> on_cross_check;
+    /// Called once when the ops HTTP server binds (useful in tests that configure port 0).
+    std::function<void(std::uint16_t)> on_ops_port;
     /// Test hook (`--test-freeze-io-after`, only reachable from the CLI when built with EVML_TEST_HOOKS): blocks the io
     /// thread after this long, so the watchdog must abort the process.
     std::optional<std::chrono::seconds> test_freeze_io_after;

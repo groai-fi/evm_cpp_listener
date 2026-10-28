@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <cstdio>
 #include <deque>
@@ -220,6 +223,7 @@ struct RunningHost {
     std::atomic<std::uint64_t> ws_missed{0};  // latest on_cross_check totals
     std::atomic<std::uint64_t> ws_extra{0};
     std::atomic<int> cross_checks{0};         // on_cross_check calls (one per swept page)
+    std::atomic<std::uint16_t> ops_port{0};
     std::atomic<bool> threw{false};
     std::string what;
     std::mutex mu;
@@ -232,6 +236,7 @@ struct RunningHost {
             evml::app::HostOptions opt;
             opt.stop = &stop;
             opt.beat_period = 50ms;
+            opt.on_ops_port = [this](std::uint16_t p) { ops_port = p; };
             opt.on_status = [this](const evml::pipeline::DriverStatus& s) {
                 state = static_cast<int>(s.state);
                 std::lock_guard<std::mutex> lk(mu);
@@ -1106,15 +1111,16 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
     REQUIRE_FALSE(h.threw.load());
 
     // One occurrence, one POST: the failover was evaluated about six times (every 10 s) before the switch back, and
-    // was sent exactly once.
-    int failover_posts = 0;
+    // was sent exactly once before the switch-back event arrived.
+    int failover_posts_before_switch_back = 0;
     for (const auto& p : posts) {
         const auto body = boost::json::parse(p.body).as_object();
-        if (body.at("title").as_string() == "Provider Failover" &&
-            body.at("details").as_object().at("reason").as_string() == "failover")
-            ++failover_posts;
+        if (body.at("title").as_string() != "Provider Failover") continue;
+        const auto reason = body.at("details").as_object().at("reason").as_string();
+        if (reason == "switch_back") break;
+        if (reason == "failover") ++failover_posts_before_switch_back;
     }
-    CHECK(failover_posts == 1);
+    CHECK(failover_posts_before_switch_back == 1);
 
     const auto failover = find_reason("failover");
     REQUIRE(failover);
@@ -1131,4 +1137,249 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
 
     h.finish();
     CHECK(h.exit_code.load() == 0);
+}
+
+namespace {
+
+struct OpsReply {
+    int status{};
+    std::string body;
+};
+
+OpsReply ops_get(std::uint16_t port, std::string_view target) {
+    REQUIRE(port != 0);
+    net::io_context ioc;
+    net::ip::tcp::socket sock(ioc);
+    sock.connect(net::ip::tcp::endpoint(net::ip::make_address("127.0.0.1"), port));
+    boost::beast::http::request<boost::beast::http::empty_body> req{boost::beast::http::verb::get, target, 11};
+    req.set(boost::beast::http::field::host, "127.0.0.1");
+    req.set(boost::beast::http::field::connection, "close");
+    boost::beast::http::write(sock, req);
+    boost::beast::flat_buffer buf;
+    boost::beast::http::response<boost::beast::http::string_body> res;
+    boost::beast::http::read(sock, buf, res);
+    return OpsReply{static_cast<int>(res.result_int()), res.body()};
+}
+
+}  // namespace
+
+TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and updates on scrape", "[integration][host]") {
+    using Catch::Matchers::ContainsSubstring;
+    evml::core::log::init("info");
+    const std::string shard = "host_metrics_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-metrics-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+    auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "metrics.toml", provider_env(node.url()));
+
+    RunningHost h(std::move(cfg));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    const auto m = ops_get(h.ops_port.load(), "/metrics");
+    CHECK(m.status == 200);
+
+    // Every §5.4 metric plus existing sink, sweeper and pipeline metrics:
+    const std::vector<std::string> expected_names{
+        "evml_role",
+        "evml_lease_renew_failures_total",
+        "evml_provider_active",
+        "evml_provider_failovers_total",
+        "evml_alerts_fired_total",
+        "evml_provider_inconsistency_total",
+        "evml_safe_missed_total",
+        "evml_reverify_total",
+        "evml_getlogs_throttled_total",
+        "evml_consumer_undelivered_age_seconds",
+        "evml_consumer_pending_age_seconds",
+        "evml_consumer_lag_entries",
+        "evml_spill_discarded_records_total",
+        "evml_alert_send_failures_total",
+        "evml_deadman_ping_failures_total",
+        "evml_ws_missed_logs_total",
+        "evml_ws_extra_logs_total",
+        "evml_pending_evicted_logs_total",
+        "evml_sink_dup_total",
+        "evml_sink_below_finalized_total",
+        "evml_sink_heartbeat_failures_total",
+        "evml_sink_consumer_lag_failures_total",
+        "evml_sink_reconnects_total",
+        "evml_sink_queue_depth",
+        "evml_sink_spill_records",
+        "evml_sink_spill_bytes",
+        "evml_sink_pending_writes",
+        "evml_sink_oldest_record_age_seconds",
+        "evml_sweep_emitted_safe_total",
+        "evml_sweep_emitted_final_total",
+        "evml_sweep_deduped_total",
+        "evml_reverts_emitted_total",
+        "evml_sweep_matched_total",
+        "evml_sweep_range_shrinks_total",
+        "evml_sweep_failure_shrinks_total",
+        "evml_sweep_volume_shrinks_total",
+        "evml_sweep_reverified_new_total",
+        "evml_sweep_address_splits_total",
+        "evml_head_block",
+        "evml_gate_block",
+        "evml_checkpoint_block",
+    };
+    for (const auto& name : expected_names) {
+        INFO("metric: " << name);
+        CHECK_THAT(m.body, ContainsSubstring("# TYPE " + name + " "));
+    }
+    CHECK_THAT(m.body, ContainsSubstring("evml_role{role=\"leader\"} 1"));
+    CHECK_THAT(m.body, ContainsSubstring("evml_role{role=\"standby\"} 0"));
+    CHECK_THAT(m.body, ContainsSubstring("evml_checkpoint_block{class=\"safe\"} " + std::to_string(c0 + 300)));
+    CHECK_THAT(m.body, ContainsSubstring("evml_checkpoint_block{class=\"finalized\"} " + std::to_string(c0 + 250)));
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
+TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled, and 503 when saturated or gate is stuck",
+          "[integration][host]") {
+    evml::core::log::init("info");
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+
+    // 1. Leader-live with lease-disabled, plus D6 gate-age check (safe_gate_stuck_s = 1).
+    {
+        const std::string shard = "host_ready_live_" + random_tag();
+        const fs::path spill = fs::temp_directory_path() / ("evml-host-ready-live-" + random_tag());
+        Cleanup cleanup{shard, spill};
+
+        net::io_context mock_ioc;
+        NodeState ns;
+        ns.safe = c0 + 300;
+        ns.finalized = c0 + 250;
+        evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+        auto toml = host_toml(shard, spill, node.url(), 30000);
+        replace_once(toml, "safe_gate_stuck_s    = 600", "safe_gate_stuck_s    = 1");
+        auto cfg = evml::core::Config::parse(toml, "ready_live.toml", provider_env(node.url()));
+
+        RunningHost h(std::move(cfg));
+        h.start();
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE_FALSE(h.threw.load());
+
+        const auto hz = ops_get(h.ops_port.load(), "/healthz");
+        CHECK(hz.status == 200);
+        CHECK(hz.body == "ok\n");
+
+        const auto rz = ops_get(h.ops_port.load(), "/readyz");
+        CHECK(rz.status == 200);
+        const auto body = boost::json::parse(rz.body).as_object();
+        CHECK(body.at("state").as_string() == "live");
+        CHECK(body.at("role").as_string() == "leader");
+        CHECK(body.at("lease").as_string() == "disabled");
+        CHECK(body.at("deadman").as_string() == "disabled");
+        CHECK(body.at("consumer_lag").as_string() == "enabled");
+        CHECK_FALSE(body.at("saturated").as_bool());
+        CHECK(body.at("gates").as_object().at("safe").to_number<std::uint64_t>() == c0 + 300);
+        CHECK(body.at("gates").as_object().at("finalized").to_number<std::uint64_t>() == c0 + 250);
+        CHECK(body.at("cursors").as_object().at("safe").to_number<std::uint64_t>() == c0 + 300);
+        CHECK(body.at("cursors").as_object().at("finalized").to_number<std::uint64_t>() == c0 + 250);
+
+        // Let 1.2 s pass without G_s advancing -> D6 gate age expires -> 503.
+        const auto until = std::chrono::steady_clock::now() + 1200ms;
+        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= until; }, 2s);
+        CHECK(ops_get(h.ops_port.load(), "/readyz").status == 503);
+
+        // Advance G_s -> gate age resets -> 200 again.
+        ns.safe = c0 + 305;
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return ops_get(h.ops_port.load(), "/readyz").status == 200; }, 5s));
+
+        h.finish();
+        CHECK(h.exit_code.load() == 0);
+    }
+
+    // 2. Healthy standby (lease enabled, another host holds the lease in Redis) -> 200.
+    {
+        const std::string shard = "host_ready_standby_" + random_tag();
+        const fs::path spill = fs::temp_directory_path() / ("evml-host-ready-standby-" + random_tag());
+        Cleanup cleanup{shard, spill};
+
+        sw::redis::Redis admin{require_env("REDIS_URL")};
+        const evml::sink::Keys keys{shard};
+        admin.set(keys.leader(), "1|other-host|nonce1", 30s);
+        admin.set(keys.epoch(), "1|other-host|nonce1");
+
+        net::io_context mock_ioc;
+        evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
+        auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true, 30000, 500), "ready_standby.toml",
+                                             provider_env(node.url(), "standby-host"));
+        RunningHost h(std::move(cfg));
+        h.start();
+        REQUIRE(evml::test::run_until(
+            mock_ioc,
+            [&] {
+                if (h.ops_port.load() == 0) return false;
+                const auto r = ops_get(h.ops_port.load(), "/readyz");
+                return r.status == 200;
+            },
+            15s));
+        const auto rz = ops_get(h.ops_port.load(), "/readyz");
+        CHECK(rz.status == 200);
+        const auto body = boost::json::parse(rz.body).as_object();
+        CHECK(body.at("state").as_string() == "standby");
+        CHECK(body.at("role").as_string() == "standby");
+        CHECK(body.at("lease").as_string() == "enabled");
+        CHECK(body.at("gates").as_object().at("safe").is_null());
+        CHECK(body.at("cursors").as_object().at("safe").is_null());
+
+        h.finish();
+        CHECK(h.exit_code.load() == 0);
+    }
+
+    // 3. Leader-saturated -> 503.
+    {
+        const std::string shard = "host_ready_sat_" + random_tag();
+        const fs::path spill = fs::temp_directory_path() / ("evml-host-ready-sat-" + random_tag());
+        Cleanup cleanup{shard, spill};
+
+        evml::testing::ToxiRedis px;
+        ScopedEnv env;
+        env.set("EVML_TEST_TOXI_REDIS_URL", px.url());
+
+        net::io_context mock_ioc;
+        NodeState ns;
+        ns.safe = c0 + 300;
+        ns.finalized = c0 + 250;
+        evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+        auto toml = host_toml(shard, spill, node.url(), 30000);
+        replace_once(toml, "redis_url_env      = \"REDIS_URL\"", "redis_url_env      = \"EVML_TEST_TOXI_REDIS_URL\"");
+        replace_once(toml, "queue_capacity     = 100000", "queue_capacity     = 2");
+        replace_once(toml, "spill_max_bytes    = 536870912", "spill_max_bytes    = 1");
+        auto cfg = evml::core::Config::parse(toml, "ready_sat.toml", provider_env(node.url()));
+
+        RunningHost h(std::move(cfg));
+        h.start();
+        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE_FALSE(h.threw.load());
+        CHECK(ops_get(h.ops_port.load(), "/readyz").status == 200);
+
+        // Disable Redis and advance the safe gate across multiple steps so checkpoint writes overflow the 2-item queue
+        // into the 1-byte spill and saturate the sink.
+        px.disable();
+        for (int i = 1; i <= 5; ++i) {
+            ns.safe = c0 + 300 + i * 10;
+            const auto step_end = std::chrono::steady_clock::now() + 300ms;
+            evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= step_end; }, 1s);
+        }
+        REQUIRE(evml::test::run_until(
+            mock_ioc,
+            [&] {
+                const auto r = ops_get(h.ops_port.load(), "/readyz");
+                const auto b = boost::json::parse(r.body).as_object();
+                return r.status == 503 && b.at("saturated").as_bool();
+            },
+            15s));
+
+        px.enable();
+        h.finish();
+        CHECK(h.exit_code.load() == 0);
+    }
 }

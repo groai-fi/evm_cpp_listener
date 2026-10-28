@@ -212,9 +212,14 @@ asio::awaitable<TickResult> PipelineDriver::tick() {
                 if (r.reorg) {
                     ++safe_reorgs_;
                     last_fork_ = r.fork_point;
+                } else {
+                    ++reverify_clean_;
                 }
                 break;
-            case StepStatus::NoWork: reverify_pending_ = false; break;
+            case StepStatus::NoWork:
+                reverify_pending_ = false;
+                ++reverify_clean_;
+                break;
             default: break;  // Retry / Stalled / Paused: keep the flag
         }
         const TickResult t = after_step(r.status == StepStatus::NoWork ? StepStatus::Advanced : r.status, r.detail);
@@ -265,6 +270,7 @@ DriverStatus PipelineDriver::status() const {
     s.stall_detail = stall_detail_;
     s.reverify_pending = reverify_pending_;
     s.safe_reorgs = safe_reorgs_;
+    s.reverify_clean = reverify_clean_;
     s.last_fork_point = last_fork_;
     return s;
 }
