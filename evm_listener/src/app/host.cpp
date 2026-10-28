@@ -27,8 +27,12 @@
 #include "core/env.hpp"
 #include "core/log.hpp"
 #include "core/version.hpp"
+#include "ops/alert_sender.hpp"
+#include "ops/alerts.hpp"
+#include "ops/deadman.hpp"
 #include "ops/metrics.hpp"
 #include "ops/ops_http_server.hpp"
+#include "ops/snapshot.hpp"
 #include "ops/watchdog.hpp"
 #include "pipeline/pending_buffer.hpp"
 #include "pipeline/sweeper.hpp"
@@ -50,6 +54,7 @@ using namespace std::chrono_literals;
 
 constexpr auto kDrainBudget = 25s;      // plan 4.8: flush the sink before exit
 constexpr auto kShutdownGrace = 300ms;  // lets aborted pool I/O unwind before the io loop stops
+constexpr auto kOpsPeriod = 10s;        // plan 5.3.3: the alert engine evaluates a fresh snapshot this often
 // A fork walk fetches at most this many blocks (call_to is paced at reconcile_rps, so a long walk would hold the
 // provider's token bucket for minutes). A longer gap or deeper fork resyncs the ring and re-verifies instead.
 constexpr std::size_t kMaxWalkBlocks = 16;
@@ -95,6 +100,7 @@ public:
               o.stall_ms = cfg.watchdog.process_stall_ms;
               return o;
           }()),
+          engine_(ops::AlertThresholds::from_config(cfg)),
           beat_timer_(ioc_),
           sleep_timer_(ioc_),
           grace_timer_(ioc_),
@@ -121,6 +127,9 @@ private:
     // WS logs -> PendingBuffer, and the per-page cross-check against the sweep (plan 3.4, G3). io thread.
     void on_ws_log(const rpc::Log& log, const std::string& provider);
     void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs);
+    // plan 5.3: every kOpsPeriod build the alert snapshot, send what the engine returns; every [ops].deadman_ping_s
+    // feed the dead-man. io thread, from on_beat().
+    void ops_tick();
     void schedule_beat();
     void on_beat();
     void request_exit(int code, const std::string& why);  // first reason wins
@@ -142,6 +151,11 @@ private:
 
     net::io_context ioc_;
     ops::Watchdog wd_;
+    ops::AlertEngine engine_;
+    ops::SnapshotBuilder snapshots_;
+    std::unique_ptr<ops::AlertSender> alerts_;  // null = webhook not configured (alerts are only logged)
+    std::unique_ptr<ops::Deadman> deadman_;
+    std::chrono::steady_clock::time_point next_ops_{}, next_deadman_{};  // io thread
     ops::Metrics metrics_;
     std::unique_ptr<ops::OpsHttpServer> ops_;
     net::steady_timer beat_timer_, sleep_timer_, grace_timer_, freeze_timer_;
@@ -218,6 +232,31 @@ int Host::run() {
     if (!opt_.stop) throw std::invalid_argument("HostOptions::stop is required");
     redis_url_ = core::env::require(cfg_.sink.redis_url_env);
     ops_ = std::make_unique<ops::OpsHttpServer>(ioc_, cfg_.ops.http_listen, routes());
+
+    // plan 5.3: the alert webhook and the dead-man URL come from the environment only. Both are optional (local dev):
+    // without them alerts are only logged and the dead-man is "disabled" (the Deadman constructor warns).
+    {
+        const auto hook = core::env::get(cfg_.ops.alert_webhook_env);
+        const auto token = core::env::get(cfg_.ops.alert_webhook_token_env);
+        if (!hook.empty() && !token.empty()) {
+            ops::AlertSenderOptions ao;
+            ao.url = hook;
+            ao.token = token;
+            ao.service = cfg_.ops.alert_service;
+            ao.shard = cfg_.shard.id;
+            ao.host = cfg_.shard.host_id;
+            ao.user_agent = user_agent(cfg_);
+            ao.seed = std::random_device{}();
+            alerts_ = std::make_unique<ops::AlertSender>(ioc_.get_executor(), std::move(ao));
+        } else {
+            log::warn("host", "alert webhook not configured: alerts are only logged",
+                      {{"url_env", cfg_.ops.alert_webhook_env}, {"token_env", cfg_.ops.alert_webhook_token_env}});
+        }
+        ops::DeadmanOptions dopt;
+        dopt.url = core::env::get(cfg_.ops.deadman_ping_env);
+        dopt.user_agent = user_agent(cfg_);
+        deadman_ = std::make_unique<ops::Deadman>(ioc_.get_executor(), std::move(dopt));
+    }
 
     wd_.start();
     log::info("host", "started",
@@ -621,6 +660,51 @@ void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
     rt_->sink->set_heartbeat(boost::json::serialize(o));
 }
 
+void Host::ops_tick() {
+    const auto now = std::chrono::steady_clock::now();
+    const bool leader = rt_ && rt_->driver && !demoting_;
+
+    if (now >= next_ops_) {
+        next_ops_ = now + kOpsPeriod;
+        ops::SnapshotInputs in;
+        in.now = now;
+        in.wall_ms = wall_ms();
+        in.leader = leader;
+        in.chain = cfg_.chain.name;
+        if (leader) {
+            in.head = rt_->ring.top();
+            in.driver = rt_->driver->status();
+            in.sink = rt_->sink->status();
+            in.sink_saturated = rt_->sink->saturated();
+            in.spill_max_bytes = cfg_.sink.spill_max_bytes;
+            in.retention_s = cfg_.sink.retention_ms / 1000;
+            in.safe_late_total = rt_->sweeper->stats().late;
+            in.ws_missed_total = ws_missed_total_;
+            in.consumers = rt_->sink->consumer_lag();
+        }
+        for (const auto& a : engine_.evaluate(snapshots_.build(in))) {
+            log::warn("alert", "alert raised",
+                      {{"severity", ops::to_string(a.severity)}, {"title", a.title}, {"message", a.message}});
+            if (alerts_) alerts_->send(a);
+        }
+    }
+
+    if (deadman_ && now >= next_deadman_) {
+        next_deadman_ = now + std::chrono::seconds(cfg_.ops.deadman_ping_s);
+        ops::DeadmanFacts f;
+        f.now = now;
+        f.leader = leader;
+        if (leader) {
+            const auto st = rt_->driver->status();
+            f.state_ok = st.state == pipeline::PipelineState::CatchingUp || st.state == pipeline::PipelineState::Live;
+            f.sink_saturated = rt_->sink->saturated();
+            f.c_s = st.c_s;
+            f.g_s = st.g_s;
+        }
+        deadman_->tick(f);
+    }
+}
+
 void Host::on_beat() {
     wd_.beat_io();
     ops::Watchdog::State s;
@@ -645,6 +729,7 @@ void Host::on_beat() {
         if (opt_.on_status) opt_.on_status(st);
     }
     wd_.publish_state(s);
+    ops_tick();
 
     if (opt_.stop->load(std::memory_order_relaxed)) {
         begin_shutdown(kExitOk, "stop requested");
@@ -661,6 +746,11 @@ void Host::demote(const std::string& why) {
     if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
     demoting_ = true;
     const auto st = rt_->sink->status();
+    ops::AlertEvent fenced;
+    fenced.kind = ops::AlertEvent::Kind::SinkFenced;
+    fenced.message = why;
+    fenced.details = {{"discarded_records", st.discarded_total}};
+    snapshots_.push_event(std::move(fenced));
     log::warn("host", "demoting to standby",
               {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
     rt_->driver->request_drain();

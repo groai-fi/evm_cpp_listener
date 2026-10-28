@@ -567,6 +567,72 @@ TEST_CASE("host: a finalized regression on the current provider freezes release 
     CHECK(h.exit_code.load() == 0);
 }
 
+// Sets a process environment variable for one test and removes it afterwards.
+struct ScopedEnv {
+    std::vector<std::string> names;
+    void set(const std::string& k, const std::string& v) {
+        ::setenv(k.c_str(), v.c_str(), 1);
+        names.push_back(k);
+    }
+    ~ScopedEnv() {
+        for (const auto& k : names) ::unsetenv(k.c_str());
+    }
+};
+
+TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release posts an alert to the webhook",
+          "[integration]") {
+    evml::core::log::init("info");
+    const std::string shard = "t_host_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-alerts-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+    std::vector<evml::test::MockRequest> pings, posts;
+    evml::test::MockHttpServer deadman(mock_ioc, [&](const evml::test::MockRequest& r) {
+        pings.push_back(r);
+        return evml::test::MockReply{.body = "OK"};
+    });
+    evml::test::MockHttpServer webhook(mock_ioc, [&](const evml::test::MockRequest& r) {
+        posts.push_back(r);
+        return evml::test::MockReply{.body = "{}"};
+    });
+
+    auto toml = host_toml(shard, spill, node.url(), 30000);
+    replace_once(toml, "deadman_ping_s          = 60", "deadman_ping_s          = 1");
+    auto cfg = evml::core::Config::parse(toml, "alerts.toml", provider_env(node.url()));
+    ScopedEnv env;  // declared before the host so it is removed after the host thread has ended
+    env.set(cfg.ops.deadman_ping_env, deadman.url() + "ping/secret-uuid");
+    env.set(cfg.ops.alert_webhook_env, webhook.url() + "hook");
+    env.set(cfg.ops.alert_webhook_token_env, "host-test-token");
+    RunningHost h(std::move(cfg));
+    h.start();
+
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !pings.empty(); }, 10s));
+    CHECK(pings.front().method == "GET");
+    CHECK(pings.front().target == "/ping/secret-uuid");
+    CHECK(posts.empty());  // a healthy leader raises nothing
+
+    ns.finalized = c0 + 100;  // an impossible regression of the finalized tag: release frozen
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !posts.empty() || h.threw.load(); }, 30s));  // next 10 s evaluation
+    REQUIRE_FALSE(h.threw.load());
+    const auto body = boost::json::parse(posts.front().body).as_object();
+    CHECK(body.at("severity").as_string() == "critical");
+    CHECK(std::string(body.at("title").as_string()).find("Gate Regressed") != std::string::npos);
+    CHECK(body.at("shard").as_string() == shard);
+    CHECK(body.at("host").as_string() == "test-host");
+    bool has_key = false;
+    for (const auto& [k, v] : posts.front().headers) has_key |= (k == "X-API-Key" && v == "host-test-token");
+    CHECK(has_key);
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
 TEST_CASE("host: a safe regression on the current provider makes the driver re-verify the released window",
           "[integration]") {
     evml::core::log::init("info");
