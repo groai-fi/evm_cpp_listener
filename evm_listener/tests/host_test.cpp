@@ -576,6 +576,9 @@ TEST_CASE("host: a finalized regression on the current provider freezes release 
     h.start();
     REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
+    // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
+    // `current_getlogs()` and records `finalized = c0 + 250` before we regress the tag.
+    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
     CHECK_FALSE(h.status().frozen);
 
     ns.finalized = c0 + 100;  // an impossible regression of the finalized tag

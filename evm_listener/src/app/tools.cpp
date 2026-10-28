@@ -408,6 +408,8 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
         return kExitFailure;
     }
 
+    const auto pool_cfg = make_pool_config(cfg, user_agent(cfg));
+
     const auto deadline = std::chrono::steady_clock::now() + lease_timeout;
     const auto sleep_until_deadline = [&](std::chrono::milliseconds d) {
         const auto now = std::chrono::steady_clock::now();
@@ -459,7 +461,7 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     sink.start();
 
     net::io_context ioc;
-    auto pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), {});
+    auto pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
     PoolLogSource source(pool, nullptr);
 
     pipeline::SweeperOptions sw_opt;
