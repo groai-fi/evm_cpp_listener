@@ -128,7 +128,7 @@ See plan 60 "results and deviations".
   - **Accept:** the driver leaves Recovering on real tag polls.
 - [x] **D4 Heads → `ReorgDetector`:** fork walk via `call_to` on the WS provider; a crossing below `C_s` → `on_safe_reorg_signal`. Also fills `BlockRef::timestamp` and passes the ring to `PoolLogSource`. Walk capped at 16 blocks; longer gaps or deeper forks resync the ring and re-verify (plan 60, 5-D4).
 - [x] **D5 WS cross-check (G3):** read plan 40 §3.4 first; logs → `PendingBuffer(pending_max_logs)`; compare with sweep results for `ws_extra_logs_total` / WS Missed Logs. If the sweeper does not expose its released set per page, **stop and report before changing it**.
-- [ ] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
+- [x] **D6 Heartbeat payload:** every `heartbeat_s` → `sink.set_heartbeat`; wire `host_id` / `heartbeat_ms` into `RedisSinkOptions` (plan 50 4e dev. 2).
 
 ### ⬜ 5-E Alert engine + transport + dead-man (§5.3)
 - [ ] **E1 `src/ops/alerts`:** pure rule evaluation over `OpsSnapshot`; condition alerts fire / 15 min re-notify / resolve, event alerts fire once per occurrence with no resolve; per-group and per-provider 15 min rate limits; D7 ownership; a consumer-lag snapshot older than 2× the probe interval is unknown.

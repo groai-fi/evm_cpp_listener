@@ -398,3 +398,11 @@ Decisions approved by the user:
 - **Not covered by a test:** fork purge and resync purge at host level; eviction at the 200k cap; staged logs surviving a WS failover.
 - Gate: `make build` exit 0; `make test` exit 0, **443/443** (439 + 4).
 
+### 5-D6 Heartbeat payload: done (2026-10-27)
+- [host.cpp](../../evm_listener/src/app/host.cpp): `RedisSinkOptions` now gets `host_id = [shard].host_id`, `heartbeat_ms = [ops].heartbeat_s * 1000` and `heartbeat_ttl_s = max(30, 3 * heartbeat_s)` (the sink rejects a TTL <= the interval, so a large `heartbeat_s` would otherwise fail startup). `Host::publish_heartbeat` runs from the io beat, throttled to `heartbeat_s`, builds the plan 4.7 JSON and calls `sink.set_heartbeat`; the sink thread writes `SET hb:<host_id> <payload> EX ttl` on the lease connection.
+- Payload: `ts` (wall ms), `role` (`"leader"`), `state`, `head` (top of the head ring), `G_s`, `G_f`, `C_s`, `C_f`, `active_provider` (current getLogs provider), `version`. A value that is not known yet is JSON `null`, never 0.
+- **Deviation:** `epoch_n` (plan 4.7) is **left out**: the sink has no epoch read, and a placeholder would be a made-up value. It comes with the 5-E epoch read.
+- **Limits:** only a leader writes a heartbeat (a standby has no sink, so no `hb:` key); the first key appears up to `heartbeat_s` after the term starts if the sink loop passed its first deadline before the first payload existed; with `heartbeat_s = 10` the payload can be up to ~10 s old when written.
+- Test: [host_test.cpp](../../evm_listener/tests/host_test.cpp) reads `hb:test-host` from Redis (role, state, head = c0+310, G/C values, provider, version, no `epoch_n`, fresh `ts`, TTL in (0, 30]). The shared test config now uses `heartbeat_s = 1` so the key shows up quickly.
+- Gate: `make build` exit 0; `make test` exit 0, **444/444** (443 + 1).
+
