@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ops/alerts.hpp"
@@ -51,6 +52,10 @@ struct SnapshotInputs {
     std::vector<provider::ProviderHealth> providers;                  // ProviderPool::health()
     std::map<std::string, std::uint64_t> provider_inconsistent_total;  // ProviderPool::inconsistency_total() per provider
 };
+
+/// @brief The Provider Failover event (plan 60 §5.3.3, details `from`, `to`, `reason`). `from` is null when no WS
+/// provider was active before; `reason` is the pool's reason name (e.g. "failover").
+AlertEvent provider_failover_event(const std::optional<std::string>& from, const std::string& to, std::string_view reason);
 
 class SnapshotBuilder {
 public:

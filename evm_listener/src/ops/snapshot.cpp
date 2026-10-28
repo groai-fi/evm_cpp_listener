@@ -7,6 +7,14 @@ namespace evml::ops {
 
 namespace json = boost::json;
 
+AlertEvent provider_failover_event(const std::optional<std::string>& from, const std::string& to, std::string_view reason) {
+    AlertEvent e;
+    e.kind = AlertEvent::Kind::ProviderFailover;
+    e.message = "the WS provider failed over from " + from.value_or("none") + " to " + to;
+    e.details = {{"from", from ? json::value(*from) : json::value(nullptr)}, {"to", to}, {"reason", std::string(reason)}};
+    return e;
+}
+
 void SnapshotBuilder::push_event(AlertEvent e) { pending_.push_back(std::move(e)); }
 
 OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {

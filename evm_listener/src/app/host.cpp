@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -415,15 +416,16 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         };
         h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
         h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
-        h.on_ws_active_changed = [this](const std::optional<std::string>& to, std::string_view reason) {
+        // The pool reports only the new WS provider; the previous one is remembered here for the failover alert's `from`.
+        auto prev_ws = std::make_shared<std::optional<std::string>>();
+        h.on_ws_active_changed = [this, prev_ws](const std::optional<std::string>& to, std::string_view reason) {
             // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
             if (!rt_) return;
-            if (reason == "failover") {  // forced move off a failed provider: one alert event (plan 60 §5.3.3)
-                ops::AlertEvent e;
-                e.kind = ops::AlertEvent::Kind::ProviderFailover;
-                e.message = "the WS provider failed over to " + (to ? *to : std::string("none"));
-                e.details = {{"to", to ? boost::json::value(*to) : boost::json::value(nullptr)}};
-                snapshots_.push_event(std::move(e));
+            const std::optional<std::string> from = std::exchange(*prev_ws, to);
+            // "failover" is ProviderBook's Forced decision, which always names a replacement; a move to no provider is
+            // "none_available" and raises no Provider Failover event (the no-healthy-provider alerts cover it).
+            if (reason == "failover" && to) {  // forced move off a failed provider: one alert event (plan 60 §5.3.3)
+                snapshots_.push_event(ops::provider_failover_event(from, *to, reason));
             }
             rt_->ring.reset();
             bump_head_epoch();

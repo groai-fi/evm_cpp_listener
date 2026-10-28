@@ -325,3 +325,25 @@ TEST_CASE("snapshot: the sink's oldest pending write age becomes oldest_record_a
     in.sink.oldest_record_age_s = 420;
     CHECK(b.build(in).oldest_record_age_s == 420);
 }
+
+TEST_CASE("snapshot: the Provider Failover event carries from, to and reason", "[snapshot]") {
+    const auto e = evml::ops::provider_failover_event("alchemy", "infura", "failover");
+    CHECK(e.kind == AlertEvent::Kind::ProviderFailover);
+    CHECK(e.message == "the WS provider failed over from alchemy to infura");
+    CHECK(e.details.at("from").as_string() == "alchemy");
+    CHECK(e.details.at("to").as_string() == "infura");
+    CHECK(e.details.at("reason").as_string() == "failover");
+
+    const auto first = evml::ops::provider_failover_event(std::nullopt, "infura", "failover");
+    CHECK(first.details.at("from").is_null());
+    CHECK(first.details.at("to").as_string() == "infura");
+
+    // It goes through the builder like any host-pushed event, and the engine alerts on it once.
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};
+    b.push_event(e);
+    const auto alerts = engine.evaluate(b.build(leader_inputs()));
+    REQUIRE(alerts.size() == 1);
+    CHECK(alerts[0].title == "Provider Failover");
+    CHECK(alerts[0].details.at("from").as_string() == "alchemy");
+}
