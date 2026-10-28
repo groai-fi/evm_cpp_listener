@@ -89,7 +89,7 @@ Status: ✅ done · 🟡 partial · ⬜ not started.
 ### ✅ 5-0 Prep · ✅ 5-A Config
 See plan 60 "results and deviations".
 
-### 🟡 5-B Ops primitives (pure / unit-testable, no host yet)
+### ✅ 5-B Ops primitives (pure / unit-testable, no host yet)
 - [x] **B1 `src/ops/watchdog.{hpp,cpp}`** (rework done 2026-10-27, review decisions Q1–Q3 accepted):
   - one thread, two heartbeats (io tick, sink loop), 1 s check, threshold passed in by the caller (no default, 0 throws);
   - D2 pause tolerance; abort line on **stdout** in the `core/log` schema (`ts`, `level`, `message`, `component`) with the last known state (`role`, `driver_state`, `c_s`, `c_f`, `g_s`, `g_f`, `sink_mode`, published by the io thread through `publish_state`);
@@ -104,7 +104,7 @@ See plan 60 "results and deviations".
 - [x] **B4 `src/ops/metrics.{hpp,cpp}`:** prometheus-cpp registry + `TextSerializer`; helper that sets a counter from a monotonic total (delta increment).
   - Tests: serialized output contains the names; repeated totals do not double-count.
 
-### ⬜ 5-C `LogSource` adapter (§5.4a), parallel with 5-B
+### ✅ 5-C `LogSource` adapter (§5.4a), parallel with 5-B
 - [x] **C1 `ProviderPool` public API** (audit every call site; `call_on` is private today):
   - `call_to(provider, RequestBuilder)`, `pick_getlogs_excluding(set)`, `report_bad(provider, reason)` → book `on_failure(Retry)` + an inconsistency counter, and a per-provider token bucket (`reconcile_rps` / `burst`) that every `call_to` respects.
 - [x] **C2 `src/app/pool_log_source.{hpp,cpp}`** implementing `pipeline::LogSource`:
@@ -115,7 +115,7 @@ See plan 60 "results and deviations".
   - do **not** change the `LogSource` interface or the sweeper (rev 9).
 - [x] **C3 Tests** against MockProvider / `mock_http_server`, one per bullet of the §Tests "LogSource adapter" item, plus "one `block(n)` call per distinct block per page".
 
-### ⬜ 5-D Host process (§5.H), split into six sub-slices; each has its own gate
+### ✅ 5-D Host process (§5.H), split into six sub-slices; each has its own gate
 - [x] **D1 Skeleton (single host, `[lease] enabled = false`):** done 2026-10-27, see plan 60 "5-D1" (gate bridge pulled in; startup thread for the Redis wait; dedicated io-beat timer)
   - CLI: no action flag + `--config` runs the listener; keep the tool flags;
   - threads io + sink + watchdog; startup order 1–4 and 6; the watchdog gets `[watchdog].process_stall_ms`; io beat + `publish_state` every tick; the sink gets `loop_beat = watchdog.sink_beat_slot()`;
@@ -136,29 +136,44 @@ See plan 60 "results and deviations".
 - [x] **E3 `src/ops/deadman`:** pings only when leader and healthy (§5.3.2); 10 s timeout; failures counted; empty URL → `"deadman":"disabled"` in `/readyz`.
 - [x] **E4a Host wiring (split from E4, 2026-10-28):** `ops/snapshot` builds the `OpsSnapshot` from live host state every 10 s; the host feeds the engine, the sender and the dead-man; counter-delta events (Safe Reorg, Sink Invariant, WS Missed Logs) and Sink Fenced.
 - [x] **E4b Remaining facts (done 2026-10-28, see plan 60 "5-E4b"):** provider facts (auth / quota / failover + `switch_back` / inconsistent events, `any_healthy_provider`, `WsDecision::from`), `ms_since_head` (`last_head_at_` separate from `session_baseline_`, active while all WS providers are `Down`), `getlogs_safe` / `ws_safe`, `oldest_record_age_s`, Redis unreachable / misconfigured, atomic `LeaseGrant` (`lease.lua` `acquire` returns `token\n<prev_epoch>`) for `Leader Changed` + heartbeat `epoch_n`.
-- [x] **E4c Full §5.3.3 contract test suite (done 2026-10-28, see plan 60 "5-E4c"):** every row of §5.3.3 by kind and 100% of its `details` keys (`alert_contract_test.cpp`); one Provider Failover → exactly 1 POST (switch_back host test); transport and dead-man cases were already covered by E2 / E3.
+- [x] **E4c Full §5.3.3 contract test suite + Stage-1 review fixes (done 2026-10-28, see plan 60 "5-E4c"):** every row of §5.3.3 driven end-to-end through `SnapshotBuilder::build` + `AlertEngine::evaluate` with 100% of its `details` keys non-empty (`alert_contract_test.cpp`); standby `Redis Unreachable` tracking and `addr_family` on leader outage; `WS Missed Logs` rate-limited per provider; one Provider Failover → exactly 1 POST (switch_back host test); transport and dead-man cases were already covered by E2 / E3.
 
-### ⬜ 5-F Metrics + `/readyz` wiring
-- [ ] Register the §5.4 list plus existing sink and sweeper totals; update every 10 s and on scrape.
-- [ ] `/healthz` uses `Watchdog::stale_heartbeat()`; `/readyz`: 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby; JSON body with state, role, lease (`"disabled"` when off), deadman, gates and cursors; no secrets.
-- [ ] Tests: each metric name in `/metrics`; `/readyz` codes for leader-live, leader-saturated, standby, lease-disabled.
+### ✅ 5-F Metrics + `/readyz` wiring (done 2026-10-28, see plan 60 "5-F")
+- [x] Register the §5.4 list plus existing sink and sweeper totals; update every 10 s and on scrape.
+- [x] `/healthz` uses `Watchdog::stale_heartbeat()`; `/readyz`: 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby; JSON body with state, role, lease (`"disabled"` when off), deadman, gates and cursors; no secrets.
+- [x] Tests: each metric name in `/metrics`; `/readyz` codes for leader-live, leader-saturated, standby, lease-disabled.
 
-### ⬜ 5-G Operator tools
-- [ ] `--backfill-contract <name>` per §5.6a + D8 (acquires the lease, up to 60 s; exit 1 if held).
+### ⬜ 5-G Operator tools (Stage 2: resolves `[P0-4]`)
+- [ ] **[P0-4]** `--backfill-contract <name>` per §5.6a + D8 (acquires the lease, up to 60 s; exit 1 if held).
 - [ ] `--check-redis`: connect, run the startup checks, print the address family.
 - [ ] Integration: second backfill run adds 0 entries; lease free → acquire / release; lease held → exit 1 within 60 s with nothing written.
 
-### ⬜ 5-H Image + Railway + local compose
-- [ ] `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why.
+### ⬜ 5-H Image + Railway + local compose (Stage 2: resolves `[P0-5]`)
+- [ ] **[P0-5]** `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why.
 - [ ] `railway.json` at the repo root, **no** `startCommand`.
 - [ ] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
 - [ ] **Accept:** `make prod-image` succeeds and `--version` runs in the image.
+
+### ⬜ 5-H.5 Pre-Chaos & Pre-Shadow Hardening (Stage 3: between `5-H` and `5-I`)
+- [ ] **[P0-2] Coroutine & socket teardown (`ProviderPool::stop()` + `Deadman`):** Cancel `call_to` timers / close `HttpRpcClient` on `stop()`, and hold shared state in `Deadman::tick()` so leadership demotion and shutdown (`kShutdownGrace = 300 ms`) cannot use-after-free or leak sockets into the next term.
+- [ ] **[P0-1] & [P1-2] Catch-up behavior (`PoolLogSource` + `PendingBuffer`):**
+  - Skip `PendingBuffer::reconcile` (`ws_missed_total_` increments) for historical blocks below the first WS head seen in the term (prevents false `WS Missed Logs` alerts during `CatchingUp`).
+  - Avoid stalling `safe_step` / `final_step` on the 2 RPS `call_to` bucket when a historical catch-up page has many distinct blocks (e.g. cache verified block metadata across sweeps or separate primary vs. reconcile pacing).
+- [ ] **[P1-1] & [P1-4] Pipeline edge cases (`FinalityGate` + `Sweeper` / `emit.lua`):**
+  - `FinalityGate`: check cross-provider safe regression (`G_s < C_s`) / same-height hash mismatch across provider failovers.
+  - `Sweeper`: record Layer-1 dedup (`recent_.admit`) after `sink_.emit()` / clear on retry, and verify `BELOW_FINALIZED` handling in `emit.lua`.
 
 ### ⬜ 5-I Chaos / end-to-end (§Tests)
 - [ ] toxiproxy on provider and Redis links → recovery with an exact stream.
 - [ ] `docker pause listener-a` → b takes over within 20 s; after unpause a demotes or restarts as standby (D2).
 - [ ] io-freeze hook → **exit 134 inside the prod image** within 30 s (D3, closes watchdog review A7).
 - [ ] Manual, once: a `severity=info` test alert reaches `#strategy-production`.
+
+### ⬜ Stage 4: Phase 6 / Backlog (Post-Phase 5)
+- [ ] **[P0-3] `Finality::Depth` support in `Sweeper` / `FinalityGate`:** Wire `finality = "depth"` (`head - depth_blocks`) in `FinalityGate` and `Sweeper` (or reject in `Config::validate()` until Phase 6 Anvil tests need it; `base.toml` uses `safe` and `finalized`).
+- [ ] **[P2-1] `redundancy.mode = "hedged"`:** Implement hedged reads or reject `"hedged"` in `Config::validate()`.
+- [ ] **[P2-2] `PoolLogSource::get_logs()` split-query `logs_provider_`:** Track all answering providers across address-split sub-queries so `block(n)` excludes every provider that supplied logs on that page.
+- [ ] **[P2-3] Cold-start tag priming (`ProviderPool::poll()`):** Fire an immediate initial `safe` / `finalized` tag poll at `ProviderPool::start()` before entering the `safe_poll_ms` / `finalized_poll_ms` sleep loop.
 
 ### 5-J removed
 The WS `ping` mode is the separate job [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md), after Phase 6. Phase 5 workers must not add the `[ws]` config section or change `subscribe_heads` behaviour.
@@ -169,23 +184,24 @@ The WS `ping` mode is the separate job [71_job_ws_ping_liveness.md](71_job_ws_pi
 ```mermaid
 graph LR
   P0["5-0 ✅"] --> A["5-A ✅"]
-  A --> B["5-B ops primitives 🟡"]
-  A --> C["5-C LogSource adapter"]
-  B --> D1["5-D1 host skeleton"]
-  D1 --> D2["5-D2 lease/standby"]
-  D1 --> D3["5-D3 gate bridge"]
+  A --> B["5-B ops primitives ✅"]
+  A --> C["5-C LogSource adapter ✅"]
+  B --> D1["5-D1 host skeleton ✅"]
+  D1 --> D2["5-D2 lease/standby ✅"]
+  D1 --> D3["5-D3 gate bridge ✅"]
   C --> D3
-  D3 --> D4["5-D4 heads/reorg"]
-  D3 --> D5["5-D5 WS cross-check"]
-  D1 --> D6["5-D6 heartbeat"]
-  D2 --> E["5-E alerts"]
+  D3 --> D4["5-D4 heads/reorg ✅"]
+  D3 --> D5["5-D5 WS cross-check ✅"]
+  D1 --> D6["5-D6 heartbeat ✅"]
+  D2 --> E["5-E alerts + Stage 1 ✅"]
   D3 --> E
-  D2 --> F["5-F metrics/readyz"]
-  D2 --> G["5-G tools"]
-  B --> H["5-H image/railway"]
-  E --> I["5-I chaos"]
-  F --> I
-  G --> I
-  H --> I
+  D2 --> F["5-F metrics/readyz ✅"]
+  D2 --> G["5-G tools (Stage 2)"]
+  B --> H["5-H image/railway (Stage 2)"]
+  E --> H5["5-H.5 hardening (Stage 3)"]
+  F --> H5
+  G --> H5
+  H --> H5
+  H5 --> I["5-I chaos"]
 ```
 5-B (B2–B4) and 5-C run in parallel. 5-D is the critical path and the riskiest slice: review D1 and D2 before 5-E starts.
