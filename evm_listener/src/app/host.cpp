@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -163,6 +164,13 @@ private:
 
     std::atomic<bool> stopping_{false};  // read by the worker thread too
     std::atomic<Phase> phase_{Phase::WaitingRedis};
+    // Redis unreachable (plan 5.3.3): the acquire thread sets the first, under the mutex the second, while the startup
+    // wait runs; the io thread reads both. 0 = not waiting.
+    std::atomic<std::int64_t> redis_wait_since_ns_{0};  // steady_clock epoch ns of the first failed attempt
+    std::mutex redis_wait_mu_;
+    std::string redis_wait_family_;
+    std::optional<ops::RedisMisconfig> redis_misconfig_;  // io thread; from the startup report
+    std::optional<std::chrono::steady_clock::time_point> sink_degraded_since_;  // io thread
     bool demoting_{false};
     // Head handling: a walk in flight defers newer heads (the ring must not change under it); `head_epoch_` ends stale
     // walks when the term ends or the WS provider changes.
@@ -319,13 +327,21 @@ void Host::acquire_thread_main(bool first) {
         if (first) {
             sink::StartupOptions so;
             so.require_noeviction = cfg_.sink.require_noeviction;
-            so.on_waiting = [](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
+            so.on_waiting = [this](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
                 log::warn("host", "redis unreachable, waiting",
                           {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
+                {
+                    std::lock_guard lk(redis_wait_mu_);
+                    redis_wait_family_ = family;
+                }
+                const auto since = std::chrono::steady_clock::now() - waited;
+                redis_wait_since_ns_.store(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count());
             };
             so.stop = stop;
             so.sleep = sleep;
             report = sink::await_redis_ready(redis_url_, so);
+            redis_wait_since_ns_.store(0);  // reachable again (or told to stop)
             if (!report) return;  // stop requested while waiting; the beat sees the same flag and shuts down
         }
 
@@ -357,6 +373,12 @@ void Host::acquire_thread_main(bool first) {
 void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const std::string& token) {
     if (stopping_) return;
     try {
+        if (rep && rep->misconfigured) {
+            redis_misconfig_ = ops::RedisMisconfig{
+                rep->maxmemory_policy, rep->appendonly,
+                std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
+                    std::to_string(rep->version.patch)};
+        }
         if (rep) {
             for (const auto& w : rep->warnings) log::warn("host", "redis startup warning", {{"warning", w}});
             log::info("host", "redis ready",
@@ -678,6 +700,25 @@ void Host::ops_tick() {
         in.wall_ms = wall_ms();
         in.leader = leader;
         in.chain = cfg_.chain.name;
+        in.redis_misconfigured = redis_misconfig_;
+
+        // Redis unreachable: the startup wait, or (as leader) a sink that lost its connection and is spilling.
+        std::chrono::seconds down{0};
+        if (const auto ns = redis_wait_since_ns_.load(); ns != 0) {
+            const std::chrono::steady_clock::time_point since{
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(ns))};
+            down = std::chrono::duration_cast<std::chrono::seconds>(now - since);
+            std::lock_guard lk(redis_wait_mu_);
+            in.addr_family = redis_wait_family_;
+        }
+        if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Degraded) {
+            if (!sink_degraded_since_) sink_degraded_since_ = now;
+            down = std::max(down, std::chrono::duration_cast<std::chrono::seconds>(now - *sink_degraded_since_));
+        } else {
+            sink_degraded_since_.reset();
+        }
+        if (down.count() > 0) in.redis_unreachable_s = static_cast<std::uint32_t>(down.count());
+
         if (leader) {
             in.head = rt_->ring.top();
             in.driver = rt_->driver->status();

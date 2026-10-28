@@ -14,6 +14,9 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
     s.now = in.now;
     s.leader = in.leader;
     s.chain = in.chain;
+    s.redis_unreachable_s = in.redis_unreachable_s;
+    s.addr_family = in.addr_family;
+    s.redis_misconfigured = in.redis_misconfigured;
     s.events = std::move(pending_);
     pending_.clear();
 

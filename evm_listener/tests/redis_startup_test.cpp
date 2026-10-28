@@ -86,6 +86,9 @@ TEST_CASE("startup: CONFIG refused is a warning, never an exit", "[unit][sink]")
     const auto r = evaluate_startup(facts("8.4.7", std::nullopt, std::nullopt), true);
     CHECK(r.config_denied);
     CHECK(r.warnings.size() == 2);  // policy and persistence both unverifiable
+    CHECK_FALSE(r.misconfigured);   // could not check is not the same as violated
+    CHECK(r.maxmemory_policy.empty());
+    CHECK(r.appendonly.empty());
 }
 
 TEST_CASE("startup: appendonly=no warns (a restart would lose the data)", "[unit][sink]") {
@@ -93,6 +96,16 @@ TEST_CASE("startup: appendonly=no warns (a restart would lose the data)", "[unit
     REQUIRE(r.warnings.size() == 1);
     CHECK_THAT(r.warnings[0], ContainsSubstring("appendonly"));
     CHECK_FALSE(r.config_denied);
+    CHECK(r.misconfigured);
+    CHECK(r.maxmemory_policy == "noeviction");
+    CHECK(r.appendonly == "no");
+}
+
+TEST_CASE("startup: a non-noeviction policy that is not required is flagged misconfigured; a clean Redis is not", "[unit][sink]") {
+    const auto lax = evaluate_startup(facts("8.4.7", "allkeys-lru"), false);
+    CHECK(lax.misconfigured);
+    CHECK(lax.maxmemory_policy == "allkeys-lru");
+    CHECK_FALSE(evaluate_startup(facts("8.4.7"), true).misconfigured);
 }
 
 TEST_CASE("startup: a reachable, correctly configured Redis passes with no warnings", "[integration][sink]") {

@@ -287,3 +287,34 @@ TEST_CASE("snapshot: head silence and the two safe tags reach the engine; a stal
     auto quiet = leader_inputs(t0 + 500s);
     CHECK(engine.evaluate(b.build(quiet)).empty());
 }
+
+TEST_CASE("snapshot: host-local Redis facts are copied in any role, and raise Redis alerts for a standby", "[snapshot]") {
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};  // redis_unreachable_s = 60
+    SnapshotInputs in;  // not leader
+    in.now = t0;
+    in.chain = "base";
+    in.redis_unreachable_s = 95;
+    in.addr_family = "ipv6";
+    in.redis_misconfigured = evml::ops::RedisMisconfig{"allkeys-lru", "no", "8.4.7"};
+    const auto s = b.build(in);
+    CHECK_FALSE(s.leader);
+    CHECK(s.redis_unreachable_s == 95);
+    CHECK(s.addr_family == "ipv6");
+    REQUIRE(s.redis_misconfigured);
+    CHECK(s.redis_misconfigured->maxmemory_policy == "allkeys-lru");
+
+    bool unreachable = false, misconfigured = false;
+    for (const auto& a : engine.evaluate(s)) {
+        unreachable |= a.title == "Redis Unreachable";
+        misconfigured |= a.title == "Redis Misconfigured";
+    }
+    CHECK(unreachable);
+    CHECK(misconfigured);
+
+    in.redis_unreachable_s = 30;  // below the 60 s threshold
+    in.redis_misconfigured.reset();
+    SnapshotBuilder b2;
+    AlertEngine e2{AlertThresholds{}};
+    CHECK(e2.evaluate(b2.build(in)).empty());
+}

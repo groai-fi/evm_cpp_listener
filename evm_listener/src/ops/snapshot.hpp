@@ -28,6 +28,11 @@ struct SnapshotInputs {
     bool leader{false};
     std::string chain;
 
+    // Host-local facts: valid in any role.
+    std::optional<std::uint32_t> redis_unreachable_s;  // set while Redis connect / PING keeps failing
+    std::string addr_family;                           // "ipv6" | "ipv4" | "unresolved" | "" (not known)
+    std::optional<RedisMisconfig> redis_misconfigured;
+
     // Leader facts: read only when `leader`.
     std::optional<std::uint64_t> head;  // top of the head ring
     pipeline::DriverStatus driver;

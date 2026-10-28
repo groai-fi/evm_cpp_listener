@@ -41,6 +41,11 @@ struct StartupReport {
     RedisVersion version;
     std::vector<std::string> warnings;  // each is logged at WARN; Phase 5 turns them into RedisMisconfigured alerts
     bool config_denied{false};          // CONFIG GET refused: policy and persistence could not be verified
+    std::string maxmemory_policy;       // as reported by the server; empty = CONFIG GET refused
+    std::string appendonly;             // as reported by the server; empty = CONFIG GET refused
+    // A verified violation: a policy other than noeviction (only reachable with require_noeviction off) or
+    // appendonly "no". A refused CONFIG GET is not one (config_denied says it could not be checked).
+    bool misconfigured{false};
 };
 
 // The decision table of plan 4.3, with no I/O. Throws StartupFatal for: redis_version < 7.0 (the Lua scripts use the

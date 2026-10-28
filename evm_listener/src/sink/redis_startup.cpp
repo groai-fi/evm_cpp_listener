@@ -98,6 +98,8 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
     if (r.version.major < 7)
         throw StartupFatal("redis_version " + ver + " < 7.0: the embedded Lua scripts need the #!lua shebang (Redis >= 7.0)");
 
+    r.maxmemory_policy = facts.maxmemory_policy.value_or("");
+    r.appendonly = facts.appendonly.value_or("");
     if (!facts.maxmemory_policy) {
         r.config_denied = true;
         r.warnings.push_back("CONFIG GET maxmemory-policy refused: cannot verify noeviction");
@@ -106,12 +108,14 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
         const std::string what = "maxmemory-policy is '" + *facts.maxmemory_policy + "', not 'noeviction': Redis may evict our streams or checkpoint";
         if (require_noeviction) throw StartupFatal(what);
         r.warnings.push_back(what);
+        r.misconfigured = true;
     }
 
     if (!facts.appendonly) {
         r.config_denied = true;
         r.warnings.push_back("CONFIG GET appendonly refused: cannot verify persistence");
     } else if (*facts.appendonly == "no") {
+        r.misconfigured = true;
         r.warnings.push_back("appendonly is 'no': a Redis restart loses the streams and the checkpoint (a re-backfill follows)");
     }
     return r;
