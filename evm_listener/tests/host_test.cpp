@@ -89,6 +89,7 @@ std::string host_toml(const std::string& shard, const fs::path& spill, const std
     }
     replace_once(t, "safe_poll_ms       = 4000", "safe_poll_ms       = 100");
     replace_once(t, "finalized_poll_ms  = 12000", "finalized_poll_ms  = 100");
+    replace_once(t, "heartbeat_s             = 10", "heartbeat_s             = 1");
     replace_once(t, "process_stall_ms     = 30000", "process_stall_ms     = " + std::to_string(process_stall_ms));
     replace_once(t, "spill_dir          = \"/tmp/evml-spill\"", "spill_dir          = \"" + spill.string() + "\"");
     replace_once(t, "http_listen             = \"[::]:9464\"", "http_listen             = \"127.0.0.1:0\"");
@@ -726,6 +727,47 @@ TEST_CASE("host: a head gap too long to walk resyncs the ring and makes the driv
     CHECK(r.ns.block_requests.empty());  // no walk was started: a 17-block walk would hold the provider's bucket
 
     REQUIRE(r.until([&] { return !r.host.status().reverify_pending && r.host.live(); }, 15s));
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+}
+
+TEST_CASE("host: the leader publishes the plan 4.7 heartbeat payload under hb:<host_id> with a TTL", "[integration]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+    r.feed_chain('a', r.c0 + 297, r.c0 + 310);
+
+    sw::redis::Redis admin{require_env("REDIS_URL")};
+    const evml::sink::Keys keys{r.shard};
+    const std::string key = keys.hb("test-host");
+    boost::json::object hb;
+    // Wait for a payload that already knows the ring head (the first one may predate the heads).
+    const bool seen = r.until(
+        [&] {
+            const auto v = admin.get(key);
+            if (!v) return false;
+            hb = boost::json::parse(*v).as_object();
+            return hb.at("head").is_uint64() || hb.at("head").is_int64();
+        },
+        15s);
+    REQUIRE(seen);
+    CHECK(hb.at("role").as_string() == "leader");
+    CHECK(hb.at("state").as_string() == "live");
+    CHECK(hb.at("head").to_number<std::uint64_t>() == r.c0 + 310);
+    CHECK(hb.at("G_s").to_number<std::uint64_t>() == r.c0 + 300);
+    CHECK(hb.at("G_f").to_number<std::uint64_t>() == r.c0 + 250);
+    CHECK(hb.at("C_s").to_number<std::uint64_t>() == r.c0 + 300);
+    CHECK(hb.at("C_f").to_number<std::uint64_t>() == r.c0 + 250);
+    CHECK_FALSE(hb.at("active_provider").as_string().empty());
+    CHECK_FALSE(hb.at("version").as_string().empty());
+    CHECK_FALSE(hb.contains("epoch_n"));  // deferred to 5-E
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+    CHECK(static_cast<std::int64_t>(now_ms) - hb.at("ts").to_number<std::int64_t>() < 10000);
+    const auto ttl = admin.ttl(key);
+    CHECK(ttl > 0);
+    CHECK(ttl <= 30);
     r.host.finish();
     CHECK(r.host.exit_code.load() == 0);
 }
