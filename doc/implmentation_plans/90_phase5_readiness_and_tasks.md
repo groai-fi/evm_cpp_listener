@@ -148,11 +148,11 @@ See plan 60 "results and deviations".
 - [x] `--check-redis`: connect, run the startup checks, print the address family.
 - [x] Integration: second backfill run adds 0 entries; lease free → acquire / release; lease held → exit 1 within 60 s with nothing written.
 
-### ⬜ 5-H Image + Railway + local compose (Stage 2: resolves `[P0-5]`)
-- [ ] **[P0-5]** `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why.
-- [ ] `railway.json` at the repo root, **no** `startCommand`.
-- [ ] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
-- [ ] **Accept:** `make prod-image` succeeds and `--version` runs in the image.
+### ✅ 5-H Image + Railway + local compose (Stage 2: resolves `[P0-5]`, done 2026-10-28, see plan 60 "5-H")
+- [x] **[P0-5]** `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why (~35 MB compressed / 129.9 MB unpacked `debian:bookworm-slim` + `11.5 MB` static-Conan binary).
+- [x] `railway.json` at the repo root, **no** `startCommand`.
+- [x] `.devcontainer/docker-compose.yml`: `listener-a` / `listener-b` under a `listeners` profile, `restart: always`, `EVML_HOST_ID=a|b`.
+- [x] **Accept:** `make prod-image` succeeds and `--version` runs in the image.
 
 ### ⬜ 5-H.5 Pre-Chaos & Pre-Shadow Hardening (Stage 3: between `5-H` and `5-I`)
 - [ ] **[P0-2] Coroutine & socket teardown (`ProviderPool::stop()` + `Deadman`):** Cancel `call_to` timers / close `HttpRpcClient` on `stop()`, and hold shared state in `Deadman::tick()` so leadership demotion and shutdown (`kShutdownGrace = 300 ms`) cannot use-after-free or leak sockets into the next term.
@@ -197,7 +197,7 @@ graph LR
   D3 --> E
   D2 --> F["5-F metrics/readyz ✅"]
   D2 --> G["5-G tools (Stage 2) ✅"]
-  B --> H["5-H image/railway (Stage 2)"]
+  B --> H["5-H image/railway (Stage 2) ✅"]
   E --> H5["5-H.5 hardening (Stage 3)"]
   F --> H5
   G --> H5
