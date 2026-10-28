@@ -143,10 +143,10 @@ See plan 60 "results and deviations".
 - [x] `/healthz` uses `Watchdog::stale_heartbeat()`; `/readyz`: 200 iff (leader ∧ Live ∧ ¬saturated ∧ gate age OK (D6)) ∨ healthy standby; JSON body with state, role, lease (`"disabled"` when off), deadman, gates and cursors; no secrets.
 - [x] Tests: each metric name in `/metrics`; `/readyz` codes for leader-live, leader-saturated, standby, lease-disabled.
 
-### ⬜ 5-G Operator tools (Stage 2: resolves `[P0-4]`)
-- [ ] **[P0-4]** `--backfill-contract <name>` per §5.6a + D8 (acquires the lease, up to 60 s; exit 1 if held).
-- [ ] `--check-redis`: connect, run the startup checks, print the address family.
-- [ ] Integration: second backfill run adds 0 entries; lease free → acquire / release; lease held → exit 1 within 60 s with nothing written.
+### ✅ 5-G Operator tools (Stage 2: resolves `[P0-4]`, done 2026-10-28, see plan 60 "5-G")
+- [x] **[P0-4]** `--backfill-contract <name>` per §5.6a + D8 (acquires the lease, up to 60 s; exit 1 if held).
+- [x] `--check-redis`: connect, run the startup checks, print the address family.
+- [x] Integration: second backfill run adds 0 entries; lease free → acquire / release; lease held → exit 1 within 60 s with nothing written.
 
 ### ⬜ 5-H Image + Railway + local compose (Stage 2: resolves `[P0-5]`)
 - [ ] **[P0-5]** `docker/Dockerfile.prod`: `tini` ENTRYPOINT, `CMD`, `STOPSIGNAL SIGTERM`, `HEALTHCHECK`, `COPY evm_listener/config/ /app/config/`; target < 60 MB, or report why.
@@ -196,7 +196,7 @@ graph LR
   D2 --> E["5-E alerts + Stage 1 ✅"]
   D3 --> E
   D2 --> F["5-F metrics/readyz ✅"]
-  D2 --> G["5-G tools (Stage 2)"]
+  D2 --> G["5-G tools (Stage 2) ✅"]
   B --> H["5-H image/railway (Stage 2)"]
   E --> H5["5-H.5 hardening (Stage 3)"]
   F --> H5

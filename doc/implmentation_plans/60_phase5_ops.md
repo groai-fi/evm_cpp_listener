@@ -493,3 +493,18 @@ Decisions approved by the user:
   - `host: /metrics exposes every §5.4 and sink/sweeper metric and updates on scrape`: verifies HTTP 200 and `# TYPE <name>` for all 41 registered metric families plus `evml_role` and `evml_checkpoint_block` values.
   - `host: /readyz returns 200 for leader-live, standby and lease-disabled, and 503 when saturated or gate is stuck`: verifies 200 and JSON schema for leader-live (`lease: "disabled"`), 503 after `safe_gate_stuck_s` elapses without `G_s` advancing and recovery to 200 when `G_s` advances (D6), 200 for a healthy standby (`role: "standby"`, `lease: "enabled"`), and 503 (`saturated: true`) when Redis is disabled via `ToxiRedis` and queue+spill saturate.
 - Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **507/507** (505 + 2).
+
+### 5-G Operator tools (`--check-redis` and `--backfill-contract <name>`): done (2026-10-28)
+- **`--check-redis` ([tools.hpp](../../evm_listener/src/app/tools.hpp) / [tools.cpp](../../evm_listener/src/app/tools.cpp)):**
+  - `check_redis(cfg)` runs a single-shot `sink::await_redis_ready()` probe (`stop` set on first `on_waiting`), prints `ok    redis version=<v> address_family=<ipv6|ipv4> maxmemory_policy=<p> appendonly=<a>` (plus any `warn` lines) and exits 0; fails fast with exit 1 on unreachable Redis or `StartupFatal`.
+- **`--backfill-contract <name>` ([tools.hpp](../../evm_listener/src/app/tools.hpp) / [tools.cpp](../../evm_listener/src/app/tools.cpp), §5.6a + D8):**
+  - Looks up `<name>` in `cfg.contracts` (throws `ConfigError` → exit 2 if unknown).
+  - Runs `await_redis_ready()` and, when `[lease] enabled = true`, calls `sink::acquire_lease_blocking()` bounded by `lease_timeout` (default 60 s). Exits 1 without writing anything if another host holds the lease.
+  - Starts a fenced `RedisSink` (or unfenced token `"0"` when lease is disabled), loads the stored Redis checkpoint `{safe=C_s, finalized=C_f, contracts}`, and sweeps only the target contract via `Sweeper` + `PoolLogSource`:
+    - `[start_block, C_f]` with the contract's route finality set to `Finality::Finalized` (`final_step(C_f)`, not tracked in `released`).
+    - For safe-class contracts when `C_s > C_f`, `(max(start_block - 1, C_f), C_s]` at `Finality::Safe` (`safe_step(C_s)`, tracked in `released` and `released_data`).
+  - Waits for `sink.wait_idle()` (all page emissions acked), merges the contract's `address:start_block:class` entry into `ckpt.contracts` via `sink.set_contracts()`, and calls `sink.drain(25 s)` to flush the manifest and release the lease.
+- **Tests ([host_test.cpp](../../evm_listener/tests/host_test.cpp)):**
+  - `tools: --check-redis prints address_family and startup check results, and exits 1 when unreachable`.
+  - `tools: --backfill-contract emits finalized below C_f and safe/released in C_f..C_s, updates manifest, is idempotent, and enforces D8 lease fencing`: verifies host exit 2 before backfill, exit 1 with 0 writes when lease is held by another host (D8), lease acquire + release when free, exact `finalized` vs `safe` emissions and `released` ZSET tracking, 0 new entries on second run (idempotency via dedup), and subsequent host startup reaching `Live`.
+- Gate: `make build` exit 0 (`-Werror`); `make test` exit 0, **509/509** (507 + 2).
