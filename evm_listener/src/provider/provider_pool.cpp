@@ -208,6 +208,7 @@ void ProviderPool::end_session(rpc::WsClosed c) {
     end_session_quiet();
     n.backoff.report_live(live);
     if (handlers_.on_ws_down) handlers_.on_ws_down(c, name);
+    remember_fault(name, c.kind, c.http_status, c.rpc_code, c.reason);
     // Record session failure in book; triggers transition to Down if failure threshold exceeded.
     if (const auto t = book_.on_failure(name, c.kind, c.retry_after, now)) emit_transition(*t, "ws: " + c.reason);
 
@@ -235,6 +236,37 @@ void ProviderPool::schedule_restart(const std::string& name, ms delay) {
 // ---------------------------------------------------------------------------------------------------------------
 // Maintenance
 // ---------------------------------------------------------------------------------------------------------------
+
+// Keeps why a provider went to Cooldown / Disabled / Fatal; other failure kinds are transient and not worth keeping.
+void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kind, int http_status,
+                                  std::optional<std::int64_t> rpc_code, const std::string& message) {
+    if (kind != rpc::FailKind::QuotaExhausted && kind != rpc::FailKind::AuthFatal && kind != rpc::FailKind::ConfigFatal)
+        return;
+    nodes_.at(provider).fault = {http_status, rpc_code, message.substr(0, 200)};
+}
+
+std::vector<ProviderHealth> ProviderPool::health() const {
+    const auto now = Clock::now();
+    std::vector<ProviderHealth> out;
+    out.reserve(names_.size());
+    for (const auto& name : names_) {
+        const auto& ps = book_.state(name);
+        ProviderHealth h;
+        h.name = name;
+        h.state = ps.state;
+        if (ps.state == State::Cooldown || ps.state == State::Disabled || ps.state == State::Fatal) {
+            const auto& f = nodes_.at(name).fault;
+            h.http_status = f.http_status;
+            h.rpc_code = f.rpc_code;
+            h.fault_message = f.message;
+        }
+        if (ps.state == State::Down || ps.state == State::Cooldown || ps.state == State::Disabled) {
+            h.next_probe_in = std::max(ms{0}, std::chrono::duration_cast<ms>(ps.next_probe_at - now));
+        }
+        out.push_back(std::move(h));
+    }
+    return out;
+}
 
 void ProviderPool::emit_transition(const Transition& t, std::string_view reason) {
     if (running_ && handlers_.on_transition) handlers_.on_transition(t, reason);
@@ -336,6 +368,7 @@ void ProviderPool::note(const std::string& provider, const RpcOutcome& o) {
         // are left only through a probe (see provider_book.hpp).
         if (book_.state(provider).state == State::Up) t = book_.on_success(provider, now);
     } else if (o.kind != rpc::FailKind::RangeTooLarge) {
+        remember_fault(provider, o.kind, o.http_status, o.rpc_code, o.error);
         t = book_.on_failure(provider, o.kind, o.retry_after, now);
     }
     if (t) {
@@ -370,6 +403,8 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
         o.kind = c.kind;
         o.range_limit = c.range_limit;
         o.retry_after = c.retry_after;
+        o.http_status = info.http_status;
+        o.rpc_code = info.rpc_code;
         o.error = what + ": " + info.message;
     };
 
@@ -519,6 +554,7 @@ net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<Provid
             case rpc::FailKind::QuotaExhausted:
             case rpc::FailKind::AuthFatal:
             case rpc::FailKind::ConfigFatal:
+                remember_fault(provider, o.kind, o.http_status, o.rpc_code, o.error);
                 t = book_.on_failure(provider, o.kind, o.retry_after, now);
                 break;
             default:

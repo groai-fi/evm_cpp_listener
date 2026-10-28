@@ -52,7 +52,26 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         s.consumers.push_back(std::move(f));
     }
 
-    const Counters cur{d.safe_reorgs, in.sink.below_finalized_total, in.ws_missed_total};
+    // Cooldown = monthly quota used up, Disabled = credentials rejected (provider_book.hpp). Other states raise no
+    // condition alert; Provider Failover is an event pushed by the host.
+    bool any_up = in.providers.empty();  // no provider facts given: do not claim an outage
+    for (const auto& h : in.providers) {
+        any_up = any_up || h.state == provider::State::Up;
+        ProviderFact f;
+        f.name = h.name;
+        f.quota_exhausted = h.state == provider::State::Cooldown;
+        if (f.quota_exhausted) {
+            f.quota_message = h.fault_message;
+            f.quota_error_code = h.rpc_code ? std::to_string(*h.rpc_code)
+                                            : (h.http_status > 0 ? std::to_string(h.http_status) : "");
+        }
+        if (h.state == provider::State::Disabled) f.auth_http_status = h.http_status;  // 0 = not an HTTP answer
+        if (h.next_probe_in) f.next_probe_ts = in.wall_ms / 1000 + static_cast<std::uint64_t>(h.next_probe_in->count()) / 1000;
+        s.providers.push_back(std::move(f));
+    }
+    s.any_healthy_provider = any_up;
+
+    const Counters cur{d.safe_reorgs, in.sink.below_finalized_total, in.ws_missed_total, in.provider_inconsistent_total};
     if (prev_) {
         if (cur.safe_reorgs > prev_->safe_reorgs) {
             AlertEvent e;
@@ -74,6 +93,17 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
             e.kind = AlertEvent::Kind::WsMissedLogs;
             e.message = "the sweep found logs the WS stream never delivered";
             e.details = {{"new_missed", cur.ws_missed - prev_->ws_missed}, {"total", cur.ws_missed}};
+            s.events.push_back(std::move(e));
+        }
+        for (const auto& [name, total] : cur.inconsistent) {
+            const auto it = prev_->inconsistent.find(name);
+            const std::uint64_t before = it == prev_->inconsistent.end() ? 0 : it->second;
+            if (total <= before) continue;
+            AlertEvent e;
+            e.kind = AlertEvent::Kind::ProviderInconsistent;
+            e.subject = name;
+            e.message = name + " returned data that failed validation";
+            e.details = {{"provider", name}, {"new_inconsistent", total - before}, {"total", total}};
             s.events.push_back(std::move(e));
         }
     }

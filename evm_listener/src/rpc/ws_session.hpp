@@ -38,6 +38,8 @@ struct WsClosed {
     FailKind kind{FailKind::Retry};                   // Actionable failure category for recovery/backoff
     std::string reason;                               // Human-readable diagnostic description (URL redacted)
     std::optional<std::chrono::seconds> retry_after;  // Parsed delta-seconds hint from HTTP upgrade 429
+    int http_status{0};                               // HTTP status of a rejected upgrade (401, 403, 429, ...); 0 = none
+    std::optional<std::int64_t> rpc_code;             // JSON-RPC error.code that ended the session, if any
 };
 
 /// @brief Callbacks invoked on the session's Boost.Asio executor.

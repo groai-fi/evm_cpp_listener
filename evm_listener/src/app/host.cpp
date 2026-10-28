@@ -393,9 +393,16 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const st
         };
         h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
         h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
-        h.on_ws_active_changed = [this](const std::optional<std::string>&, std::string_view) {
+        h.on_ws_active_changed = [this](const std::optional<std::string>& to, std::string_view reason) {
             // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
             if (!rt_) return;
+            if (reason == "failover") {  // forced move off a failed provider: one alert event (plan 60 §5.3.3)
+                ops::AlertEvent e;
+                e.kind = ops::AlertEvent::Kind::ProviderFailover;
+                e.message = "the WS provider failed over to " + (to ? *to : std::string("none"));
+                e.details = {{"to", to ? boost::json::value(*to) : boost::json::value(nullptr)}};
+                snapshots_.push_event(std::move(e));
+            }
             rt_->ring.reset();
             bump_head_epoch();
         };
@@ -681,6 +688,8 @@ void Host::ops_tick() {
             in.safe_late_total = rt_->sweeper->stats().late;
             in.ws_missed_total = ws_missed_total_;
             in.consumers = rt_->sink->consumer_lag();
+            in.providers = rt_->pool->health();
+            for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = rt_->pool->inconsistency_total(p.name);
         }
         for (const auto& a : engine_.evaluate(snapshots_.build(in))) {
             log::warn("alert", "alert raised",

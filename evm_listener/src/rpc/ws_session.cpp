@@ -51,10 +51,13 @@ constexpr std::size_t kMaxMessageBytes = 16u << 20;  // 16 MiB max incoming fram
 
 /// @brief Internal exception carrying failure classification and optional Retry-After hint.
 struct SessionFail : std::runtime_error {
-    SessionFail(FailKind k, const std::string& msg, std::optional<std::chrono::seconds> ra = std::nullopt)
-        : std::runtime_error(msg), kind(k), retry_after(ra) {}
+    SessionFail(FailKind k, const std::string& msg, std::optional<std::chrono::seconds> ra = std::nullopt,
+                int status = 0, std::optional<std::int64_t> code = std::nullopt)
+        : std::runtime_error(msg), kind(k), retry_after(ra), http_status(status), rpc_code(code) {}
     FailKind kind;
     std::optional<std::chrono::seconds> retry_after;
+    int http_status;  // HTTP status of a rejected upgrade; 0 = none
+    std::optional<std::int64_t> rpc_code;
 };
 
 /// @brief Translates common Boost.Beast and Boost.Asio error codes to human-readable text.
@@ -160,7 +163,7 @@ struct Proto {
     info.message = e.message;
     const auto c = classify(info);
     throw SessionFail(c.kind, what + ": rpc error " + std::to_string(e.code) + ": " + e.message.substr(0, 120),
-                      c.retry_after);
+                      c.retry_after, 0, e.code);
 }
 
 /// @brief Reads single WebSocket frame into protocol buffer with optional deadline.
@@ -272,7 +275,7 @@ net::awaitable<void> serve(WsSession& s, Ws& ws) {
             }
             const auto c = classify(info);
             throw SessionFail(c.kind, "WS upgrade rejected: HTTP " + std::to_string(info.http_status) + " " + info.message,
-                              c.retry_after);
+                              c.retry_after, info.http_status);
         }
         throw SessionFail(FailKind::Retry, "WS upgrade failed: " + describe(e.code()));
     }
@@ -427,11 +430,11 @@ net::awaitable<void> WsSession::run() {
     WsClosed out;
     try {
         co_await session_main(self);
-        out = {FailKind::Retry, "session ended unexpectedly", std::nullopt};
+        out = {FailKind::Retry, "session ended unexpectedly", std::nullopt, 0, std::nullopt};
     } catch (const SessionFail& f) {
-        out = {f.kind, f.what(), f.retry_after};
+        out = {f.kind, f.what(), f.retry_after, f.http_status, f.rpc_code};
     } catch (const std::exception& e) {
-        out = {FailKind::Retry, std::string("error: ") + e.what(), std::nullopt};
+        out = {FailKind::Retry, std::string("error: ") + e.what(), std::nullopt, 0, std::nullopt};
     }
     finish(std::move(out));
 }

@@ -9,12 +9,14 @@
 //
 // Facts that have no source yet are left unset, so their rules stay silent rather than guess (see plan 60, 5-E4a).
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "ops/alerts.hpp"
 #include "pipeline/pipeline_driver.hpp"
+#include "provider/provider_pool.hpp"
 #include "sink/consumer_lag.hpp"
 #include "sink/redis_sink.hpp"
 
@@ -36,6 +38,8 @@ struct SnapshotInputs {
     std::uint64_t safe_late_total{0};   // SweepStats::late
     std::uint64_t ws_missed_total{0};   // host counter of WS logs the sweep found and the WS missed
     std::vector<sink::ConsumerLag> consumers;
+    std::vector<provider::ProviderHealth> providers;                  // ProviderPool::health()
+    std::map<std::string, std::uint64_t> provider_inconsistent_total;  // ProviderPool::inconsistency_total() per provider
 };
 
 class SnapshotBuilder {
@@ -51,6 +55,7 @@ private:
         std::uint64_t safe_reorgs{0};
         std::uint64_t below_finalized{0};
         std::uint64_t ws_missed{0};
+        std::map<std::string, std::uint64_t> inconsistent;
     };
     std::optional<Counters> prev_;  // nullopt until the first leader build of a term
     std::vector<AlertEvent> pending_;

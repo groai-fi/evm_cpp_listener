@@ -187,6 +187,17 @@ TEST_CASE("alerts: provider rows: auth failure, quota exhausted (once per incide
     out = e.evaluate(s);
     CHECK(titles(out) == std::vector<std::string>{"Provider Auth Failure"});
 
+    // A rejection that was not an HTTP answer (status 0) is still reported, without a made-up status.
+    AlertEngine e3(thresholds());
+    auto s3 = snap(0s);
+    ProviderFact z;
+    z.name = "ankr";
+    z.auth_http_status = 0;
+    s3.providers = {z};
+    const auto az = get(e3.evaluate(s3), "Provider Auth Failure");
+    CHECK(az.message == "ankr rejected our credentials");
+    CHECK(az.details.at("http_status").is_null());
+
     // A different incident with no healthy provider left is critical.
     AlertEngine e2(thresholds());
     auto s2 = snap(0s);

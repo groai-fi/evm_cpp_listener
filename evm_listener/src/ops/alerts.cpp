@@ -128,8 +128,10 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         }
         if (p.auth_http_status) {
             add("auth:" + p.name, Severity::Critical, "Provider Auth Failure",
-                p.name + " rejected our credentials (HTTP " + std::to_string(*p.auth_http_status) + ")",
-                {{"provider", p.name}, {"http_status", *p.auth_http_status}});
+                p.name + " rejected our credentials" +
+                    (*p.auth_http_status > 0 ? " (HTTP " + std::to_string(*p.auth_http_status) + ")" : ""),
+                {{"provider", p.name},
+                 {"http_status", *p.auth_http_status > 0 ? json::value(*p.auth_http_status) : json::value(nullptr)}});
         }
     }
 

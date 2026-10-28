@@ -274,6 +274,19 @@ TEST_CASE("pool: quota error on subscribe fails over immediately and A is not re
     REQUIRE(cooled);
     CHECK(pool->state("A") == State::Cooldown);
     CHECK(contains(rec.transitions, "A:up->cooldown"));
+
+    // health() says why A is cooling down, and when it will be probed again.
+    const auto health = pool->health();
+    REQUIRE(health.size() == 2);
+    CHECK(health[0].name == "A");
+    CHECK(health[0].state == State::Cooldown);
+    CHECK(health[0].rpc_code == -32005);
+    CHECK(health[0].fault_message.find("Monthly capacity limit exceeded") != std::string::npos);
+    REQUIRE(health[0].next_probe_in);
+    CHECK(*health[0].next_probe_in > 0ms);
+    CHECK(health[1].name == "B");
+    CHECK(health[1].state == State::Up);
+    CHECK_FALSE(health[1].next_probe_in);
     shutdown(ioc, pool);
 }
 

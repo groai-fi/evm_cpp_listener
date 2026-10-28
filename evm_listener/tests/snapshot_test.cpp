@@ -208,3 +208,47 @@ TEST_CASE("snapshot: feeding the engine turns a frozen release and a counter jum
     CHECK(gate);
     CHECK(reorg);
 }
+
+TEST_CASE("snapshot: provider health becomes quota / auth facts and any_healthy_provider", "[snapshot]") {
+    using evml::provider::ProviderHealth;
+    using evml::provider::State;
+    SnapshotBuilder b;
+    auto in = leader_inputs();
+    ProviderHealth up{"infura", State::Up, 0, std::nullopt, "", std::nullopt};
+    ProviderHealth quota{"alchemy", State::Cooldown, 200, -32005, "rpc error -32005: Monthly capacity limit exceeded", 90'000ms};
+    ProviderHealth auth{"ankr", State::Disabled, 401, std::nullopt, "http 401: bad key", 30'000ms};
+    in.providers = {up, quota, auth};
+    auto s = b.build(in);
+
+    REQUIRE(s.providers.size() == 3);
+    CHECK(s.any_healthy_provider);
+    CHECK_FALSE(s.providers[0].quota_exhausted);
+    CHECK_FALSE(s.providers[0].auth_http_status);
+    CHECK(s.providers[1].quota_exhausted);
+    CHECK(s.providers[1].quota_error_code == "-32005");
+    CHECK(s.providers[1].quota_message == "rpc error -32005: Monthly capacity limit exceeded");
+    CHECK(s.providers[1].next_probe_ts == 1000 + 90);  // wall_ms 1'000'000 -> 1000 s, plus 90 s
+    CHECK(s.providers[2].auth_http_status == 401);
+    CHECK_FALSE(s.providers[2].quota_exhausted);
+
+    in.providers = {quota, auth};
+    CHECK_FALSE(b.build(in).any_healthy_provider);
+}
+
+TEST_CASE("snapshot: an increase of a provider's inconsistency total is one event naming that provider", "[snapshot]") {
+    SnapshotBuilder b;
+    auto in = leader_inputs();
+    in.provider_inconsistent_total = {{"infura", 2}, {"alchemy", 0}};
+    CHECK(b.build(in).events.empty());  // the first build of a term only sets the baseline
+
+    in = leader_inputs(t0 + 10s);
+    in.provider_inconsistent_total = {{"infura", 2}, {"alchemy", 1}};
+    auto s = b.build(in);
+    REQUIRE(s.events.size() == 1);
+    CHECK(s.events[0].kind == AlertEvent::Kind::ProviderInconsistent);
+    CHECK(s.events[0].subject == "alchemy");
+
+    in = leader_inputs(t0 + 20s);
+    in.provider_inconsistent_total = {{"infura", 2}, {"alchemy", 1}};
+    CHECK(b.build(in).events.empty());  // no increase, no event
+}

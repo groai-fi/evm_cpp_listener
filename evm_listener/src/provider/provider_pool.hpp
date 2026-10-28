@@ -109,6 +109,19 @@ struct RpcOutcome {
     std::optional<std::uint32_t> range_limit;  // RangeTooLarge: provider's limit when it states one
     std::optional<std::chrono::seconds> retry_after;
     std::string error;  // human-readable, no secrets
+    int http_status{0};                   // when !ok and the provider answered over HTTP; 0 = no HTTP answer
+    std::optional<std::int64_t> rpc_code;  // JSON-RPC error.code when the provider answered with one
+};
+
+/// @brief Read-only health of one provider for the alert snapshot (plan 60 §5.3.3). Never carries URLs or tokens.
+struct ProviderHealth {
+    std::string name;
+    State state{State::Up};
+    // Meaningful for Cooldown (quota) and Disabled (auth): what the provider last answered with.
+    int http_status{0};                    // 0 = unknown (e.g. a JSON-RPC level error)
+    std::optional<std::int64_t> rpc_code;
+    std::string fault_message;             // redacted, one line
+    std::optional<std::chrono::milliseconds> next_probe_in;  // Down / Cooldown / Disabled: time left until the re-probe
 };
 
 // Runs the provider chains (plan 2.5/2.6): one supervised WebSocket session on the best usable WS provider,
@@ -178,6 +191,8 @@ public:
     std::optional<std::string> current_getlogs() const { return book_.pick_getlogs(Clock::now()); }
     /// @brief Returns current health state of named provider.
     State state(const std::string& provider) const { return book_.state(provider).state; }
+    /// @brief Health of every provider, in config order. Pure read; call on the pool's executor.
+    std::vector<ProviderHealth> health() const;
     /// @brief Returns measured block height divergence between WebSocket and HTTP providers.
     std::optional<std::uint64_t> divergence() const { return detector_.divergence(); }
 
@@ -203,6 +218,12 @@ private:
         TokenBucket bucket;
         std::uint64_t inconsistent{0};
         std::uint64_t throttled{0};
+        // The last Quota / Auth / Config failure, kept so health() can say why a provider is in Cooldown / Disabled.
+        struct Fault {
+            int http_status{0};
+            std::optional<std::int64_t> rpc_code;
+            std::string message;
+        } fault;
         std::array<std::optional<TagSnapshot>, 2> tags;
         TimePoint next_standby_probe{};
     };
@@ -219,6 +240,8 @@ private:
     void tick();
     void note(const std::string& provider, const RpcOutcome& o);
     void emit_transition(const Transition& t, std::string_view reason);
+    void remember_fault(const std::string& provider, rpc::FailKind kind, int http_status,
+                        std::optional<std::int64_t> rpc_code, const std::string& message);
 
     // I/O (each keeps the pool alive through `self`)
     boost::asio::awaitable<RpcOutcome> call_on(std::string provider, std::string body, std::uint64_t id);
