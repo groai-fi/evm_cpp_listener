@@ -82,8 +82,9 @@ struct PoolHandlers {
     std::function<void(const rpc::Head&, const std::string& provider)> on_head;
     std::function<void(const rpc::Log&, const std::string& provider)> on_log;
     std::function<void(const Transition&, std::string_view reason)> on_transition;
-    // nullopt = no WS provider available. `reason`: initial | failover | switch_back | none_available.
-    std::function<void(const std::optional<std::string>&, std::string_view reason)> on_ws_active_changed;
+    // (from, to, reason): nullopt = no WS provider available. `reason`: initial | failover | switch_back | none_available.
+    std::function<void(const std::optional<std::string>& from, const std::optional<std::string>& to,
+                       std::string_view reason)> on_ws_active_changed;
     std::function<void(const std::string& provider)> on_ws_ready;
     std::function<void(const rpc::WsClosed&, const std::string& provider)> on_ws_down;
     // A fresh `safe` / `finalized` tag answered by `provider` (every successful read_tag, whoever asked for it).
@@ -191,8 +192,8 @@ public:
     std::optional<std::string> current_getlogs() const { return book_.pick_getlogs(Clock::now()); }
     /// @brief Returns current health state of named provider.
     State state(const std::string& provider) const { return book_.state(provider).state; }
-    /// @brief newHeads silence, in ms, since the last head or the last WS provider change. Also counts while no WS
-    /// provider is active. nullopt = the pool is not running or does not subscribe to heads.
+    /// @brief newHeads silence, in ms, since the last head (or pool start before the first one). Never reset on WS
+    /// failover; also counts while no WS provider is active. nullopt = the pool is not running or does not subscribe to heads.
     std::optional<std::uint32_t> ms_since_head() const;
     /// @brief Health of every provider, in config order. Pure read; call on the pool's executor.
     std::vector<ProviderHealth> health() const;

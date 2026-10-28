@@ -146,18 +146,19 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
         // Initial provider selection at system startup.
         if (auto p = first_usable()) {
             active_ws_ = p;
-            return {p, true, Reason::Initial};
+            return {std::nullopt, p, true, Reason::Initial};
         }
-        return {std::nullopt, false, Reason::NoneAvailable};
+        return {std::nullopt, std::nullopt, false, Reason::NoneAvailable};
     }
 
     // The active provider is kept while Up, even if momentarily rate-limited (its session backs off itself).
     // Forced failover occurs immediately when active WebSocket provider transitions to Down/Cooldown/Disabled.
     if (at(*active_ws_).state != State::Up) {
+        const auto prev = active_ws_;
         auto p = first_usable();
         active_ws_ = p;
         last_switch_at_ = now;
-        return {p, true, p ? Reason::Forced : Reason::NoneAvailable};
+        return {prev, p, true, p ? Reason::Forced : Reason::NoneAvailable};
     }
 
     // Switch back to a better-ranked provider only after it proved stable, and not in a flap window.
@@ -167,13 +168,14 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
             if (n == *active_ws_) break;  // only providers ranked above the active one
             const auto& ps = at(n);
             if (usable(n, now) && ps.healthy_since && now - *ps.healthy_since >= policy_.prefer_primary_after) {
+                const auto prev = active_ws_;
                 active_ws_ = n;
                 last_switch_at_ = now;
-                return {n, true, Reason::SwitchBack};
+                return {prev, n, true, Reason::SwitchBack};
             }
         }
     }
-    return {active_ws_, false, Reason::Keep};
+    return {active_ws_, active_ws_, false, Reason::Keep};
 }
 
 std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const { return pick_getlogs(now, {}); }

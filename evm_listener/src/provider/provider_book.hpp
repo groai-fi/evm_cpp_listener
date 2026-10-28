@@ -99,6 +99,7 @@ public:
 
     struct WsDecision {
         enum class Reason { Keep, Initial, Forced, SwitchBack, NoneAvailable };
+        std::optional<std::string> from;      // the previously active provider (nullopt = none)
         std::optional<std::string> provider;  // the provider that should be active (nullopt = none)
         bool changed{false};
         Reason reason{Reason::Keep};

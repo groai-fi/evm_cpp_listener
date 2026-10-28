@@ -134,7 +134,7 @@ void ProviderPool::reconcile() {
     if (!d.changed) return;
     end_session_quiet();
     detector_.reset_ws(now);
-    if (handlers_.on_ws_active_changed) handlers_.on_ws_active_changed(d.provider, reason_name(d.reason));
+    if (handlers_.on_ws_active_changed) handlers_.on_ws_active_changed(d.from, d.provider, reason_name(d.reason));
     if (d.provider) start_session(*d.provider);
 }
 
@@ -247,8 +247,8 @@ void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kin
 }
 
 std::optional<std::uint32_t> ProviderPool::ms_since_head() const {
-    // Silence is measured even with no active WS provider (every one Down): the baseline restarts at each provider
-    // change, so a pool stuck without a provider still reports growing silence and WebSocket Stalled can fire.
+    // Silence is measured across session restarts and failovers (even with no active WS provider): only a real head
+    // resets it, so a pool stuck without heads still reports growing silence and WebSocket Stalled can fire.
     if (!running_ || !cfg_.subscribe_heads) return std::nullopt;
     const auto ms_silent = detector_.ws_head_silence(Clock::now()).count();
     return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms_silent, 0, std::numeric_limits<std::uint32_t>::max()));

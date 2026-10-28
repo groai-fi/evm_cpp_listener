@@ -129,16 +129,19 @@ TEST_CASE("book: initial WS selection and forced failover on Down") {
     auto b = book();
     auto d = b.select_ws(at(0s));
     CHECK(d.reason == ProviderBook::WsDecision::Reason::Initial);
+    CHECK_FALSE(d.from.has_value());
     CHECK(d.provider == "quicknode");
     CHECK(d.changed);
 
     d = b.select_ws(at(1s));
     CHECK(d.reason == ProviderBook::WsDecision::Reason::Keep);
+    CHECK(d.from == "quicknode");
     CHECK_FALSE(d.changed);
 
     fail_n(b, "quicknode", 3, at(5s));
     d = b.select_ws(at(5s));
     CHECK(d.reason == ProviderBook::WsDecision::Reason::Forced);
+    CHECK(d.from == "quicknode");
     CHECK(d.provider == "infura");
     CHECK(b.active_ws() == "infura");
 }
@@ -172,6 +175,7 @@ TEST_CASE("book: switch back only after the preferred provider was healthy for 1
 
     const auto d = b.select_ws(at(100s + 600s));
     CHECK(d.reason == ProviderBook::WsDecision::Reason::SwitchBack);
+    CHECK(d.from == "infura");
     CHECK(d.provider == "quicknode");
     CHECK(b.active_ws() == "quicknode");
 }
@@ -213,11 +217,13 @@ TEST_CASE("book: every WS provider down -> NoneAvailable, then recovery resumes 
     fail_n(b, "infura", 3, at(1s));
     auto d = b.select_ws(at(1s));
     CHECK(d.reason == ProviderBook::WsDecision::Reason::NoneAvailable);
+    CHECK(d.from == "quicknode");
     CHECK_FALSE(d.provider.has_value());
     CHECK_FALSE(b.active_ws().has_value());
 
     b.on_probe_result("infura", true, at(40s));
     d = b.select_ws(at(40s));
+    CHECK_FALSE(d.from.has_value());
     CHECK(d.provider == "infura");
     CHECK(d.changed);
 }

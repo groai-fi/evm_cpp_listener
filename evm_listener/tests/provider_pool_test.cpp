@@ -140,7 +140,8 @@ PoolHandlers handlers(Rec& r) {
     h.on_transition = [&r](const Transition& t, std::string_view why) {
         r.transitions.push_back(t.provider + ":" + to_string(t.from) + "->" + to_string(t.to) + " (" + std::string(why) + ")");
     };
-    h.on_ws_active_changed = [&r](const std::optional<std::string>& p, std::string_view) { r.active.push_back(p ? *p : "-"); };
+    h.on_ws_active_changed = [&r](const std::optional<std::string>&, const std::optional<std::string>& p,
+                                  std::string_view) { r.active.push_back(p ? *p : "-"); };
     h.on_ws_down = [&r](const evml::rpc::WsClosed& c, const std::string&) { r.down_reasons.push_back(c.reason); };
     return h;
 }

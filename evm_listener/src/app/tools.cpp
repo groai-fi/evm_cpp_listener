@@ -243,7 +243,8 @@ int probe_transport(const Config& cfg, unsigned seconds) {
         st.head_from = p;
     };
     h.on_log = [&st](const rpc::Log&, const std::string&) { ++st.logs; };
-    h.on_ws_active_changed = [](const std::optional<std::string>& p, std::string_view why) {
+    h.on_ws_active_changed = [](const std::optional<std::string>&, const std::optional<std::string>& p,
+                                std::string_view why) {
         std::cout << "ws active: " << (p ? *p : std::string("none")) << " (" << why << ")\n";
     };
     h.on_ws_down = [](const rpc::WsClosed& c, const std::string& p) {

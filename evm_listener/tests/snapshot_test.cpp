@@ -338,6 +338,13 @@ TEST_CASE("snapshot: the Provider Failover event carries from, to and reason", "
     CHECK(first.details.at("from").is_null());
     CHECK(first.details.at("to").as_string() == "infura");
 
+    const auto back = evml::ops::provider_failover_event("infura", "alchemy", "switch_back");
+    CHECK(back.kind == AlertEvent::Kind::ProviderFailover);
+    CHECK(back.message == "the WS provider switched back from infura to alchemy");
+    CHECK(back.details.at("from").as_string() == "infura");
+    CHECK(back.details.at("to").as_string() == "alchemy");
+    CHECK(back.details.at("reason").as_string() == "switch_back");
+
     // It goes through the builder like any host-pushed event, and the engine alerts on it once.
     SnapshotBuilder b;
     AlertEngine engine{AlertThresholds{}};
@@ -365,4 +372,37 @@ TEST_CASE("snapshot: the Leader Changed event names the old and new host, and al
     CHECK(alerts[0].title == "Leader Changed");
     CHECK(alerts[0].details.at("old_host").as_string() == "hostB");
     CHECK(engine.evaluate(b.build(in)).empty());  // once per occurrence
+}
+
+TEST_CASE("snapshot: a switch back to the primary raises Provider Failover with reason switch_back and its own wording", "[snapshot]") {
+    const auto sb = evml::ops::provider_failover_event("infura", "quicknode", "switch_back");
+    CHECK(sb.kind == AlertEvent::Kind::ProviderFailover);  // same alert kind and title as a failover
+    CHECK(sb.message == "the WS provider switched back from infura to quicknode");
+    CHECK(sb.details.at("from").as_string() == "infura");
+    CHECK(sb.details.at("to").as_string() == "quicknode");
+    CHECK(sb.details.at("reason").as_string() == "switch_back");
+
+    // The failover wording is unchanged, and the two events are told apart by `reason` alone.
+    const auto fo = evml::ops::provider_failover_event("quicknode", "infura", "failover");
+    CHECK(fo.message == "the WS provider failed over from quicknode to infura");
+    CHECK(fo.details.at("reason").as_string() == "failover");
+
+    // Both reach the engine in one snapshot and are not merged or rate limited: the gap between their send times is
+    // the primary's downtime.
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};
+    b.push_event(fo);
+    b.push_event(sb);
+    const auto alerts = engine.evaluate(b.build(leader_inputs()));
+    REQUIRE(alerts.size() == 2);
+    CHECK(alerts[0].title == "Provider Failover");
+    CHECK(alerts[0].details.at("reason").as_string() == "failover");
+    CHECK(alerts[1].title == "Provider Failover");
+    CHECK(alerts[1].details.at("reason").as_string() == "switch_back");
+    CHECK(alerts[1].message == "the WS provider switched back from infura to quicknode");
+
+    // No previous provider: `from` is null and reads "none".
+    const auto first = evml::ops::provider_failover_event(std::nullopt, "quicknode", "switch_back");
+    CHECK(first.message == "the WS provider switched back from none to quicknode");
+    CHECK(first.details.at("from").is_null());
 }
