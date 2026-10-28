@@ -813,11 +813,7 @@ void Host::demote(const std::string& why) {
     if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
     demoting_ = true;
     const auto st = rt_->sink->status();
-    ops::AlertEvent fenced;
-    fenced.kind = ops::AlertEvent::Kind::SinkFenced;
-    fenced.message = why;
-    fenced.details = {{"discarded_records", st.discarded_total}};
-    snapshots_.push_event(std::move(fenced));
+    snapshots_.push_event(ops::sink_fenced_event(why, st.discarded_total));
     log::warn("host", "demoting to standby",
               {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
     rt_->driver->request_drain();

@@ -42,6 +42,7 @@ add_executable(evml_tests
     watchdog_test.cpp
     metrics_test.cpp
     alert_sender_test.cpp
+    alert_contract_test.cpp
     alerts_test.cpp
     deadman_test.cpp
     snapshot_test.cpp

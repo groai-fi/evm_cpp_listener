@@ -112,6 +112,7 @@ TEST_CASE("snapshot: counter increases become one event each; the first leader b
     in.driver.last_fork_point = 4980;
     in.sink.below_finalized_total = 4;
     in.ws_missed_total = 6;
+    in.ws_provider = "alchemy";
     const auto s = b.build(in);
     REQUIRE(s.events.size() == 3);
     const auto* reorg = find(s, AlertEvent::Kind::SafeReorg);
@@ -124,6 +125,7 @@ TEST_CASE("snapshot: counter increases become one event each; the first leader b
     const auto* miss = find(s, AlertEvent::Kind::WsMissedLogs);
     REQUIRE(miss);
     CHECK(miss->details.at("new_missed").as_uint64() == 1);
+    CHECK(miss->details.at("provider").as_string() == "alchemy");
 
     CHECK(b.build(in).events.empty());  // the baseline moved up
 }

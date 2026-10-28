@@ -60,6 +60,9 @@ AlertEvent provider_failover_event(const std::optional<std::string>& from, const
 /// @brief The Leader Changed event (plan 60 §5.3.3, details `old_host`, `new_host`): fired by the new leader on acquire.
 AlertEvent leader_changed_event(const std::string& old_host, const std::string& new_host);
 
+/// @brief The Sink Fenced event (plan 60 §5.3.3): the sink was fenced by another term and discarded its queue and spill.
+AlertEvent sink_fenced_event(const std::string& why, std::uint64_t discarded_records);
+
 class SnapshotBuilder {
 public:
     /// @brief Queue a host-local event (Sink Fenced, ...) for the next build(). Io thread only.

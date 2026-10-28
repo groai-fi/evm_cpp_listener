@@ -24,6 +24,14 @@ AlertEvent leader_changed_event(const std::string& old_host, const std::string& 
     return e;
 }
 
+AlertEvent sink_fenced_event(const std::string& why, std::uint64_t discarded_records) {
+    AlertEvent e;
+    e.kind = AlertEvent::Kind::SinkFenced;
+    e.message = why;
+    e.details = {{"discarded_records", discarded_records}};
+    return e;
+}
+
 void SnapshotBuilder::push_event(AlertEvent e) { pending_.push_back(std::move(e)); }
 
 OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
@@ -119,7 +127,9 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
             AlertEvent e;
             e.kind = AlertEvent::Kind::WsMissedLogs;
             e.message = "the sweep found logs the WS stream never delivered";
-            e.details = {{"new_missed", cur.ws_missed - prev_->ws_missed}, {"total", cur.ws_missed}};
+            e.details = {{"new_missed", cur.ws_missed - prev_->ws_missed},
+                         {"total", cur.ws_missed},
+                         {"provider", in.ws_provider}};
             s.events.push_back(std::move(e));
         }
         for (const auto& [name, total] : cur.inconsistent) {

@@ -1105,6 +1105,17 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
         120s));
     REQUIRE_FALSE(h.threw.load());
 
+    // One occurrence, one POST: the failover was evaluated about six times (every 10 s) before the switch back, and
+    // was sent exactly once.
+    int failover_posts = 0;
+    for (const auto& p : posts) {
+        const auto body = boost::json::parse(p.body).as_object();
+        if (body.at("title").as_string() == "Provider Failover" &&
+            body.at("details").as_object().at("reason").as_string() == "failover")
+            ++failover_posts;
+    }
+    CHECK(failover_posts == 1);
+
     const auto failover = find_reason("failover");
     REQUIRE(failover);
     CHECK(failover->at("details").as_object().at("from").as_string() == "quicknode");
