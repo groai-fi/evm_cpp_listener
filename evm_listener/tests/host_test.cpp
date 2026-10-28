@@ -649,18 +649,36 @@ TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release po
     REQUIRE(evml::test::run_until(mock_ioc, [&] { return !pings.empty(); }, 10s));
     CHECK(pings.front().method == "GET");
     CHECK(pings.front().target == "/ping/secret-uuid");
-    CHECK(posts.empty());  // a healthy leader raises nothing
+    CHECK(posts.empty());  // before the first 10 s evaluation, nothing has been posted yet
+
+    // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
+    // `current_getlogs()` and records `finalized = c0 + 250` before we regress the tag.
+    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
 
     ns.finalized = c0 + 100;  // an impossible regression of the finalized tag: release frozen
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !posts.empty() || h.threw.load(); }, 30s));  // next 10 s evaluation
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s));
     REQUIRE_FALSE(h.threw.load());
-    const auto body = boost::json::parse(posts.front().body).as_object();
+
+    const auto find_gate_regressed = [&]() -> const evml::test::MockRequest* {
+        for (const auto& req : posts) {
+            const auto obj = boost::json::parse(req.body).as_object();
+            if (std::string(obj.at("title").as_string()).find("Gate Regressed") != std::string::npos) {
+                return &req;
+            }
+        }
+        return nullptr;
+    };
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return find_gate_regressed() != nullptr || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+    const auto* gate_req = find_gate_regressed();
+    REQUIRE(gate_req != nullptr);
+    const auto body = boost::json::parse(gate_req->body).as_object();
     CHECK(body.at("severity").as_string() == "critical");
     CHECK(std::string(body.at("title").as_string()).find("Gate Regressed") != std::string::npos);
     CHECK(body.at("shard").as_string() == shard);
     CHECK(body.at("host").as_string() == "test-host");
     bool has_key = false;
-    for (const auto& [k, v] : posts.front().headers) has_key |= (k == "X-API-Key" && v == "host-test-token");
+    for (const auto& [k, v] : gate_req->headers) has_key |= (k == "X-API-Key" && v == "host-test-token");
     CHECK(has_key);
 
     h.finish();

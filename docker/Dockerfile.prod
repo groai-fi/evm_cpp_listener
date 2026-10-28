@@ -36,17 +36,19 @@ COPY conan/ ./conan/
 # Install Release dependencies
 RUN conan install . --build=missing -pr:a=conan/profiles/release -s build_type=Release
 
-# Copy source tree
+# Copy source tree (exclude tests and local .env from builder cache)
 COPY CMakeLists.txt ./
-COPY evm_listener/ ./evm_listener/
+COPY evm_listener/CMakeLists.txt ./evm_listener/
+COPY evm_listener/src/ ./evm_listener/src/
 
-# Build and strip Release executable (-Wno-restrict and -Wno-maybe-uninitialized work around GCC 12 -O3 false positives in basic_string.h and std::variant)
+# Build and strip Release executable
 ARG VERSION
+ARG EVML_TEST_HOOKS=OFF
 RUN ln -sf build/Release/generators/CMakePresets.json CMakeUserPresets.json \
     && cmake --preset conan-release \
         -DEVML_BUILD_TESTS=OFF \
         -DEVML_SANITIZE=OFF \
-        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -Wno-restrict -Wno-maybe-uninitialized" \
+        -DEVML_TEST_HOOKS=${EVML_TEST_HOOKS} \
         -DEVML_GIT_DESCRIBE="${VERSION:-v$(cat VERSION)}" \
     && cmake --build --preset conan-release --parallel 4 \
     && strip --strip-unneeded build/Release/evm_listener/evm_listener

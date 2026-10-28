@@ -149,6 +149,10 @@ endif()
 
 foreach(t IN LISTS EVML_TARGETS)
     target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        # GCC 12 -O2/-O3 false positives in libstdc++ basic_string.h (Bug 105329) and std::variant union storage.
+        target_compile_options(${t} PRIVATE -Wno-restrict -Wno-maybe-uninitialized)
+    endif()
     if(EVML_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${t} PRIVATE -fsanitize=address,undefined)

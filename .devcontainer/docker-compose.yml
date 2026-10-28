@@ -53,6 +53,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       EVML_HOST_ID: a
+      N8N_ALERT_WEBHOOK_URL: ""
+      N8N_ALERT_WEBHOOK_TOKEN: ""
+      DEADMAN_PING_URL: ""
     depends_on:
       - redis
       - toxiproxy
@@ -71,6 +74,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       EVML_HOST_ID: b
+      N8N_ALERT_WEBHOOK_URL: ""
+      N8N_ALERT_WEBHOOK_TOKEN: ""
+      DEADMAN_PING_URL: ""
     depends_on:
       - redis
       - toxiproxy

@@ -16,7 +16,7 @@ prod-image: ## Build minimal production Docker image (~80MB Debian slim)
 .PHONY: prod-audit
 prod-audit: prod-image ## Audit production container (binary version and shared libraries)
 	@echo "$(GREEN)==> Auditing production binary version...$(RESET)"
-	docker run --rm $(PROD_IMAGE_TAG) --version || true
+	docker run --rm $(PROD_IMAGE_TAG) --version
 	@echo "$(GREEN)==> Auditing shared library dependencies (ldd)...$(RESET)"
 	docker run --rm --entrypoint ldd $(PROD_IMAGE_TAG) /usr/local/bin/evm_listener
 
