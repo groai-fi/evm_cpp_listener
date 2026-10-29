@@ -163,11 +163,11 @@ See plan 60 "results and deviations".
   - `FinalityGate`: check cross-provider same-height hash mismatch across provider failovers (`SafeHashMismatch` on `on_safe`, `FinalizedAnomaly` on `on_finalized`).
   - `Sweeper`: verified Layer-1 dedup (`recent_.admit`) runs only after `fetch_page()` and `released_range()` succeed immediately before `sink_.emit()`, and verified `BELOW_FINALIZED` handling in `emit.lua`.
 
-### ⬜ 5-I Chaos / end-to-end (§Tests)
-- [ ] toxiproxy on provider and Redis links → recovery with an exact stream.
-- [ ] `docker pause listener-a` → b takes over within 20 s; after unpause a demotes or restarts as standby (D2).
-- [ ] io-freeze hook → **exit 134 inside the prod image** within 30 s (D3, closes watchdog review A7).
-- [ ] Manual, once: a `severity=info` test alert reaches `#strategy-production`.
+### ✅ 5-I Chaos / end-to-end (§Tests, done 2026-10-28, see plan 60 "5-I")
+- [x] toxiproxy on provider and Redis links → recovery with an exact stream (`ToxiHttp` + `ToxiRedis` injecting `latency` 5 s, `reset_peer`, `timeout`, `bandwidth` 0; plus multi-host lease-takeover stream integrity test; **516/516** tests pass).
+- [x] `docker pause listener-a` → b takes over within 20 s (**14 s** measured, `1|a|...` → `2|b|...`); after unpause a demotes or restarts as standby (D2, verified `/readyz` `"role":"standby"`).
+- [x] io-freeze hook → **exit 134 inside the prod image** within 30 s (D3, closes watchdog review A7; verified exit **134** in **31 s** with `heartbeat="io_tick"`, `stale_ms="30648"`).
+- [x] Manual, once: a `severity=info` test alert reaches `#strategy-production` (verified HTTP **200** from live n8n webhook).
 
 ### ⬜ Stage 4: Phase 6 / Backlog (Post-Phase 5)
 - [ ] **[P0-3] `Finality::Depth` support in `Sweeper` / `FinalityGate`:** Wire `finality = "depth"` (`head - depth_blocks`) in `FinalityGate` and `Sweeper` (or reject in `Config::validate()` until Phase 6 Anvil tests need it; `base.toml` uses `safe` and `finalized`).
@@ -202,6 +202,6 @@ graph LR
   F --> H5
   G --> H5
   H --> H5
-  H5 --> I["5-I chaos"]
+  H5 --> I["5-I chaos ✅"]
 ```
 5-B (B2–B4) and 5-C run in parallel. 5-D is the critical path and the riskiest slice: review D1 and D2 before 5-E starts.
