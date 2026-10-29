@@ -169,11 +169,12 @@ See plan 60 "results and deviations".
 - [x] io-freeze hook → **exit 134 inside the prod image** within 30 s (D3, closes watchdog review A7; verified exit **134** in **31 s** with `heartbeat="io_tick"`, `stale_ms="30648"`).
 - [x] Manual, once: a `severity=info` test alert reaches `#strategy-production` (verified HTTP **200** from live n8n webhook).
 
-### ⬜ Stage 4: Phase 6 / Backlog (Post-Phase 5)
-- [ ] **[P0-3] `Finality::Depth` support in `Sweeper` / `FinalityGate`:** Wire `finality = "depth"` (`head - depth_blocks`) in `FinalityGate` and `Sweeper` (or reject in `Config::validate()` until Phase 6 Anvil tests need it; `base.toml` uses `safe` and `finalized`).
-- [ ] **[P2-1] `redundancy.mode = "hedged"`:** Implement hedged reads or reject `"hedged"` in `Config::validate()`.
-- [ ] **[P2-2] `PoolLogSource::get_logs()` split-query `logs_provider_`:** Track all answering providers across address-split sub-queries so `block(n)` excludes every provider that supplied logs on that page.
-- [ ] **[P2-3] Cold-start tag priming (`ProviderPool::poll()`):** Fire an immediate initial `safe` / `finalized` tag poll at `ProviderPool::start()` before entering the `safe_poll_ms` / `finalized_poll_ms` sleep loop.
+### ✅ Stage 4: Pre-Phase-6 Hardening (done 2026-10-28, see plan 60 "Stage 4")
+- [x] **Stage 4a (Reorg, WS failover & `PendingBuffer` cross-check):** Preserve `rt_->ring` across WS failovers (`on_ws_active_changed`, Plan 40 §3.6) while reseeding `ws_live_from_block` after WS disconnects/failovers; track per-class `ws_reconciled_safe_to` and `ws_reconciled_final_to` high-water marks so re-sweeps after safe reorgs or `resync_ring` never double-count `ws_missed`.
+- [x] **[P0-3] & [P2-1] Config validation & `--backfill-contract` HTTP probe timer:** Reject `start_block < 1`, `finality = "depth"` (`finality=depth is not supported in v1`), and `redundancy.mode = "hedged"` (`mode=hedged is not supported in v1`) in `Config::parse`; run `pool->start_http_only()` during `backfill_contract()` so `Down`/`Cooldown` HTTP providers are probed and recover during long backfills.
+- [x] **[P2-2] `PoolLogSource::get_logs()` split-query `logs_providers_`:** Track all answering providers across address-split sub-queries in `std::unordered_set<std::string> logs_providers_` so `block(n)` excludes every provider that supplied logs on that page.
+- [x] **[P2-3] Cold-start tag priming, `stopped_` guard & TLS/resolver teardown:** Fire an immediate initial `safe` / `finalized` tag poll at `ProviderPool::start()`; guard `current_getlogs()` / `pick_getlogs_excluding()` with `stopped_`; add resolver `CloserGuard` and `TlsWsConn` / `TlsHttpConn` (`std::shared_ptr<ssl::context>`) plus `HttpClient::cancel()` wired into `AlertSender::stop()` and `Deadman::stop()` in `Host::finish()`.
+- [x] **Stage 4c (`evml_rpc_requests_total`, alert polish & repo hygiene):** Export `evml_rpc_requests_total{provider,method}` on `/metrics` (Phase 6 §6.4); preserve suppressed `Provider Inconsistent` deltas across the 15-min rate-limit window; include `first_entry_id` fallback on `Consumer Entries Trimmed`; merge `docker/.dockerignore` into root `.dockerignore` and remove duplicate comments.
 
 ### 5-J removed
 The WS `ping` mode is the separate job [71_job_ws_ping_liveness.md](71_job_ws_ping_liveness.md), after Phase 6. Phase 5 workers must not add the `[ws]` config section or change `subscribe_heads` behaviour.
@@ -203,5 +204,6 @@ graph LR
   G --> H5
   H --> H5
   H5 --> I["5-I chaos ✅"]
+  I --> S4["Stage 4 pre-Phase-6 hardening ✅"]
 ```
 5-B (B2–B4) and 5-C run in parallel. 5-D is the critical path and the riskiest slice: review D1 and D2 before 5-E starts.
