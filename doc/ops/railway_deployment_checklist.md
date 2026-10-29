@@ -1,9 +1,9 @@
 # Phase 6 Railway Production Deployment, Rollout & 72h Soak Checklist (§6.5–§6.7)
 
 > **Target Shard:** `base_eurc_usdc` (Base `chainId = 8453`)
-> **Config-as-Code:** [`railway.json`](../railway.json) · [`docker/Dockerfile.prod`](../docker/Dockerfile.prod) · [`mk/60-prod.mk`](../mk/60-prod.mk) · [`evm_listener/config/base.toml`](../evm_listener/config/base.toml)
-> **Ref Plans:** [`70_phase6_testing_rollout.md`](implmentation_plans/70_phase6_testing_rollout.md) (§6.5–§6.7, §6.11) · [`60_phase5_ops.md`](implmentation_plans/60_phase5_ops.md) (§5.0, §5.6, §5.9) · [`doc/runbook.md`](runbook.md)
-> **Pre-Prod Prerequisite:** Complete [`doc/staging_deployment_checklist.md`](staging_deployment_checklist.md) first, and stop/pause the staging listeners before starting §6.5 if staging shares RPC API keys with production.
+> **Config-as-Code:** [`railway.json`](../../railway.json) · [`docker/Dockerfile.prod`](../../docker/Dockerfile.prod) · [`mk/60-prod.mk`](../../mk/60-prod.mk) · [`evm_listener/config/base.toml`](../../evm_listener/config/base.toml)
+> **Ref Plans:** [`70_phase6_testing_rollout.md`](../implmentation_plans/70_phase6_testing_rollout.md) (§6.5–§6.7, §6.11) · [`60_phase5_ops.md`](../implmentation_plans/60_phase5_ops.md) (§5.0, §5.6, §5.9) · [`doc/runbook.md`](../runbook.md)
+> **Pre-Prod Prerequisite:** Complete [`doc/ops/staging_deployment_checklist.md`](staging_deployment_checklist.md) first, and stop/pause the staging listeners before starting §6.5 if staging shares RPC API keys with production.
 
 ---
 
@@ -11,12 +11,12 @@
 
 Before deploying to Railway production:
 - [ ] All local Phase 6 changes are committed and pushed to GitHub.
-- [ ] GitHub Actions CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml): `test` + `prod-image`) is green.
+- [ ] GitHub Actions CI ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml): `test` + `prod-image`) is green.
 - [ ] Local production image audit passes:
   ```bash
   make prod-audit
   ```
-- [ ] Staging verification ([`doc/staging_deployment_checklist.md`](staging_deployment_checklist.md)) has passed and staging containers are stopped/paused (if sharing QuickNode/Infura keys) so production has 1× RPC quota.
+- [ ] Staging verification ([`doc/ops/staging_deployment_checklist.md`](staging_deployment_checklist.md)) has passed and staging containers are stopped/paused (if sharing QuickNode/Infura keys) so production has 1× RPC quota.
 
 ---
 
@@ -40,7 +40,7 @@ Before deploying to Railway production:
   # 4) "noeviction"
   ```
   > [!IMPORTANT]
-  > `evm_listener` enforces `require_noeviction = true` at startup ([`base.toml:142`](../evm_listener/config/base.toml#L142)): it **exits 2 (`StartupFatal`)** if `maxmemory-policy != noeviction` and raises **`Redis Misconfigured` (`critical`)** if `appendonly != yes`.
+  > `evm_listener` enforces `require_noeviction = true` at startup ([`base.toml:142`](../../evm_listener/config/base.toml#L142)): it **exits 2 (`StartupFatal`)** if `maxmemory-policy != noeviction` and raises **`Redis Misconfigured` (`critical`)** if `appendonly != yes`.
 
 ### 1.2 External Alerting & Dead-Man Setup
 - [ ] **n8n Webhook (`#strategy-production`):** Confirm workflow **"EVM Listener Alert Webhook"** is active and accepts `POST` with header `X-API-Key: <N8N_ALERT_WEBHOOK_TOKEN>`.
@@ -51,7 +51,7 @@ Before deploying to Railway production:
   - Copy the ping URL (`https://hc-ping.com/<UUID>`) for `DEADMAN_PING_URL`.
 
 ### 1.3 Service Creation & Environment Variables (`evml-base-a` and `evml-base-b`)
-Create `evml-base-a` first for §6.5 smoke (and `evml-base-b` in §6.6 Step 2), pointing to the repo root ([`railway.json`](../railway.json)):
+Create `evml-base-a` first for §6.5 smoke (and `evml-base-b` in §6.6 Step 2), pointing to the repo root ([`railway.json`](../../railway.json)):
 - **No Custom Start Command:** Leave Railway's `startCommand` empty so the image's `ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/evm_listener"]` runs as PID 1.
 - **No Volume Attached:** Spill uses ephemeral container disk (`/tmp/evml-spill`) and is wiped on start (`D1`).
 - **No Public Domain:** Keep HTTP port `9464` (`/healthz`, `/readyz`, `/metrics`) strictly on `*.railway.internal`.

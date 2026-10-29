@@ -1,5 +1,8 @@
 # C++ DeFi Stack & EVM Listener Technical Architecture
 
+> [!NOTE]
+> **Historical Pre-Implementation Brainstorming Draft (Archived):** This document captures early C++20 dependency exploration (including downstream execution bot libraries like `evmone` and `secp256k1`; see [`01_doc_review_findings.md`](../../implmentation_plans/01_doc_review_findings.md)). For the canonical v1 listener toolchain and Conan 2 setup, see [`conanfile.py`](../../../conanfile.py) and [`10_phase0_repo_toolchain.md`](../../implmentation_plans/10_phase0_repo_toolchain.md).
+
 This document outlines the technical stack, C++20 dependency choices, and architectural boundaries for the **EVM C++ Log Listener** and related DeFi trading components.
 
 ---

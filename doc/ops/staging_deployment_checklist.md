@@ -1,8 +1,8 @@
 # Staging Server Deployment & Pre-Production Verification Checklist
 
 > **Target Shard:** `base_eurc_usdc` (Base `chainId = 8453`)
-> **Staging Build Automation:** [`mk/50-staging.mk`](../mk/50-staging.mk) · [`docker/Dockerfile.prod`](../docker/Dockerfile.prod) · [`evm_listener/config/base.toml`](../evm_listener/config/base.toml)
-> **Next Step After Staging Passes:** [`doc/railway_deployment_checklist.md`](railway_deployment_checklist.md) (§6.5–§6.7 Production Rollout & 72h Soak)
+> **Staging Build Automation:** [`mk/50-staging.mk`](../../mk/50-staging.mk) · [`docker/Dockerfile.prod`](../../docker/Dockerfile.prod) · [`evm_listener/config/base.toml`](../../evm_listener/config/base.toml)
+> **Next Step After Staging Passes:** [`doc/ops/railway_deployment_checklist.md`](railway_deployment_checklist.md) (§6.5–§6.7 Production Rollout & 72h Soak)
 
 ---
 
@@ -215,5 +215,5 @@ docker run --rm --network evml-staging-net \
   # Standalone Docker staging server:
   docker stop evml-staging-a evml-staging-b
   ```
-  *(Ensures staging does not consume QuickNode/Infura quota during the 72-hour production soak in [`doc/railway_deployment_checklist.md`](railway_deployment_checklist.md).)*
+  *(Ensures staging does not consume QuickNode/Infura quota during the 72-hour production soak in [`doc/ops/railway_deployment_checklist.md`](railway_deployment_checklist.md).)*
 

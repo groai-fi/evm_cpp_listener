@@ -1,5 +1,8 @@
 # EVM C++ Listener Architecture: Core Components & Best Practices
 
+> [!NOTE]
+> **Historical Pre-Implementation Brainstorming Draft (Archived):** This document reflects initial pre-Phase-0 brainstorming and contains superseded designs (such as `SET NX :log/:revert` deduplication; see [`01_doc_review_findings.md`](../../implmentation_plans/01_doc_review_findings.md)). For the canonical v1 architecture and specification, see [`System_Modules_and_Architecture.md`](../../System_Modules_and_Architecture.md) and [`00_master_plan.md`](../../implmentation_plans/00_master_plan.md).
+
 This document specifies the architectural patterns, state machines, and resilience mechanisms implemented in the **EVM C++ Log Listener** (`evm_cpp_listener`), addressing key edge cases in asynchronous blockchain event streaming.
 
 ---

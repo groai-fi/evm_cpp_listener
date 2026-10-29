@@ -1,5 +1,8 @@
 # 整合提案:按合約分片的 24/7 C++ 事件監聽器(v1, Base 8453)
 
+> [!NOTE]
+> **Historical Pre-Implementation Brainstorming Draft (Archived):** This document reflects initial pre-Phase-0 brainstorming and contains superseded designs (see [`01_doc_review_findings.md`](../../implmentation_plans/01_doc_review_findings.md)). For the canonical v1 architecture and specification, see [`System_Modules_and_Architecture.md`](../../System_Modules_and_Architecture.md) and [`00_master_plan.md`](../../implmentation_plans/00_master_plan.md).
+
 先修正一個前提:「按合約」分片不要做成**一個合約一個 process**。合約數一多就是幾十個 WS 連線、幾十倍 RPC 連線額度與記憶體,而 `eth_subscribe("logs")` 本來就支援 `address` 陣列。正確的單位是 **shard**:一個 process 負責一組合約(按事件量、業務重要性或下游消費者分組),一個 shard 一份 config、一個服務 instance。
 
 ## 1. 整體拓樸
