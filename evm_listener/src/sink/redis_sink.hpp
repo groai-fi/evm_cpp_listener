@@ -122,12 +122,17 @@ struct FinalTrimItem {
 };
 using WriteItem = std::variant<EmitItem, CkptItem, CkptInitItem, ContractsItem, FinalTrimItem>;
 
+struct StampedWrite {
+    WriteItem item;
+    RedisSinkOptions::Clock::time_point enqueued_at{};
+};
+
 // A read sits in the same queue as the writes, so it is a barrier: it runs only after every earlier write is acked.
 struct ReadItem {
     std::function<void(RedisConn&)> run;  // performs the read and delivers the result; throws ConnError on transport failure
     std::function<void()> abandon;        // delivers nullopt
 };
-using QueueItem = std::variant<WriteItem, ReadItem>;
+using QueueItem = std::variant<StampedWrite, ReadItem>;
 }  // namespace detail
 
 // The Phase 4 sink (plan 4.4). Producers (the io thread) enqueue and return; one sink thread talks to Redis.
@@ -260,10 +265,7 @@ private:
     ScriptCall to_call(const detail::WriteItem& item) const;
     Verdict classify(const detail::WriteItem& item, const CallOutcome& outcome);
     std::uint64_t discard_queue();
-    void drop_stamps(std::uint64_t n);  // the n oldest pending items were acked or discarded; sink thread
-    // `n` taken-from-the-queue writes were lost or discarded: they own the stamps just below index `end` (stamps_.size()
-    // when the queue was swapped out). Newer items enqueued since sit at or after `end`. Sink thread.
-    void drop_queue_stamps(std::size_t end, std::uint64_t n);
+    std::optional<TimePoint> oldest_pending_stamp_locked() const;
 
     void go_degraded(const std::string& reason);
     void schedule_next_probe();
@@ -278,19 +280,16 @@ private:
     std::unique_ptr<RedisConn> lease_;
     Spill spill_;
 
-    // Shared with producers.
+    // Shared with producers and status() readers under mu_.
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::deque<detail::QueueItem> queue_;
-    // Enqueue time of every pending WriteItem, oldest first: the same population and order as `pending_` (current batch,
-    // then spill, then queue), so a stamp leaves exactly when its item is acked or discarded. A separate list keeps the
-    // Spill's on-disk format untouched. Producers push, the sink thread pops: both under mu_.
-    std::deque<TimePoint> stamps_;
+    std::deque<detail::StampedWrite> held_;  // the current batch: popped from the spill or queue, not yet acked
+    std::deque<TimePoint> spill_stamps_;     // enqueue times of records currently on disk in spill_, oldest first
     std::atomic<bool> stop_{false};
     std::thread thread_;
 
     // Sink thread only.
-    std::deque<detail::WriteItem> held_;  // the current batch: popped from the spill or queue, not yet acked
     TimePoint next_renew_;
     TimePoint next_heartbeat_;
     TimePoint next_lag_probe_;
