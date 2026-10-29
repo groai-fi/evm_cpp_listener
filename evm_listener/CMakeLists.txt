@@ -109,6 +109,8 @@ add_library(evml_core STATIC
     src/sink/consumer_lag.cpp
     src/app/pool_config.cpp
     src/app/pool_log_source.cpp
+    src/app/ws_reconciler.cpp
+    src/app/host_telemetry.cpp
     src/app/host.cpp
     src/app/tools.cpp
     src/ops/watchdog.cpp

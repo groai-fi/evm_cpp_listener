@@ -2,8 +2,6 @@
 
 #include <algorithm>
 #include <csignal>
-#include <cstring>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -19,24 +17,19 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/json.hpp>
 
+#include "app/host_telemetry.hpp"
 #include "app/pool_config.hpp"
 #include "app/pool_log_source.hpp"
 #include "app/tools.hpp"
+#include "app/ws_reconciler.hpp"
 #include "chain/finality_gate.hpp"
 #include "chain/reorg_detector.hpp"
 #include "core/env.hpp"
 #include "core/log.hpp"
 #include "core/version.hpp"
-#include "ops/alert_sender.hpp"
-#include "ops/alerts.hpp"
-#include "ops/deadman.hpp"
-#include "ops/metrics.hpp"
 #include "ops/ops_http_server.hpp"
-#include "ops/snapshot.hpp"
 #include "ops/watchdog.hpp"
-#include "pipeline/pending_buffer.hpp"
 #include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
 #include "rpc/codec.hpp"
@@ -47,7 +40,6 @@
 #include "sink/redispp_conn.hpp"
 
 namespace evml::app {
-
 namespace {
 
 namespace net = boost::asio;
@@ -56,11 +48,8 @@ using namespace std::chrono_literals;
 
 constexpr auto kDrainBudget = 25s;      // plan 4.8: flush the sink before exit
 constexpr auto kShutdownGrace = 300ms;  // lets aborted pool I/O unwind before the io loop stops
-constexpr auto kOpsPeriod = 10s;        // plan 5.3.3: the alert engine evaluates a fresh snapshot this often
-// A fork walk fetches at most this many blocks (call_to is paced at reconcile_rps, so a long walk would hold the
-// provider's token bucket for minutes). A longer gap or deeper fork resyncs the ring and re-verifies instead.
 constexpr std::size_t kMaxWalkBlocks = 16;
-constexpr int kWalkAttempts = 3;  // restarts after an Inconsistent walk (a reorg mid-walk or a bad block)
+constexpr int kWalkAttempts = 3;
 
 std::atomic<bool> g_signal_stop{false};
 extern "C" void on_signal(int) { g_signal_stop.store(true, std::memory_order_relaxed); }
@@ -70,33 +59,25 @@ std::uint64_t wall_ms() {
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-/// A WS head and the provider that delivered it.
 struct HeadEvent {
     chain::BlockRef ref;
     std::string provider;
 };
 
-/// Everything that exists only while the pipeline runs. Members are declared in dependency order, so the reverse
-/// destruction order tears down the driver first and the sink last.
 struct Runtime {
-    Runtime(const std::string& shard, std::size_t ring_size, std::size_t pending_max)
-        : keys(shard), ring(ring_size), pending(pending_max) {}
+    Runtime(const core::Config& cfg, const std::string& shard, std::size_t ring_size, std::size_t pending_max)
+        : keys(shard), ring(ring_size), ws_reconciler(cfg, pending_max) {}
     sink::Keys keys;
     std::unique_ptr<sink::RedisSink> sink;
     chain::FinalityGate gate;
-    chain::ReorgDetector ring;  // fed by WS heads on the io thread; read by `source` (also io thread)
-    pipeline::PendingBuffer pending;  // WS logs awaiting their sweep (cross-check only, never emitted); io thread
+    chain::ReorgDetector ring;
+    WsReconciler ws_reconciler;
     std::shared_ptr<provider::ProviderPool> pool;
     std::unique_ptr<PoolLogSource> source;
     std::unique_ptr<pipeline::Sweeper> sweeper;
     std::unique_ptr<pipeline::PipelineDriver> driver;
     std::optional<std::uint64_t> last_g_s;
     std::optional<std::chrono::steady_clock::time_point> last_g_s_advance;
-    std::optional<std::uint64_t> ws_live_from_block;
-    bool ws_reseed_live_watermark{false};
-    std::uint64_t ws_reconciled_safe_to{0};
-    std::uint64_t ws_reconciled_final_to{0};
-    // Head handling: a walk in flight defers newer heads (the ring must not change under it).
     bool walking{false};
     std::optional<HeadEvent> deferred_head;
 };
@@ -111,7 +92,7 @@ public:
               o.stall_ms = cfg.watchdog.process_stall_ms;
               return o;
           }()),
-          engine_(ops::AlertThresholds::from_config(cfg)),
+          telemetry_(cfg),
           beat_timer_(ioc_),
           sleep_timer_(ioc_),
           grace_timer_(ioc_),
@@ -120,387 +101,265 @@ public:
     int run();
 
 private:
-    // Where the process is, for /readyz and the worker thread. Written by the worker (Standby) and the io thread (Leader).
     enum class Phase : int { WaitingRedis, Standby, Leader };
 
-    // ---- io thread ----
     void start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant);
     net::awaitable<void> pipeline_loop();
-    void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash);
-    // WS heads -> the term's ReorgDetector (plan 5.H). All of these run on the io thread.
-    void on_head(const rpc::Head& h, const std::string& provider);
-    void handle_head(const HeadEvent& e);
     net::awaitable<void> walk_fork(std::uint64_t epoch, HeadEvent e);
-    void resync_ring(const chain::BlockRef& head, const std::string& why);
-    void bump_head_epoch();
-    // plan 4.7: the payload the sink writes as `hb:<host_id>` every [ops].heartbeat_s. io thread.
-    void publish_heartbeat(const pipeline::DriverStatus& st);
-    // WS logs -> PendingBuffer, and the per-page cross-check against the sweep (plan 3.4, G3). io thread.
-    void on_ws_log(const rpc::Log& log, const std::string& provider);
-    void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs);
-    // plan 5.3: every kOpsPeriod build the alert snapshot, send what the engine returns; every [ops].deadman_ping_s
-    // feed the dead-man. io thread, from on_beat().
-    void ops_tick();
-    ops::SnapshotInputs build_snapshot_inputs(std::chrono::steady_clock::time_point now, bool leader);
-    void init_metrics();
-    void update_metrics();
-    void set_sink_counters(const sink::SinkStatus& sk);
-    void set_sweeper_counters(const pipeline::SweepStats& sw);
-    void set_leader_gauges(const sink::SinkStatus* sk, const pipeline::DriverStatus* st,
-                           std::optional<std::uint64_t> head);
-    void set_consumer_lag_gauges(const ops::Metrics::Labels& lbl, double undelivered_age_s, double pending_age_s,
-                                 double lag_entries);
-    void schedule_beat();
-    void on_beat();
-    void request_exit(int code, const std::string& why);  // first reason wins
-    void begin_shutdown(int code, const std::string& why);
-    void demote(const std::string& why);
-    void end_term();
-    void finish();
-    ops::OpsHttpServer::Routes routes();
-    std::string state_name() const;
-    const char* role_name() const;
-
-    // ---- worker thread (Redis wait, lease acquire / standby loop) ----
-    void launch_acquire(bool first);
     void acquire_thread_main(bool first);
+
+    std::string state_name() const {
+        if (rt_ && rt_->driver && !demoting_) return pipeline::to_string(rt_->driver->status().state);
+        return phase_.load() == Phase::Standby ? "standby" : "waiting_redis";
+    }
+    const char* role_name() const {
+        if (rt_ && rt_->driver && !demoting_) return "leader";
+        return phase_.load() == Phase::Standby ? "standby" : "none";
+    }
+    TelemetryContext build_telemetry_context() const {
+        TelemetryContext ctx;
+        ctx.state = state_name();
+        ctx.role = role_name();
+        ctx.leader = rt_ && rt_->driver && !demoting_;
+        const auto now = std::chrono::steady_clock::now();
+        ctx.gate_age_ok = ctx.leader && rt_->last_g_s_advance &&
+                          (now - *rt_->last_g_s_advance) <= std::chrono::seconds(cfg_.watchdog.safe_gate_stuck_s);
+        ctx.healthy_standby = phase_.load() == Phase::Standby && redis_wait_since_ns_.load() == 0;
+        ctx.provider_failovers_total = provider_failovers_total_;
+        ctx.ws_missed_total = ws_missed_total_;
+        ctx.ws_extra_total = ws_extra_total_;
+        if (rt_ && rt_->driver) {
+            ctx.sink = rt_->sink.get();
+            ctx.sweeper = rt_->sweeper.get();
+            ctx.driver = rt_->driver.get();
+            ctx.ws_reconciler = &rt_->ws_reconciler;
+            ctx.pool = rt_->pool.get();
+            ctx.ring = &rt_->ring;
+        }
+        return ctx;
+    }
+    ops::OpsHttpServer::Routes routes() {
+        return {[this] { return telemetry_.build_healthz(wd_); },
+                [this] { return telemetry_.build_readyz(build_telemetry_context()); },
+                [this] { return telemetry_.build_metrics_response(build_telemetry_context()); }};
+    }
+    void launch_acquire(bool first) {
+        if (startup_.joinable()) startup_.join();
+        startup_ = std::thread([this, first] { acquire_thread_main(first); });
+    }
+    void bump_head_epoch() {
+        ++head_epoch_;
+        if (rt_) {
+            rt_->walking = false;
+            rt_->deferred_head.reset();
+        }
+    }
+    void on_ws_log(const rpc::Log& log, const std::string& provider) {
+        if (rt_ && rt_->driver && !demoting_ && !stopping_) rt_->ws_reconciler.on_ws_log(log, provider);
+    }
+    void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
+        if (!rt_) return;
+        const auto cc = rt_->ws_reconciler.on_sweep_page(kind, range, logs);
+        ws_missed_total_ += cc.ws_missed;
+        ws_extra_total_ += cc.ws_extra;
+        if (opt_.on_cross_check) opt_.on_cross_check(ws_missed_total_, ws_extra_total_);
+    }
+    void on_head(const rpc::Head& h, const std::string& provider) {
+        if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
+        HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
+        if (rt_->walking) rt_->deferred_head = std::move(e);
+        else handle_head(e);
+    }
+    void handle_head(const HeadEvent& e) {
+        std::optional<std::uint64_t> live_c_s;
+        if (rt_->driver && rt_->driver->status().state == pipeline::PipelineState::Live) live_c_s = rt_->driver->status().c_s;
+        rt_->ws_reconciler.on_head(e.ref.number, live_c_s);
+        if (const auto top = rt_->ring.top(); top && e.ref.number > *top + kMaxWalkBlocks) {
+            resync_ring(e.ref, "head gap of " + std::to_string(e.ref.number - *top) + " blocks");
+            return;
+        }
+        if (rt_->ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
+        rt_->walking = true;
+        net::co_spawn(ioc_, walk_fork(head_epoch_, e), net::detached);
+    }
+    void resync_ring(const chain::BlockRef& head, const std::string& why) {
+        log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
+        rt_->ring.reset();
+        rt_->ring.on_head(head);
+        if (rt_->source) rt_->source->clear_cache();
+        rt_->ws_reconciler.on_ring_resync(head.number);
+        rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
+    }
+    void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash) {
+        if (!rt_ || !rt_->driver || !rt_->pool) return;
+        const auto cur = rt_->pool->current_getlogs();
+        if (!cur || *cur != provider) return;
+
+        auto& gate = rt_->gate;
+        const auto sig = tag == provider::Tag::Safe ? gate.on_safe(provider, number, hash) : gate.on_finalized(provider, number, hash);
+        if (const auto g_s = gate.safe(); g_s && (!rt_->last_g_s || *g_s != *rt_->last_g_s)) {
+            rt_->last_g_s = g_s;
+            rt_->last_g_s_advance = std::chrono::steady_clock::now();
+        }
+        rt_->driver->set_gates(gate.safe(), gate.finalized());
+        if (sig == chain::GateSignal::SafeRegression || sig == chain::GateSignal::SafeHashMismatch) {
+            log::warn("gate", "safe gate signal", {{"signal", chain::to_string(sig)}, {"provider", provider}});
+            if (rt_->source) rt_->source->clear_cache();
+            rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + provider);
+        } else if (sig == chain::GateSignal::FinalizedAnomaly) {
+            log::error("gate", "finalized anomaly: release frozen", {{"provider", provider}, {"reason", gate.frozen_reason()}});
+            rt_->driver->on_gate_frozen(gate.frozen_reason());
+        }
+    }
+    void schedule_beat() {
+        beat_timer_.expires_after(opt_.beat_period);
+        beat_timer_.async_wait([this](const boost::system::error_code& ec) {
+            if (ec || finished_) return;
+            on_beat();
+            if (!finished_) schedule_beat();
+        });
+    }
+    void publish_heartbeat(const pipeline::DriverStatus& st) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_heartbeat_) return;
+        next_heartbeat_ = now + std::chrono::seconds(cfg_.ops.heartbeat_s);
+        rt_->sink->set_heartbeat(
+            HostTelemetry::format_heartbeat_json(wall_ms(), st, rt_->ring.top(), rt_->pool->current_getlogs(), epoch_n_));
+    }
+    void ops_tick() {
+        std::string addr_family;
+        {
+            std::lock_guard lk(redis_wait_mu_);
+            addr_family = redis_wait_family_;
+        }
+        telemetry_.ops_tick(build_telemetry_context(), std::chrono::steady_clock::now(), wall_ms(), redis_misconfig_,
+                            redis_wait_since_ns_.load(), addr_family);
+    }
+    void on_beat() {
+        wd_.beat_io();
+        ops::Watchdog::State s;
+        s.role = rt_ && rt_->driver ? 1 : 0;
+        if (rt_ && rt_->sink) s.sink_mode = static_cast<std::uint64_t>(rt_->sink->mode());
+        if (rt_ && rt_->driver) {
+            const auto st = rt_->driver->status();
+            s.driver_state = static_cast<std::uint64_t>(st.state);
+            s.c_s = st.c_s;
+            s.c_f = st.c_f;
+            s.g_s = st.g_s.value_or(0);
+            s.g_f = st.g_f.value_or(0);
+            if (st.state != last_state_) {
+                log::info("host", "pipeline state",
+                          {{"from", pipeline::to_string(last_state_)}, {"to", pipeline::to_string(st.state)},
+                           {"c_s", std::to_string(st.c_s)}, {"c_f", std::to_string(st.c_f)}});
+                last_state_ = st.state;
+            }
+            publish_heartbeat(st);
+            if (opt_.on_status) opt_.on_status(st);
+        }
+        wd_.publish_state(s);
+        ops_tick();
+
+        if (opt_.stop->load(std::memory_order_relaxed)) begin_shutdown(kExitOk, "stop requested");
+        else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Failed)
+            begin_shutdown(kExitFailure, "sink failed: " + rt_->sink->fatal_message());
+        else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Fenced)
+            demote("sink fenced: another term holds the lease");
+    }
+    void demote(const std::string& why) {
+        if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
+        demoting_ = true;
+        const auto st = rt_->sink->status();
+        telemetry_.push_event(ops::sink_fenced_event(why, st.discarded_total));
+        telemetry_.update_metrics(build_telemetry_context());
+        log::warn("host", "demoting to standby", {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
+        rt_->driver->request_drain();
+        if (rt_->pool) rt_->pool->stop();
+        sleep_timer_.cancel();
+    }
+    void end_term() {
+        if (stopping_ || !rt_) return;
+        wd_.set_sink_registered(false);
+        bump_head_epoch();
+        rt_->pool->stop();
+        rt_.reset();
+        demoting_ = false;
+        last_state_ = pipeline::PipelineState::Init;
+        phase_ = Phase::Standby;
+        telemetry_.update_metrics(build_telemetry_context());
+        log::info("host", "leadership term ended, back on standby");
+        if (opt_.on_event) opt_.on_event("demoted");
+        launch_acquire(false);
+    }
+    void request_exit(int code, const std::string& why) {
+        if (exit_set_) return;
+        exit_set_ = true;
+        exit_code_ = code;
+        if (code == kExitOk) log::info("host", "shutting down", {{"reason", why}});
+        else log::error("host", "shutting down", {{"reason", why}, {"exit_code", std::to_string(code)}});
+    }
+    void begin_shutdown(int code, const std::string& why) {
+        if (stopping_.exchange(true)) return;
+        request_exit(code, why);
+        if (rt_ && rt_->driver) {
+            rt_->driver->request_drain();
+            if (rt_->pool) rt_->pool->stop();
+            sleep_timer_.cancel();
+        } else {
+            finish();
+        }
+    }
+    void finish() {
+        if (finished_) return;
+        finished_ = true;
+        stopping_ = true;
+        beat_timer_.cancel();
+        freeze_timer_.cancel();
+        sleep_timer_.cancel();
+        if (ops_) ops_->stop();
+        telemetry_.stop();
+        if (rt_ && rt_->pool) rt_->pool->stop();
+        grace_timer_.expires_after(kShutdownGrace);
+        grace_timer_.async_wait([this](const boost::system::error_code&) { ioc_.stop(); });
+    }
 
     const core::Config& cfg_;
     HostOptions opt_;
     std::string redis_url_;
-
     net::io_context ioc_;
     ops::Watchdog wd_;
-    ops::AlertEngine engine_;
-    ops::SnapshotBuilder snapshots_;
-    std::unique_ptr<ops::AlertSender> alerts_;  // null = webhook not configured (alerts are only logged)
-    std::unique_ptr<ops::Deadman> deadman_;
-    std::chrono::steady_clock::time_point next_ops_{}, next_deadman_{};  // io thread
-    ops::Metrics metrics_;
+    HostTelemetry telemetry_;
     std::unique_ptr<ops::OpsHttpServer> ops_;
     net::steady_timer beat_timer_, sleep_timer_, grace_timer_, freeze_timer_;
-    std::thread startup_;  // the acquire worker; one run per leadership term
-
-    std::atomic<bool> stopping_{false};  // read by the worker thread too
+    std::thread startup_;
+    std::atomic<bool> stopping_{false};
     std::atomic<Phase> phase_{Phase::WaitingRedis};
-    // Redis unreachable (plan 5.3.3): the acquire thread sets the first, under the mutex the second, while the startup
-    // wait runs; the io thread reads both. 0 = not waiting.
-    std::atomic<std::int64_t> redis_wait_since_ns_{0};  // steady_clock epoch ns of the first failed attempt
+    std::atomic<std::int64_t> redis_wait_since_ns_{0};
     std::mutex redis_wait_mu_;
     std::string redis_wait_family_;
-    std::optional<ops::RedisMisconfig> redis_misconfig_;  // io thread; from the startup report
-    std::optional<std::uint64_t> epoch_n_;                // io thread; the `n` of this term's lease token
-    std::optional<std::chrono::steady_clock::time_point> sink_degraded_since_;  // io thread
+    std::optional<ops::RedisMisconfig> redis_misconfig_;
+    std::optional<std::uint64_t> epoch_n_;
     bool demoting_{false};
-    // `head_epoch_` is monotonic across terms and ends stale fork walks when a term ends or the WS provider changes.
     std::uint64_t head_epoch_{0};
-    std::chrono::steady_clock::time_point next_heartbeat_{};  // io thread; reset per term so the first beat publishes
-    std::uint64_t ws_missed_total_{0};
-    std::uint64_t ws_extra_total_{0};
-    std::uint64_t provider_failovers_total_{0};
-    std::map<std::string, std::uint64_t> alerts_fired_total_;
-    bool finished_{false};
-    bool exit_set_{false};
+    std::chrono::steady_clock::time_point next_heartbeat_{};
+    std::uint64_t ws_missed_total_{0}, ws_extra_total_{0}, provider_failovers_total_{0};
+    bool finished_{false}, exit_set_{false};
     int exit_code_{0};
     pipeline::PipelineState last_state_{pipeline::PipelineState::Init};
-
     std::unique_ptr<Runtime> rt_;  // declared last: destroyed first, before the io_context it posts to
 };
-
-// ------------------------------------------------------------------------------------------------------------------
-// Ops routes & metrics (plan 60 §5.2, §5.4, slice 5-F)
-// ------------------------------------------------------------------------------------------------------------------
-
-std::string Host::state_name() const {
-    if (rt_ && rt_->driver && !demoting_) return pipeline::to_string(rt_->driver->status().state);
-    return phase_.load() == Phase::Standby ? "standby" : "waiting_redis";
-}
-
-const char* Host::role_name() const {
-    if (rt_ && rt_->driver && !demoting_) return "leader";
-    return phase_.load() == Phase::Standby ? "standby" : "none";
-}
-
-void Host::set_sink_counters(const sink::SinkStatus& sk) {
-    metrics_.counter_total("evml_lease_renew_failures_total", "Lease renew failures", {}, sk.renew_failures_total);
-    metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink", {},
-                           sk.discarded_total);
-    metrics_.counter_total("evml_sink_dup_total", "Duplicate emissions collapsed by Redis emit.lua", {}, sk.dup_total);
-    metrics_.counter_total("evml_sink_below_finalized_total", "Tracked emissions refused at or below finalized checkpoint", {},
-                           sk.below_finalized_total);
-    metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {}, sk.heartbeat_failures_total);
-    metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {},
-                           sk.consumer_lag_failures_total);
-    metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, sk.reconnects_total);
-}
-
-void Host::set_sweeper_counters(const pipeline::SweepStats& sw) {
-    metrics_.counter_total("evml_safe_missed_total", "Safe-class logs missed by safe sweep and emitted late by final sweep", {},
-                           sw.late);
-    metrics_.counter_total("evml_sweep_emitted_safe_total", "Safe-sweep log emissions", {}, sw.emitted_safe);
-    metrics_.counter_total("evml_sweep_emitted_final_total", "Final-sweep log emissions", {}, sw.emitted_final);
-    metrics_.counter_total("evml_sweep_deduped_total", "Emissions skipped by in-process dedup layer", {}, sw.deduped);
-    metrics_.counter_total("evml_reverts_emitted_total", "Revert events emitted", {}, sw.reverts);
-    metrics_.counter_total("evml_sweep_matched_total", "Safe-released logs confirmed by final sweep", {}, sw.matched);
-    metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {}, sw.range_shrinks);
-    metrics_.counter_total("evml_sweep_failure_shrinks_total", "AIMD page shrinks due to rate limit/timeout/5xx", {},
-                           sw.failure_shrinks);
-    metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {}, sw.volume_shrinks);
-    metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {}, sw.reverified_new);
-    metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {}, sw.address_splits);
-}
-
-void Host::set_leader_gauges(const sink::SinkStatus* sk, const pipeline::DriverStatus* st,
-                             std::optional<std::uint64_t> head) {
-    metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, sk ? static_cast<double>(sk->queue_depth) : 0.0);
-    metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {},
-                   sk ? static_cast<double>(sk->spill_records) : 0.0);
-    metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {},
-                   sk ? static_cast<double>(sk->spill_bytes) : 0.0);
-    metrics_.gauge("evml_sink_pending_writes", "Total unacknowledged sink writes (queue + batch + spill)", {},
-                   sk ? static_cast<double>(sk->pending_writes) : 0.0);
-    metrics_.gauge("evml_sink_oldest_record_age_seconds", "Age in seconds of oldest unacknowledged sink write", {},
-                   sk ? static_cast<double>(sk->oldest_record_age_s) : 0.0);
-    metrics_.gauge("evml_head_block", "Highest block number in the WS head ring", {},
-                   static_cast<double>(head.value_or(0)));
-    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "safe"}},
-                   st ? static_cast<double>(st->g_s.value_or(0)) : 0.0);
-    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "finalized"}},
-                   st ? static_cast<double>(st->g_f.value_or(0)) : 0.0);
-    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}},
-                   st ? static_cast<double>(st->c_s) : 0.0);
-    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}},
-                   st ? static_cast<double>(st->c_f) : 0.0);
-}
-
-void Host::set_consumer_lag_gauges(const ops::Metrics::Labels& lbl, double undelivered_age_s, double pending_age_s,
-                                   double lag_entries) {
-    metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry", lbl,
-                   undelivered_age_s);
-    metrics_.gauge("evml_consumer_pending_age_seconds",
-                   "Age in seconds of oldest pending unacknowledged stream entry", lbl, pending_age_s);
-    metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)", lbl,
-                   lag_entries);
-}
-
-void Host::init_metrics() {
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}}, 0.0);
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}}, 0.0);
-    metrics_.counter_total("evml_provider_failovers_total", "WS provider failovers", {}, 0);
-    metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", "Safe Gate Stuck"}}, 0);
-    metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, 0);
-    metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}}, 0);
-    metrics_.counter_total("evml_alert_send_failures_total", "Alert webhook send failures after retries", {}, 0);
-    metrics_.counter_total("evml_deadman_ping_failures_total", "Dead-man switch ping failures", {}, 0);
-    metrics_.counter_total("evml_ws_missed_logs_total", "Logs found by getLogs sweep that WS missed", {}, 0);
-    metrics_.counter_total("evml_ws_extra_logs_total", "Staged WS logs not present in canonical getLogs sweep", {}, 0);
-    metrics_.counter_total("evml_pending_evicted_logs_total", "Staged WS logs evicted at pending_max_logs cap", {}, 0);
-    set_sink_counters({});
-    set_sweeper_counters({});
-    set_leader_gauges(nullptr, nullptr, std::nullopt);
-
-    const auto init_provider_metrics = [this](const std::string& name) {
-        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", name}}, 0.0);
-        metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                               {{"provider", name}}, 0);
-        metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
-                               {{"provider", name}}, 0);
-        for (const char* m : {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber", "eth_chainId"}) {
-            metrics_.counter_total("evml_rpc_requests_total", "Total HTTP JSON-RPC requests sent to provider",
-                                   {{"provider", name}, {"method", m}}, 0);
-        }
-    };
-    for (const auto& p : cfg_.getlogs_chain) init_provider_metrics(p.name);
-    for (const auto& p : cfg_.ws_chain) init_provider_metrics(p.name);
-    if (cfg_.sink.consumer_groups.empty()) {
-        set_consumer_lag_gauges({{"stream", "events"}, {"group", "none"}}, 0.0, 0.0, 0.0);
-    } else {
-        for (const auto& g : cfg_.sink.consumer_groups) {
-            set_consumer_lag_gauges({{"stream", core::to_string(g.stream)}, {"group", g.group}}, 0.0, 0.0, 0.0);
-        }
-    }
-}
-
-void Host::update_metrics() {
-    const bool leader = rt_ && rt_->driver && !demoting_;
-    const std::string role = role_name();
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}}, role == "leader" ? 1.0 : 0.0);
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}}, role == "standby" ? 1.0 : 0.0);
-    metrics_.counter_total("evml_provider_failovers_total", "WS provider failovers", {}, provider_failovers_total_);
-    metrics_.counter_total("evml_alert_send_failures_total", "Alert webhook send failures after retries", {},
-                           alerts_ ? alerts_->send_failures_total() : 0);
-    metrics_.counter_total("evml_deadman_ping_failures_total", "Dead-man switch ping failures", {},
-                           deadman_ ? deadman_->ping_failures_total() : 0);
-    metrics_.counter_total("evml_ws_missed_logs_total", "Logs found by getLogs sweep that WS missed", {}, ws_missed_total_);
-    metrics_.counter_total("evml_ws_extra_logs_total", "Staged WS logs not present in canonical getLogs sweep", {}, ws_extra_total_);
-    for (const auto& [title, count] : alerts_fired_total_) {
-        metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", title}}, count);
-    }
-
-    if (rt_ && rt_->driver) {
-        const auto sk = rt_->sink->status();
-        set_sink_counters(sk);
-        set_sweeper_counters(rt_->sweeper->stats());
-
-        const auto st = rt_->driver->status();
-        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, st.reverify_clean);
-        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}}, st.safe_reorgs);
-        metrics_.counter_total("evml_pending_evicted_logs_total", "Staged WS logs evicted at pending_max_logs cap", {},
-                               rt_->pending.evicted_total());
-
-        for (const auto& p : rt_->pool->health()) {
-            metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                                    {{"provider", p.name}}, rt_->pool->inconsistency_total(p.name));
-            metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
-                                   {{"provider", p.name}}, rt_->pool->throttled_total(p.name));
-            for (const auto& [method, count] : rt_->pool->rpc_requests_total(p.name)) {
-                metrics_.counter_total("evml_rpc_requests_total", "Total HTTP JSON-RPC requests sent to provider",
-                                       {{"provider", p.name}, {"method", method}}, count);
-            }
-        }
-
-        if (leader) {
-            set_leader_gauges(&sk, &st, rt_->ring.top());
-
-            const auto ws = rt_->pool->active_ws();
-            const auto getlogs = rt_->pool->current_getlogs();
-            for (const auto& p : rt_->pool->health()) {
-                const bool active = (ws && *ws == p.name) || (getlogs && *getlogs == p.name);
-                metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", p.name}},
-                               active ? 1.0 : 0.0);
-            }
-
-            for (const auto& c : rt_->sink->consumer_lag()) {
-                if (c.probed_at_ms == 0) continue;
-                set_consumer_lag_gauges({{"stream", core::to_string(c.stream)}, {"group", c.group}},
-                                        static_cast<double>(c.undelivered_age_s), static_cast<double>(c.pending_age_s),
-                                        c.lag ? static_cast<double>(*c.lag) : -1.0);
-            }
-        }
-    }
-
-    if (!leader) {
-        for (const auto& p : cfg_.getlogs_chain) {
-            metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs",
-                           {{"provider", p.name}}, 0.0);
-        }
-        for (const auto& p : cfg_.ws_chain) {
-            metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs",
-                           {{"provider", p.name}}, 0.0);
-        }
-        set_leader_gauges(nullptr, nullptr, std::nullopt);
-    }
-}
-
-ops::OpsHttpServer::Routes Host::routes() {
-    ops::OpsHttpServer::Routes r;
-    r.healthz = [this] {
-        ops::OpsResponse o;
-        if (const char* stale = wd_.stale_heartbeat()) {
-            o.status = 503;
-            o.body = std::string("stale heartbeat: ") + stale + "\n";
-        } else {
-            o.body = "ok\n";
-        }
-        return o;
-    };
-    r.readyz = [this] {
-        ops::OpsResponse o;
-        o.content_type = "application/json";
-        const std::string state = state_name();
-        const std::string role = role_name();
-        const bool leader = rt_ && rt_->driver && !demoting_;
-        const bool saturated = leader && rt_->sink && rt_->sink->saturated();
-        const auto now = std::chrono::steady_clock::now();
-        const bool gate_age_ok = leader && rt_->last_g_s_advance &&
-                                 (now - *rt_->last_g_s_advance) <= std::chrono::seconds(cfg_.watchdog.safe_gate_stuck_s);
-        const bool healthy_standby = phase_.load() == Phase::Standby && redis_wait_since_ns_.load() == 0;
-        const bool ready = (leader && state == "live" && !saturated && gate_age_ok) || healthy_standby;
-        o.status = ready ? 200 : 503;
-
-        const auto opt_u64 = [](const std::optional<std::uint64_t>& v) {
-            return v ? boost::json::value(*v) : boost::json::value(nullptr);
-        };
-        boost::json::object gates;
-        boost::json::object cursors;
-        if (leader) {
-            const auto st = rt_->driver->status();
-            gates["safe"] = opt_u64(st.g_s);
-            gates["finalized"] = opt_u64(st.g_f);
-            cursors["safe"] = st.c_s;
-            cursors["finalized"] = st.c_f;
-        } else {
-            gates["safe"] = nullptr;
-            gates["finalized"] = nullptr;
-            cursors["safe"] = nullptr;
-            cursors["finalized"] = nullptr;
-        }
-
-        boost::json::object body;
-        body["state"] = state;
-        body["role"] = role;
-        body["lease"] = cfg_.lease.enabled ? "enabled" : "disabled";
-        body["deadman"] = (deadman_ && deadman_->enabled()) ? "enabled" : "disabled";
-        body["consumer_lag"] = !cfg_.sink.consumer_groups.empty() ? "enabled" : "disabled";
-        body["saturated"] = saturated;
-        body["gates"] = std::move(gates);
-        body["cursors"] = std::move(cursors);
-        o.body = boost::json::serialize(body) + "\n";
-        return o;
-    };
-    r.metrics = [this] {
-        ops::OpsResponse o;
-        o.content_type = "text/plain; version=0.0.4; charset=utf-8";
-        update_metrics();
-        o.body = metrics_.serialize();
-        return o;
-    };
-    return r;
-}
-
-// ------------------------------------------------------------------------------------------------------------------
-// Lifecycle
-// ------------------------------------------------------------------------------------------------------------------
 
 int Host::run() {
     if (!opt_.stop) throw std::invalid_argument("HostOptions::stop is required");
     redis_url_ = core::env::require(cfg_.sink.redis_url_env);
-    init_metrics();
+    telemetry_.init_metrics(cfg_);
     ops_ = std::make_unique<ops::OpsHttpServer>(ioc_, cfg_.ops.http_listen, routes());
     if (opt_.on_ops_port) opt_.on_ops_port(ops_->port());
-
-    // plan 5.3: the alert webhook and the dead-man URL come from the environment only. Both are optional (local dev):
-    // without them alerts are only logged and the dead-man is "disabled" (the Deadman constructor warns).
-    {
-        const auto hook = core::env::get(cfg_.ops.alert_webhook_env);
-        const auto token = core::env::get(cfg_.ops.alert_webhook_token_env);
-        if (!hook.empty() && !token.empty()) {
-            ops::AlertSenderOptions ao;
-            ao.url = hook;
-            ao.token = token;
-            ao.service = cfg_.ops.alert_service;
-            ao.shard = cfg_.shard.id;
-            ao.host = cfg_.shard.host_id;
-            ao.user_agent = user_agent(cfg_);
-            ao.seed = std::random_device{}();
-            alerts_ = std::make_unique<ops::AlertSender>(ioc_.get_executor(), std::move(ao));
-        } else {
-            log::warn("host", "alert webhook not configured: alerts are only logged",
-                      {{"url_env", cfg_.ops.alert_webhook_env}, {"token_env", cfg_.ops.alert_webhook_token_env}});
-        }
-        ops::DeadmanOptions dopt;
-        dopt.url = core::env::get(cfg_.ops.deadman_ping_env);
-        dopt.user_agent = user_agent(cfg_);
-        deadman_ = std::make_unique<ops::Deadman>(ioc_.get_executor(), std::move(dopt));
-    }
+    telemetry_.init_ops_clients(ioc_.get_executor(), user_agent(cfg_));
 
     wd_.start();
     log::info("host", "started",
-              {{"version", core::version_string()},
-               {"shard", cfg_.shard.id},
-               {"host_id", cfg_.shard.host_id},
-               {"ops_port", std::to_string(ops_->port())},
-               {"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
+              {{"version", core::version_string()}, {"shard", cfg_.shard.id}, {"host_id", cfg_.shard.host_id},
+               {"ops_port", std::to_string(ops_->port())}, {"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
 
     if (opt_.test_freeze_io_after) {
         freeze_timer_.expires_after(*opt_.test_freeze_io_after);
@@ -523,30 +382,21 @@ int Host::run() {
     }
 
     if (startup_.joinable()) startup_.join();
-    // The drain blocks the main thread for up to kDrainBudget; stop the watchdog first so it cannot abort us.
     wd_.stop();
     if (rt_ && rt_->sink) {
         wd_.set_sink_registered(false);
         const auto d = rt_->sink->drain(kDrainBudget);
         log::info("host", "sink drained",
-                  {{"flushed", d.flushed ? "true" : "false"},
-                   {"unflushed", std::to_string(d.unflushed)},
+                  {{"flushed", d.flushed ? "true" : "false"}, {"unflushed", std::to_string(d.unflushed)},
                    {"lease_released", d.lease_released ? "true" : "false"}});
     }
     log::info("host", "stopped", {{"exit_code", std::to_string(exit_code_)}});
     return exit_code_;
 }
 
-void Host::launch_acquire(bool first) {
-    if (startup_.joinable()) startup_.join();  // the previous run has already posted its result and is exiting
-    startup_ = std::thread([this, first] { acquire_thread_main(first); });
-}
-
 void Host::acquire_thread_main(bool first) {
-    // Blocking waits (Redis readiness on the first run, the standby loop on every run) live off the io thread:
-    // /healthz and the io beat keep working while Redis is down or another host leads.
     const auto stop = [this] { return stopping_.load() || opt_.stop->load(std::memory_order_relaxed); };
-    const auto sleep = [stop](std::chrono::milliseconds d) {  // sliced so a stop request is noticed quickly
+    const auto sleep = [stop](std::chrono::milliseconds d) {
         const auto end = std::chrono::steady_clock::now() + d;
         while (std::chrono::steady_clock::now() < end && !stop()) std::this_thread::sleep_for(50ms);
     };
@@ -569,12 +419,10 @@ void Host::acquire_thread_main(bool first) {
             so.stop = stop;
             so.sleep = sleep;
             report = sink::await_redis_ready(redis_url_, so);
-            redis_wait_since_ns_.store(0);  // reachable again (or told to stop)
-            if (!report) return;  // stop requested while waiting; the beat sees the same flag and shuts down
-            {
-                std::lock_guard lk(redis_wait_mu_);
-                redis_wait_family_ = report->address_family;
-            }
+            redis_wait_since_ns_.store(0);
+            if (!report) return;
+            std::lock_guard lk(redis_wait_mu_);
+            redis_wait_family_ = report->address_family;
         }
 
         sink::LeaseGrant grant;
@@ -585,7 +433,7 @@ void Host::acquire_thread_main(bool first) {
             sink::AcquireOptions ao;
             ao.host_id = cfg_.shard.host_id;
             ao.ttl_ms = cfg_.lease.ttl_ms;
-            ao.poll = std::chrono::milliseconds(cfg_.lease.renew_ms);  // plan 5.H: the standby polls every renew_ms
+            ao.poll = std::chrono::milliseconds(cfg_.lease.renew_ms);
             ao.stop = stop;
             ao.sleep = sleep;
             ao.on_waiting = [this](const std::string& /*error*/, std::chrono::milliseconds waited) {
@@ -596,7 +444,7 @@ void Host::acquire_thread_main(bool first) {
             ao.on_reachable = [this] { redis_wait_since_ns_.store(0); };
             const auto g = sink::acquire_lease_blocking(conn, keys, ao);
             redis_wait_since_ns_.store(0);
-            if (!g) return;  // stop requested while on standby
+            if (!g) return;
             grant = std::move(*g);
         } else {
             grant.token = sink::lease_disabled_token();
@@ -611,30 +459,24 @@ void Host::acquire_thread_main(bool first) {
 
 void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant) {
     if (stopping_) return;
-    epoch_n_ = grant.epoch_n;  // nullopt with the lease disabled (token "0")
-    if (grant.old_host) snapshots_.push_event(ops::leader_changed_event(*grant.old_host, cfg_.shard.host_id));
+    epoch_n_ = grant.epoch_n;
+    if (grant.old_host) telemetry_.push_event(ops::leader_changed_event(*grant.old_host, cfg_.shard.host_id));
     try {
-        if (rep && rep->misconfigured) {
-            redis_misconfig_ = ops::RedisMisconfig{
-                rep->maxmemory_policy, rep->appendonly,
-                std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
-                    std::to_string(rep->version.patch)};
-        }
         if (rep) {
+            const auto ver = std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
+                             std::to_string(rep->version.patch);
+            if (rep->misconfigured) redis_misconfig_ = ops::RedisMisconfig{rep->maxmemory_policy, rep->appendonly, ver};
             for (const auto& w : rep->warnings) log::warn("host", "redis startup warning", {{"warning", w}});
-            log::info("host", "redis ready",
-                      {{"redis_version", std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
-                                             std::to_string(rep->version.patch)}});
+            log::info("host", "redis ready", {{"redis_version", ver}});
         }
 
         bump_head_epoch();
-        rt_ = std::make_unique<Runtime>(cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
+        rt_ = std::make_unique<Runtime>(cfg_, cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
 
         auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, grant.token);
         sopts.loop_beat = wd_.sink_beat_slot();
         sopts.host_id = cfg_.shard.host_id;
         sopts.heartbeat_ms = cfg_.ops.heartbeat_s * 1000;
-        // The key must outlive a few missed writes (the sink rejects a TTL <= the interval).
         sopts.heartbeat_ttl_s = std::max<std::uint32_t>(sopts.heartbeat_ttl_s, cfg_.ops.heartbeat_s * 3);
         next_heartbeat_ = {};
         rt_->sink = std::make_unique<sink::RedisSink>(std::move(sopts), rt_->keys,
@@ -646,48 +488,29 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         provider::PoolHandlers h;
         h.on_transition = [](const provider::Transition& t, std::string_view why) {
             log::info("pool", "provider transition",
-                      {{"provider", t.provider},
-                       {"from", provider::to_string(t.from)},
-                       {"to", provider::to_string(t.to)},
-                       {"reason", why}});
+                      {{"provider", t.provider}, {"from", provider::to_string(t.from)}, {"to", provider::to_string(t.to)}, {"reason", why}});
         };
-        h.on_tag = [this](const std::string& p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) {
-            on_tag(p, tag, n, hash);
-        };
+        h.on_tag = [this](const std::string& p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) { on_tag(p, tag, n, hash); };
         h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
         h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
-        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to,
-                                        std::string_view reason) {
-            // Keep the head ring across WS switches so the first head from the new provider checks continuity at the
-            // join (plan 3.6); any in-flight walk on the old provider is abandoned via bump_head_epoch().
+        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to, std::string_view reason) {
             if (!rt_) return;
-            log::info("pool", "ws active provider changed",
-                      {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
-            // "failover" is ProviderBook's Forced decision and "switch_back" is SwitchBack, both naming a replacement;
-            // a move to no provider is "none_available" and raises no Provider Failover event (the no-healthy-provider alerts cover it).
+            log::info("pool", "ws active provider changed", {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
             if ((reason == "failover" || reason == "switch_back") && to) {
                 if (reason == "failover") ++provider_failovers_total_;
-                snapshots_.push_event(ops::provider_failover_event(from, *to, reason));
+                telemetry_.push_event(ops::provider_failover_event(from, *to, reason));
             }
-            if (!to) {
-                rt_->ws_live_from_block.reset();
-                rt_->ws_reseed_live_watermark = true;
-            } else if (rt_->ws_live_from_block) {
-                if (rt_->driver) {
-                    rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, rt_->driver->status().c_s + 1);
-                }
-                rt_->ws_reseed_live_watermark = true;
-            }
+            const auto c_s = rt_->driver ? std::optional<std::uint64_t>(rt_->driver->status().c_s) : std::nullopt;
+            rt_->ws_reconciler.on_ws_provider_changed(to.has_value(), c_s);
             if (rt_->source) rt_->source->clear_cache();
             bump_head_epoch();
         };
         rt_->pool = provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
-        // block() reads timestamps and hashes from the head ring first and asks a provider only on a ring miss.
         rt_->source = std::make_unique<PoolLogSource>(rt_->pool, &rt_->ring);
 
         pipeline::SweeperOptions sw;
         sw.min_range = cfg_.backfill.min_range;
-        sw.max_page_logs = std::max<std::size_t>(1, cfg_.sink.queue_capacity / 2);  // plan 3.5 G6
+        sw.max_page_logs = std::max<std::size_t>(1, cfg_.sink.queue_capacity / 2);
         sw.on_page = [this](core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
             on_sweep_page(kind, range, logs);
         };
@@ -713,15 +536,13 @@ net::awaitable<void> Host::pipeline_loop() {
     try {
         for (;;) {
             const auto r = co_await driver.tick();
-            if (!rt_->ws_live_from_block && !rt_->ws_reseed_live_watermark &&
-                driver.status().state == pipeline::PipelineState::Live &&
-                rt_->pool && rt_->pool->active_ws()) {
-                rt_->ws_live_from_block = driver.status().c_s + 1;
+            if (driver.status().state == pipeline::PipelineState::Live) {
+                rt_->ws_reconciler.on_live_tick(driver.status().c_s, rt_->pool && rt_->pool->active_ws().has_value());
             }
             if (r.done || stopping_ || demoting_) break;
             if (r.wait.count() > 0) {
                 sleep_timer_.expires_after(r.wait);
-                boost::system::error_code ec;  // operation_aborted = a stop request cancelled the sleep
+                boost::system::error_code ec;
                 co_await sleep_timer_.async_wait(net::redirect_error(net::use_awaitable, ec));
             }
         }
@@ -729,160 +550,17 @@ net::awaitable<void> Host::pipeline_loop() {
         request_exit(kExitFailure, std::string("pipeline tick threw: ") + e.what());
     }
     const auto st = driver.status();
-    if (st.state == pipeline::PipelineState::Failed) {
-        request_exit(kExitUsage, "pipeline failed: " + st.fatal);
-    }
+    if (st.state == pipeline::PipelineState::Failed) request_exit(kExitUsage, "pipeline failed: " + st.fatal);
     if (demoting_ && !stopping_) {
-        // Tear the term down from a fresh handler: this coroutine still runs on the runtime being destroyed.
         net::post(ioc_, [this] { end_term(); });
         co_return;
     }
     finish();
 }
 
-void Host::on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash) {
-    if (!rt_ || !rt_->driver || !rt_->pool) return;
-    // Only the current getLogs provider's tags define the gates (plan 3.3); the WS cross-check also reads tags.
-    const auto cur = rt_->pool->current_getlogs();
-    if (!cur || *cur != provider) return;
-
-    auto& gate = rt_->gate;
-    const auto sig = tag == provider::Tag::Safe ? gate.on_safe(provider, number, hash) : gate.on_finalized(provider, number, hash);
-    if (const auto g_s = gate.safe(); g_s && (!rt_->last_g_s || *g_s != *rt_->last_g_s)) {
-        rt_->last_g_s = g_s;
-        rt_->last_g_s_advance = std::chrono::steady_clock::now();
-    }
-    rt_->driver->set_gates(gate.safe(), gate.finalized());
-    switch (sig) {
-        case chain::GateSignal::None:
-            break;
-        case chain::GateSignal::SafeRegression:
-        case chain::GateSignal::SafeHashMismatch:
-            log::warn("gate", "safe gate signal", {{"signal", chain::to_string(sig)}, {"provider", provider}});
-            if (rt_->source) rt_->source->clear_cache();
-            rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + provider);
-            break;
-        case chain::GateSignal::FinalizedAnomaly:
-            log::error("gate", "finalized anomaly: release frozen", {{"provider", provider}, {"reason", gate.frozen_reason()}});
-            rt_->driver->on_gate_frozen(gate.frozen_reason());
-            break;
-    }
-}
-
-void Host::bump_head_epoch() {
-    ++head_epoch_;
-    if (rt_) {
-        rt_->walking = false;
-        rt_->deferred_head.reset();
-    }
-}
-
-void Host::on_ws_log(const rpc::Log& log, const std::string& provider) {
-    if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
-    if (log.topics.empty() || cfg_.route(log.address, log.topics.front()) == nullptr) {
-        log::warn("host", "ws log matches no configured route, not staged",
-                  {{"provider", provider}, {"block", std::to_string(log.block_number)}});
-        return;
-    }
-    rt_->pending.stage(log, provider);
-}
-
-void Host::on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
-    if (!rt_) return;
-    // `logs` holds one class (safe for a safe page, finalized for a final page), so only staged logs of that class
-    // are in scope; the other class waits for its own sweep.
-    const bool want_safe = kind == core::Finality::Safe;
-    const auto in_scope = [this, want_safe](const rpc::Log& l) {
-        const auto* route = cfg_.route(l.address, l.topics.at(0));  // stage() only admits routed logs
-        return route != nullptr && (route->finality == core::Finality::Safe) == want_safe;
-    };
-    std::uint64_t& reconciled_to = want_safe ? rt_->ws_reconciled_safe_to : rt_->ws_reconciled_final_to;
-    // Historical catch-up pages below ws_live_from_block, or blocks already reconciled before a safe reorg rewound the
-    // cursor, cannot be cross-checked against PendingBuffer again. Evict any staged entries in that range without counting misses.
-    if (!rt_->ws_live_from_block) {
-        reconciled_to = std::max(reconciled_to, range.to);
-        (void)rt_->pending.reconcile(range.from, range.to, logs, in_scope);
-        return;
-    }
-    const std::uint64_t check_from = std::max(*rt_->ws_live_from_block, reconciled_to + 1);
-    reconciled_to = std::max(reconciled_to, range.to);
-    if (range.to < check_from) {
-        (void)rt_->pending.reconcile(range.from, range.to, logs, in_scope);
-        return;
-    }
-    pipeline::BlockRange check_range = range;
-    const std::vector<rpc::Log>* check_logs = &logs;
-    std::vector<rpc::Log> filtered_logs;
-    if (range.from < check_from) {
-        (void)rt_->pending.reconcile(range.from, check_from - 1, {}, in_scope);
-        check_range.from = check_from;
-        filtered_logs.reserve(logs.size());
-        for (const auto& l : logs) {
-            if (l.block_number >= check_from) filtered_logs.push_back(l);
-        }
-        check_logs = &filtered_logs;
-    }
-    const auto cc = rt_->pending.reconcile(check_range.from, check_range.to, *check_logs, in_scope);
-    ws_missed_total_ += cc.ws_missed;
-    ws_extra_total_ += cc.ws_extra;
-    if (cc.ws_missed != 0 || cc.ws_extra != 0) {
-        log::warn("host", "ws cross-check mismatch",
-                  {{"kind", want_safe ? "safe" : "finalized"},
-                   {"from", std::to_string(check_range.from)},
-                   {"to", std::to_string(check_range.to)},
-                   {"ws_missed", std::to_string(cc.ws_missed)},
-                   {"ws_extra", std::to_string(cc.ws_extra)}});
-    }
-    if (opt_.on_cross_check) opt_.on_cross_check(ws_missed_total_, ws_extra_total_);
-}
-
-void Host::on_head(const rpc::Head& h, const std::string& provider) {
-    if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
-    HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
-    if (rt_->walking) {
-        rt_->deferred_head = std::move(e);  // only the newest matters: the next walk or extension starts from it
-        return;
-    }
-    handle_head(e);
-}
-
-void Host::handle_head(const HeadEvent& e) {
-    if (rt_->ws_reseed_live_watermark) {
-        rt_->ws_reseed_live_watermark = false;
-        if (rt_->ws_live_from_block) {
-            rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number);
-        } else if (rt_->driver && rt_->driver->status().state == pipeline::PipelineState::Live) {
-            rt_->ws_live_from_block = std::max(rt_->driver->status().c_s + 1, e.ref.number);
-        }
-    }
-    auto& ring = rt_->ring;
-    if (const auto top = ring.top(); top && e.ref.number > *top + kMaxWalkBlocks) {
-        resync_ring(e.ref, "head gap of " + std::to_string(e.ref.number - *top) + " blocks");
-        return;
-    }
-    if (ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
-    rt_->walking = true;
-    net::co_spawn(ioc_, walk_fork(head_epoch_, e), net::detached);
-}
-
-// The ring cannot say whether the chain forked below C_s (a gap or a fork too deep to walk, or a provider that would
-// not answer): start over from this head and let the driver re-verify the released window.
-void Host::resync_ring(const chain::BlockRef& head, const std::string& why) {
-    log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
-    rt_->ring.reset();
-    rt_->ring.on_head(head);
-    if (rt_->source) rt_->source->clear_cache();
-    rt_->pending.purge_from(0);  // the old branch is unknown: staged logs cannot be trusted
-    if (rt_->ws_live_from_block) {
-        rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, head.number + 1);
-    }
-    rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
-}
-
-// Walks the new chain's ancestry back to the ring via eth_getBlockByNumber on the provider that sent the head.
 net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
     const auto alive = [this, epoch] { return epoch == head_epoch_ && rt_ && rt_->driver; };
-    const auto pool = rt_->pool;  // keeps the pool alive while a call_to is in flight
+    const auto pool = rt_->pool;
     try {
         rpc::Decoder dec;
         std::optional<chain::ReorgInfo> info;
@@ -904,7 +582,7 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                     why = "block " + std::to_string(n) + " from " + e.provider + " failed: " + o.error;
                     break;
                 }
-                const auto b = dec.parse_block(o.result_raw);  // DecodeError ends up in the catch below
+                const auto b = dec.parse_block(o.result_raw);
                 if (!b) {
                     why = e.provider + " has no block " + std::to_string(n);
                     break;
@@ -912,17 +590,8 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                 walk.feed(chain::BlockRef{b->number, b->hash, b->parent_hash, b->timestamp});
             }
             if (!why.empty()) break;
-            switch (walk.state()) {
-                case chain::ForkWalk::State::Done:
-                    info = rt_->ring.apply(walk);
-                    break;
-                case chain::ForkWalk::State::BeyondRing:
-                    why = "fork deeper than the head ring";
-                    break;
-                case chain::ForkWalk::State::Inconsistent:  // a reorg mid-walk or a bad block: start over
-                case chain::ForkWalk::State::NeedBlock:
-                    break;
-            }
+            if (walk.state() == chain::ForkWalk::State::Done) info = rt_->ring.apply(walk);
+            else if (walk.state() == chain::ForkWalk::State::BeyondRing) why = "fork deeper than the head ring";
         }
         if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
 
@@ -930,25 +599,13 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
         if (info) {
             const auto c_s = rt_->driver->status().c_s;
             log::info("host", "head chain resolved",
-                      {{"fork_point", std::to_string(info->fork_point)},
-                       {"depth", std::to_string(info->depth)},
-                       {"old_top", std::to_string(info->old_top)},
-                       {"c_s", std::to_string(c_s)}});
-            // depth 0 = a gap that was only filled: nothing was replaced, but WS missed the gap blocks.
-            if (info->depth > 0) {
-                rt_->pending.purge_from(info->fork_point + 1);  // orphaned branch's WS logs
-                if (rt_->source) rt_->source->clear_cache();
-                if (rt_->ws_live_from_block) {
-                    rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number + 1);
-                }
-            } else if (e.ref.number > info->old_top && rt_->ws_live_from_block) {
-                rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number + 1);
-            }
+                      {{"fork_point", std::to_string(info->fork_point)}, {"depth", std::to_string(info->depth)},
+                       {"old_top", std::to_string(info->old_top)}, {"c_s", std::to_string(c_s)}});
+            rt_->ws_reconciler.on_fork_resolved(*info, e.ref.number);
+            if (info->depth > 0 && rt_->source) rt_->source->clear_cache();
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
-                log::warn("host", "head fork below C_s",
-                          {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
-                rt_->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " +
-                                                  std::to_string(c_s));
+                log::warn("host", "head fork below C_s", {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
+                rt_->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " + std::to_string(c_s));
             }
         } else {
             resync_ring(e.ref, why);
@@ -965,231 +622,6 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
         log::error("host", "head walk threw", {{"error", ex.what()}});
         resync_ring(e.ref, std::string("head walk threw: ") + ex.what());
     }
-}
-
-void Host::schedule_beat() {
-    beat_timer_.expires_after(opt_.beat_period);
-    beat_timer_.async_wait([this](const boost::system::error_code& ec) {
-        if (ec || finished_) return;
-        on_beat();
-        if (!finished_) schedule_beat();
-    });
-}
-
-void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now < next_heartbeat_) return;
-    next_heartbeat_ = now + std::chrono::seconds(cfg_.ops.heartbeat_s);
-    // null = not known yet (no gate read, empty head ring, no healthy getLogs provider, no lease epoch).
-    const auto opt_u64 = [](const std::optional<std::uint64_t>& v) {
-        return v ? boost::json::value(*v) : boost::json::value(nullptr);
-    };
-    const auto provider = rt_->pool->current_getlogs();
-    boost::json::object o;
-    o["ts"] = wall_ms();
-    o["role"] = "leader";
-    o["state"] = pipeline::to_string(st.state);
-    o["head"] = opt_u64(rt_->ring.top());
-    o["G_s"] = opt_u64(st.g_s);
-    o["G_f"] = opt_u64(st.g_f);
-    o["C_s"] = st.c_s;
-    o["C_f"] = st.c_f;
-    o["active_provider"] = provider ? boost::json::value(*provider) : boost::json::value(nullptr);
-    o["epoch_n"] = opt_u64(epoch_n_);
-    o["version"] = core::version_string();
-    rt_->sink->set_heartbeat(boost::json::serialize(o));
-}
-
-ops::SnapshotInputs Host::build_snapshot_inputs(std::chrono::steady_clock::time_point now, bool leader) {
-    ops::SnapshotInputs in;
-    in.now = now;
-    in.wall_ms = wall_ms();
-    in.leader = leader;
-    in.chain = cfg_.chain.name;
-    in.redis_misconfigured = redis_misconfig_;
-
-    // Redis unreachable: the startup/standby wait, or (as leader) a sink that lost its connection and is spilling.
-    std::chrono::seconds down{0};
-    if (const auto ns = redis_wait_since_ns_.load(); ns != 0) {
-        const std::chrono::steady_clock::time_point since{
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(ns))};
-        down = std::chrono::duration_cast<std::chrono::seconds>(now - since);
-    }
-    if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Degraded) {
-        if (!sink_degraded_since_) sink_degraded_since_ = now;
-        down = std::max(down, std::chrono::duration_cast<std::chrono::seconds>(now - *sink_degraded_since_));
-    } else {
-        sink_degraded_since_.reset();
-    }
-    if (down.count() > 0) {
-        in.redis_unreachable_s = static_cast<std::uint32_t>(down.count());
-        std::lock_guard lk(redis_wait_mu_);
-        in.addr_family = redis_wait_family_;
-    }
-
-    if (leader) {
-        in.head = rt_->ring.top();
-        in.driver = rt_->driver->status();
-        in.sink = rt_->sink->status();
-        in.sink_saturated = rt_->sink->saturated();
-        in.spill_max_bytes = cfg_.sink.spill_max_bytes;
-        in.retention_s = cfg_.sink.retention_ms / 1000;
-        in.safe_late_total = rt_->sweeper->stats().late;
-        in.safe_late_last_block = rt_->sweeper->stats().last_late_block;
-        in.ws_missed_total = ws_missed_total_;
-        in.consumers = rt_->sink->consumer_lag();
-        in.providers = rt_->pool->health();
-        in.ms_since_head = rt_->pool->ms_since_head();
-        const auto safe_of = [&](const std::optional<std::string>& name) -> std::optional<std::uint64_t> {
-            if (!name) return std::nullopt;
-            const auto t = rt_->pool->cached_tag(*name, provider::Tag::Safe);
-            return t ? std::optional<std::uint64_t>(t->number) : std::nullopt;
-        };
-        const auto ws = rt_->pool->active_ws();
-        const auto getlogs = rt_->pool->current_getlogs();
-        in.ws_provider = ws.value_or(in.ms_since_head ? "none" : "");
-        in.getlogs_provider = getlogs.value_or("");
-        in.ws_safe = safe_of(ws);
-        in.getlogs_safe = safe_of(getlogs);
-        for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = rt_->pool->inconsistency_total(p.name);
-    }
-    return in;
-}
-
-void Host::ops_tick() {
-    const auto now = std::chrono::steady_clock::now();
-    const bool leader = rt_ && rt_->driver && !demoting_;
-
-    if (now >= next_ops_) {
-        next_ops_ = now + kOpsPeriod;
-        const auto in = build_snapshot_inputs(now, leader);
-        for (const auto& a : engine_.evaluate(snapshots_.build(in))) {
-            if (!a.resolved) ++alerts_fired_total_[a.title];
-            log::warn("alert", "alert raised",
-                      {{"severity", ops::to_string(a.severity)}, {"title", a.title}, {"message", a.message}});
-            if (alerts_) alerts_->send(a);
-        }
-        update_metrics();
-    }
-
-    if (deadman_ && now >= next_deadman_) {
-        next_deadman_ = now + std::chrono::seconds(cfg_.ops.deadman_ping_s);
-        ops::DeadmanFacts f;
-        f.now = now;
-        f.leader = leader;
-        if (leader) {
-            const auto st = rt_->driver->status();
-            f.state_ok = st.state == pipeline::PipelineState::CatchingUp || st.state == pipeline::PipelineState::Live;
-            f.sink_saturated = rt_->sink->saturated();
-            f.c_s = st.c_s;
-            f.g_s = st.g_s;
-        }
-        deadman_->tick(f);
-    }
-}
-
-void Host::on_beat() {
-    wd_.beat_io();
-    ops::Watchdog::State s;
-    s.role = rt_ && rt_->driver ? 1 : 0;  // 1 = leader (lease disabled counts as leader), 0 = standby / starting
-    if (rt_ && rt_->sink) s.sink_mode = static_cast<std::uint64_t>(rt_->sink->mode());
-    if (rt_ && rt_->driver) {
-        const auto st = rt_->driver->status();
-        s.driver_state = static_cast<std::uint64_t>(st.state);
-        s.c_s = st.c_s;
-        s.c_f = st.c_f;
-        s.g_s = st.g_s.value_or(0);
-        s.g_f = st.g_f.value_or(0);
-        if (st.state != last_state_) {
-            log::info("host", "pipeline state",
-                      {{"from", pipeline::to_string(last_state_)},
-                       {"to", pipeline::to_string(st.state)},
-                       {"c_s", std::to_string(st.c_s)},
-                       {"c_f", std::to_string(st.c_f)}});
-            last_state_ = st.state;
-        }
-        publish_heartbeat(st);
-        if (opt_.on_status) opt_.on_status(st);
-    }
-    wd_.publish_state(s);
-    ops_tick();
-
-    if (opt_.stop->load(std::memory_order_relaxed)) {
-        begin_shutdown(kExitOk, "stop requested");
-    } else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Failed) {
-        begin_shutdown(kExitFailure, "sink failed: " + rt_->sink->fatal_message());
-    } else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Fenced) {
-        demote("sink fenced: another term holds the lease");
-    }
-}
-
-// A fenced sink has already discarded its queue and spill (plan 4.8); the host ends the term and goes back to the
-// standby loop. The driver and pool are stopped first, then the term's objects are destroyed.
-void Host::demote(const std::string& why) {
-    if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
-    demoting_ = true;
-    const auto st = rt_->sink->status();
-    snapshots_.push_event(ops::sink_fenced_event(why, st.discarded_total));
-    update_metrics();
-    log::warn("host", "demoting to standby",
-              {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
-    rt_->driver->request_drain();
-    if (rt_->pool) rt_->pool->stop();
-    sleep_timer_.cancel();  // pipeline_loop ends and posts end_term()
-}
-
-void Host::end_term() {
-    if (stopping_ || !rt_) return;  // a shutdown overtook the demotion; finish() owns the teardown
-    wd_.set_sink_registered(false);  // before the sink is destroyed
-    bump_head_epoch();               // a walk still waiting on a provider must not touch the runtime we destroy
-    rt_->pool->stop();
-    // Destroying the sink joins its thread (bounded by the Redis io timeout, 2 s): the io beat resumes right after.
-    rt_.reset();
-    demoting_ = false;
-    last_state_ = pipeline::PipelineState::Init;
-    phase_ = Phase::Standby;
-    update_metrics();
-    log::info("host", "leadership term ended, back on standby");
-    if (opt_.on_event) opt_.on_event("demoted");
-    launch_acquire(false);
-}
-
-void Host::request_exit(int code, const std::string& why) {
-    if (exit_set_) return;
-    exit_set_ = true;
-    exit_code_ = code;
-    if (code == kExitOk) {
-        log::info("host", "shutting down", {{"reason", why}});
-    } else {
-        log::error("host", "shutting down", {{"reason", why}, {"exit_code", std::to_string(code)}});
-    }
-}
-
-void Host::begin_shutdown(int code, const std::string& why) {
-    if (stopping_.exchange(true)) return;
-    request_exit(code, why);
-    if (rt_ && rt_->driver) {
-        rt_->driver->request_drain();
-        if (rt_->pool) rt_->pool->stop();
-        sleep_timer_.cancel();  // pipeline_loop ends and calls finish()
-    } else {
-        finish();
-    }
-}
-
-void Host::finish() {
-    if (finished_) return;
-    finished_ = true;
-    stopping_ = true;
-    beat_timer_.cancel();
-    freeze_timer_.cancel();
-    sleep_timer_.cancel();
-    if (ops_) ops_->stop();
-    if (alerts_) alerts_->stop();
-    if (deadman_) deadman_->stop();
-    if (rt_ && rt_->pool) rt_->pool->stop();
-    grace_timer_.expires_after(kShutdownGrace);
-    grace_timer_.async_wait([this](const boost::system::error_code&) { ioc_.stop(); });
 }
 
 }  // namespace
