@@ -291,6 +291,7 @@ public:
 struct RigCfg {
     std::uint32_t queue_capacity{100000};
     std::uint64_t spill_max_bytes{1ull << 30};
+    std::uint64_t spill_segment_bytes{64 * 1024};
     std::size_t max_batch{256};
     bool lease{true};
     std::uint32_t heartbeat_ms{0};
@@ -334,7 +335,7 @@ struct Rig {
         o.queue_capacity = cfg.queue_capacity;
         o.spill_dir = dir;
         o.spill_max_bytes = cfg.spill_max_bytes;
-        o.spill_segment_bytes = 64 * 1024;
+        o.spill_segment_bytes = cfg.spill_segment_bytes;
         o.lease_ttl_ms = 15000;
         o.renew_ms = 5000;
         o.max_batch = cfg.max_batch;
@@ -1662,4 +1663,128 @@ TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and
     CHECK_FALSE(lease_token_host("0"));
     CHECK_FALSE(lease_token_host("6|hostA"));  // no nonce
     CHECK_FALSE(lease_token_host("garbage|hostA|n"));
+}
+
+TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and barriers converge with zero loss",
+          "[unit][sink][property]") {
+    for (std::uint64_t seed = 5000; seed < 5015; ++seed) {
+        std::mt19937_64 rng(seed);
+        RigCfg cfg;
+        cfg.max_batch = 4;
+        cfg.spill_segment_bytes = 512;
+        Rig r(cfg);
+
+        std::uint64_t safe_ckpt = 100;
+        std::uint64_t final_ckpt = 100;
+        r.sink->init_checkpoint(100, {"c0"});
+
+        std::map<std::string, EventType> expected_events;
+        std::map<std::string, EventType> expected_registry;
+        std::map<std::string, std::uint64_t> active_safe;
+        std::uint64_t next_id = 0;
+
+        for (std::size_t step = 0; step < 150; ++step) {
+            INFO("seed " << seed << " step " << step);
+            const auto act = rng() % 100;
+            if (act < 65) {
+                const std::size_t count = 1 + (rng() % 6);
+                for (std::size_t k = 0; k < count; ++k) {
+                    if (!active_safe.empty() && (rng() % 100) < 25) {
+                        auto it = active_safe.begin();
+                        std::advance(it, static_cast<std::ptrdiff_t>(rng() % active_safe.size()));
+                        const std::string id = it->first;
+                        const std::uint64_t blk = it->second;
+                        r.sink->emit(mk(id, EventType::Revert, std::nullopt, blk, StreamKind::Events));
+                        expected_events[id] = EventType::Revert;
+                        active_safe.erase(it);
+                    } else if ((rng() % 100) < 20) {
+                        const std::string id = "reg" + std::to_string(++next_id);
+                        const std::uint64_t blk = safe_ckpt + 1 + (rng() % 4);
+                        r.sink->emit(mk(id, EventType::Log, std::nullopt, blk, StreamKind::Registry));
+                        expected_registry[id] = EventType::Log;
+                    } else {
+                        const std::string id = "ev" + std::to_string(++next_id);
+                        const std::uint64_t blk = safe_ckpt + 1 + (rng() % 4);
+                        r.sink->emit(mk(id, EventType::Log, blk, blk, StreamKind::Events));
+                        expected_events[id] = EventType::Log;
+                        active_safe[id] = blk;
+                    }
+                }
+            } else if (act < 80) {
+                safe_ckpt += 1 + (rng() % 5);
+                r.sink->checkpoint(CheckpointKind::Safe, safe_ckpt);
+            } else if (act < 90) {
+                if (final_ckpt < safe_ckpt) {
+                    final_ckpt += 1 + (rng() % (safe_ckpt - final_ckpt));
+                    r.sink->checkpoint(CheckpointKind::Finalized, final_ckpt);
+                    r.sink->final_trim(final_ckpt);
+                    for (auto it = active_safe.begin(); it != active_safe.end();) {
+                        if (it->second <= final_ckpt) it = active_safe.erase(it);
+                        else ++it;
+                    }
+                }
+            } else {
+                if ((rng() % 2) == 0) {
+                    (void)await_with_pump(*r.sink, r.sink->load_checkpoint());
+                } else {
+                    (void)await_with_pump(*r.sink, r.sink->released_range(final_ckpt, safe_ckpt + 10));
+                }
+            }
+
+            if ((rng() % 100) < 15) {
+                r.data->down = !r.data->down;
+                r.lease->down = r.data->down;
+            }
+            if ((rng() % 100) < 10) {
+                r.data->faults.push_back(Fault{Fault::Kind::ThrowAfter, static_cast<std::size_t>(rng() % 5)});
+            }
+            if ((rng() % 100) < 8) {
+                r.server.scripts_valid = false;
+            }
+            if ((rng() % 100) < 8 && r.lease->down) {
+                r.advance(milliseconds(16000));
+                r.server.leader.reset();
+            }
+
+            r.advance(milliseconds(100 + (rng() % 901)));
+            const std::size_t pumps = 1 + (rng() % 3);
+            for (std::size_t p = 0; p < pumps; ++p) r.sink->pump();
+
+            REQUIRE(r.sink->mode() != SinkMode::Failed);
+            REQUIRE(r.sink->mode() != SinkMode::Fenced);
+        }
+
+        INFO("seed " << seed << " converge");
+        r.data->down = false;
+        r.lease->down = false;
+        r.data->faults.clear();
+        r.server.scripts_valid = true;
+        REQUIRE(r.settle(5000));
+
+        const auto st = r.sink->status();
+        CHECK(st.mode == SinkMode::Connected);
+        CHECK(st.pending_writes == 0);
+        CHECK(st.queue_depth == 0);
+        CHECK(st.spill_records == 0);
+        CHECK(st.oldest_record_age_s == 0);
+        CHECK(r.server.safe == safe_ckpt);
+        CHECK(r.server.finalized == final_ckpt);
+
+        for (const auto& [id, want_type] : expected_events) {
+            const auto types = r.server.types_of(StreamKind::Events, id);
+            REQUIRE_FALSE(types.empty());
+            CHECK(types.front() == "log");
+            for (std::size_t i = 1; i < types.size(); ++i) CHECK(types[i] != types[i - 1]);
+            CHECK(types.back() == evml::pipeline::to_string(want_type));
+        }
+        for (const auto& [id, want_type] : expected_registry) {
+            const auto types = r.server.types_of(StreamKind::Registry, id);
+            REQUIRE(types.size() == 1);
+            CHECK(types.back() == evml::pipeline::to_string(want_type));
+        }
+        for (const auto& [id, entry] : r.server.released) {
+            CHECK(entry.first > final_ckpt);
+        }
+        CHECK(r.server.released.size() == active_safe.size());
+    }
 }

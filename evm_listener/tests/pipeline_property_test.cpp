@@ -45,6 +45,14 @@ LogResult retry_failure() {
     return bad;
 }
 
+LogResult corrupt_failure(const evml::core::Config& cfg) {
+    LogResult bad;
+    bad.ok = true;
+    bad.provider = "infura";
+    bad.logs = {mklog(cfg, 0, 999999, 1, 0)};  // out-of-range log -> validate_logs G2 rejection
+    return bad;
+}
+
 struct Mode {
     bool reorgs{false};
     bool restarts{false};
@@ -69,11 +77,13 @@ public:
     }
 
     std::size_t reverts() const { return sink_->count(EventType::Revert); }
+    std::size_t bad_reports() const { return src_.bad.size(); }
 
     // Chaos off, gates at the head: everything must settle to exactly the canonical set.
     void converge() {
         INFO("seed " << seed_ << " converge");
         src_.overrides.clear();
+        src_.corrupt_next_log_hash = false;
         src_.limit.reset();
         sink_->saturated_flag = false;
         g_s_ = g_f_ = head_;
@@ -189,6 +199,8 @@ private:
         if (mode_.reorgs && roll(12)) reorg();
         if (dirty_) sync_source();
         if (roll(10)) src_.overrides.push_back(retry_failure());
+        if (roll(5) && src_.overrides.empty()) src_.overrides.push_back(corrupt_failure(cfg_));
+        if (roll(8)) src_.corrupt_next_log_hash = true;
         sink_->saturated_flag = roll(10);
         if (roll(5)) {
             static const std::vector<std::optional<std::uint64_t>> limits{std::nullopt, 10, 50, 500};
@@ -267,12 +279,15 @@ private:
 
 void run_property(Mode mode, std::uint64_t first_seed, std::uint64_t seeds) {
     std::size_t reverts = 0;
+    std::size_t bad_reports = 0;
     for (std::uint64_t seed = first_seed; seed < first_seed + seeds; ++seed) {
         Sim sim(seed, mode);
         sim.run_steps(200);
         sim.converge();
         reverts += sim.reverts();
+        bad_reports += sim.bad_reports();
     }
+    CHECK(bad_reports > 0);
     // The reorg modes must actually retract logs, otherwise the checks above prove nothing about reorgs.
     if (mode.reorgs) CHECK(reverts > 0);
     else CHECK(reverts == 0);

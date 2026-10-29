@@ -2,8 +2,10 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <boost/json.hpp>
 
@@ -280,4 +282,90 @@ TEST_CASE("build_get_logs shapes the filter and validates arguments", "[unit][co
     core::LogFilter no_topics;
     no_topics.addresses = f.addresses;
     CHECK_THROWS_AS(build_get_logs(1, 1, 2, no_topics), std::invalid_argument);
+}
+
+TEST_CASE("codec monkey: random truncations byte flips and type mutations never crash or UB",
+          "[unit][codec][property]") {
+    const std::vector<std::string> fixtures{
+        fixture("ws_new_head"),
+        fixture("ws_log"),
+        fixture("resp_block_latest"),
+        fixture("resp_get_logs"),
+        fixture("err_alchemy_429"),
+    };
+    const std::vector<char> corrupt_bytes{'\0', '\xff', '{', '}', '[', ']', '"', ':', '0', 'x', 'Z', '\n'};
+    const std::vector<std::string> target_tokens{"\"0x", "\"result\"", "\"params\"", "\"topics\"",
+                                                 "\"number\"", "\"hash\"", "\"blockNumber\""};
+    const std::vector<std::string> replacements{"null", "12345", "[]", "{}", "\"0x123g\"", "\"\""};
+
+    Decoder d;
+    std::mt19937_64 rng(0xC0DEC001ULL);
+    std::size_t decode_errors = 0;
+
+    for (std::size_t iter = 0; iter < 1500; ++iter) {
+        INFO("seed 0xC0DEC001 iter " << iter);
+        std::string mutated = fixtures[rng() % fixtures.size()];
+        const std::size_t mode = rng() % 3;
+
+        if (mode == 0 && !mutated.empty()) {
+            // 1. Random prefix truncation
+            mutated.resize(rng() % mutated.size());
+        } else if (mode == 1 && !mutated.empty()) {
+            // 2. Random byte overwrite (1..4 positions)
+            const std::size_t count = 1 + (rng() % 4);
+            for (std::size_t k = 0; k < count; ++k) {
+                mutated[rng() % mutated.size()] = corrupt_bytes[rng() % corrupt_bytes.size()];
+            }
+        } else {
+            // 3. Targeted JSON token mutation
+            const std::string& tok = target_tokens[rng() % target_tokens.size()];
+            std::vector<std::size_t> positions;
+            for (std::size_t pos = mutated.find(tok, 0); pos != std::string::npos; pos = mutated.find(tok, pos + 1)) {
+                positions.push_back(pos);
+            }
+            if (!positions.empty()) {
+                const std::size_t pos = positions[rng() % positions.size()];
+                const std::string& rep = replacements[rng() % replacements.size()];
+                mutated.replace(pos, tok.size(), rep);
+            } else if (!mutated.empty()) {
+                mutated.resize(rng() % mutated.size());
+            }
+        }
+
+        // try_parse_error_body must never throw any exception
+        CHECK_NOTHROW(d.try_parse_error_body(mutated));
+
+        bool unexpected_exception = false;
+        try {
+            const Message msg = d.decode(mutated);
+            if (const auto* r = std::get_if<Response>(&msg); r && r->ok) {
+                try {
+                    (void)d.parse_logs(r->result_raw);
+                } catch (const core::DecodeError&) {
+                    ++decode_errors;
+                }
+                try {
+                    (void)d.parse_block(r->result_raw);
+                } catch (const core::DecodeError&) {
+                    ++decode_errors;
+                }
+                try {
+                    (void)d.parse_quantity(r->result_raw);
+                } catch (const core::DecodeError&) {
+                    ++decode_errors;
+                }
+                try {
+                    (void)d.parse_string(r->result_raw);
+                } catch (const core::DecodeError&) {
+                    ++decode_errors;
+                }
+            }
+        } catch (const core::DecodeError&) {
+            ++decode_errors;
+        } catch (...) {
+            unexpected_exception = true;
+        }
+        REQUIRE_FALSE(unexpected_exception);
+    }
+    CHECK(decode_errors > 0);
 }

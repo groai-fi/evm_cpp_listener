@@ -110,6 +110,7 @@ public:
     std::optional<std::uint64_t> limit;     // blocks per request above which RangeTooLarge is returned
     bool reject_multi_address{false};       // RangeTooLarge for any request naming more than one address
     bool reject_all{false};                 // RangeTooLarge always (even for a single address)
+    bool corrupt_next_log_hash{false};      // G2 fault injection: flip one byte of the first log's block_hash
     std::deque<pipeline::LogResult> overrides;  // consumed first, one per get_logs call
     std::set<std::uint64_t> unreadable_blocks;
     bool no_provider{false};
@@ -149,6 +150,10 @@ public:
             if (std::find(f.addresses.begin(), f.addresses.end(), l.address) == f.addresses.end()) continue;
             if (std::find(f.topic0s.begin(), f.topic0s.end(), l.topics.at(0)) == f.topic0s.end()) continue;
             res.logs.push_back(l);
+        }
+        if (corrupt_next_log_hash && !res.logs.empty()) {
+            corrupt_next_log_hash = false;
+            res.logs.front().block_hash.bytes[0] ^= 0xff;
         }
         co_return res;
     }
