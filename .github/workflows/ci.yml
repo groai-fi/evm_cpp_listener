@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test (Debug ASan/UBSan + Release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CC: gcc-12
+      CXX: g++-12
+      REDIS_URL: redis://127.0.0.1:6379/0
+      TOXIPROXY_URL: http://127.0.0.1:8474
+      # ToxiHttp (evm_listener/tests/toxiproxy.hpp:142) forwards from Toxiproxy to $HOSTNAME:<mock_port>.
+      HOSTNAME: 127.0.0.1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install toolchain and test dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            gcc-12 \
+            g++-12 \
+            cmake \
+            ninja-build \
+            pkg-config \
+            uuid-dev \
+            python3 \
+            python3-pip \
+            python3-venv \
+            redis-tools \
+            lua-check \
+            lua5.1 \
+            git \
+            curl \
+            ca-certificates
+          sudo update-alternatives --remove-all gcc 2>/dev/null || true
+          sudo update-alternatives --remove-all g++ 2>/dev/null || true
+          sudo update-alternatives --remove-all gcov 2>/dev/null || true
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+          sudo update-alternatives --install /usr/bin/gcov gcov /usr/bin/gcov-12 100
+          gcc --version | head -n 1
+          g++ --version | head -n 1
+          sudo pip3 install --no-cache-dir --break-system-packages 'conan==2.*'
+          conan --version
+          conan profile detect --force
+
+      - name: Lint Redis Lua scripts
+        run: tools/lint_lua.sh
+
+      - name: Cache Conan 2 package store
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan2-${{ runner.os }}-gcc12-${{ hashFiles('conanfile.py', 'conan.lock', 'conan/profiles/**') }}
+          restore-keys: |
+            conan2-${{ runner.os }}-gcc12-
+
+      # Run Redis 8.4 and Toxiproxy 2.11.0 with --network host so that:
+      #   1. Redis receives custom server flags (--appendonly yes --maxmemory 256mb --maxmemory-policy noeviction)
+      #      required by redis_startup_test and redis_scripts_test (GitHub Actions `services:` has no `command:` key).
+      #   2. Random ephemeral proxy ports ("listen": "0.0.0.0:0") allocated by ToxiRedis and ToxiHttp per test
+      #      are directly reachable from evml_tests at 127.0.0.1:<port>.
+      #   3. Toxiproxy resolves both REDIS_URL (127.0.0.1:6379) for ToxiRedis and $HOSTNAME:<port> (127.0.0.1:<port>)
+      #      for ToxiHttp's in-process MockHttpServer without bridge NAT hairpins.
+      - name: Start Redis 8.4 and Toxiproxy 2.11.0
+        run: |
+          sudo systemctl stop redis-server 2>/dev/null || true
+          docker run -d --name evml-redis --network host \
+            redis:8.4 redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+          docker run -d --name evml-toxiproxy --network host \
+            ghcr.io/shopify/toxiproxy:2.11.0
+
+          for i in $(seq 1 30); do
+            if redis-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG && curl -sf http://127.0.0.1:8474/version >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          redis-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
+          curl -sf http://127.0.0.1:8474/version && echo ""
+
+      - name: Build and test Debug (conan-debug, ASan+UBSan, test hooks)
+        run: |
+          export HOSTNAME=127.0.0.1
+          conan install . --build=missing -pr:a=conan/profiles/debug -s build_type=Debug
+          cmake --preset conan-debug -DEVML_SANITIZE=ON -DEVML_TEST_HOOKS=ON
+          cmake --build --preset conan-debug --parallel "$(nproc)"
+          ctest --preset conan-debug --output-on-failure
+
+      - name: Build and test Release (conan-release)
+        run: |
+          export HOSTNAME=127.0.0.1
+          redis-cli -h 127.0.0.1 -p 6379 FLUSHALL
+          conan install . --build=missing -pr:a=conan/profiles/release -s build_type=Release
+          cmake --preset conan-release
+          cmake --build --preset conan-release --parallel "$(nproc)"
+          ctest --preset conan-release --output-on-failure
+
+  prod-image:
+    name: Production Image Build & Smoke Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build production runtime Docker image
+        run: |
+          GIT_DESC="$(git describe --tags --always --dirty 2>/dev/null || echo "v$(cat VERSION)")"
+          docker build -f docker/Dockerfile.prod --target runtime \
+            --build-arg VERSION="${GIT_DESC}" \
+            -t evm-listener:ci .
+
+      # Note: evml::app::run_cli (evm_listener/src/app/tools.cpp:958-1020) prints the usage banner to stderr
+      # and returns kExitUsage (2) on --help; verify both exit code (0 or 2) and usage banner output.
+      - name: Smoke check container binary (--version, --help, ldd)
+        run: |
+          docker run --rm evm-listener:ci --version
+          HELP_OUT="$(docker run --rm evm-listener:ci --help 2>&1)" && RC=0 || RC=$?
+          echo "${HELP_OUT}"
+          test "${RC}" -eq 0 -o "${RC}" -eq 2
+          echo "${HELP_OUT}" | grep -q "usage: evm_listener --version"
+          docker run --rm --entrypoint ldd evm-listener:ci /usr/local/bin/evm_listener
