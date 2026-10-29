@@ -38,11 +38,12 @@ class MockHttpServer {
 public:
     using Handler = std::function<MockReply(const MockRequest&)>;
 
-    MockHttpServer(boost::asio::io_context& ioc, Handler handler);
+    MockHttpServer(boost::asio::io_context& ioc, Handler handler, const std::string& bind_addr = "127.0.0.1");
 
-    std::string url() const;  // http://127.0.0.1:<port>/
-    int connections() const;  // accepted TCP connections
-    int requests() const;     // fully received requests
+    std::string url() const;       // http://127.0.0.1:<port>/
+    std::uint16_t port() const;    // bound TCP port
+    int connections() const;       // accepted TCP connections
+    int requests() const;          // fully received requests
 
     struct State;  // implementation detail, public only so the .cpp-local coroutines can name it
 

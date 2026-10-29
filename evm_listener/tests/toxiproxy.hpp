@@ -133,4 +133,97 @@ private:
     std::string api_host_, api_port_, upstream_, name_, port_;
 };
 
+// A toxiproxy TCP proxy in front of an in-process MockHttpServer bound on 0.0.0.0:<upstream_port> inside the dev
+// container. Resolves the dev container's compose network hostname via $HOSTNAME (falling back to service name "dev").
+class ToxiHttp {
+public:
+    explicit ToxiHttp(std::uint16_t upstream_port) {
+        parse_api(require_env("TOXIPROXY_URL"));
+        const char* env_host = std::getenv("HOSTNAME");
+        const std::string host = (env_host && *env_host) ? std::string(env_host) : std::string("dev");
+        upstream_ = host + ":" + std::to_string(upstream_port);
+
+        std::random_device rd;
+        name_ = "evml_http_" + std::to_string(rd()) + std::to_string(rd());
+        boost::json::object body{{"name", name_}, {"listen", "0.0.0.0:0"}, {"upstream", upstream_}, {"enabled", true}};
+        const auto resp = boost::json::parse(call(boost::beast::http::verb::post, "/proxies", boost::json::serialize(body)));
+        const std::string listen = std::string(resp.as_object().at("listen").as_string());
+        const auto colon = listen.rfind(':');
+        if (colon == std::string::npos) throw std::runtime_error("toxiproxy: unexpected listen address '" + listen + "'");
+        port_ = listen.substr(colon + 1);
+        if (port_ == "0") throw std::runtime_error("toxiproxy did not assign a port: '" + listen + "'");
+    }
+
+    ~ToxiHttp() {
+        try {
+            call(boost::beast::http::verb::delete_, "/proxies/" + name_, "");
+        } catch (const std::exception& e) {
+            std::cerr << "toxiproxy cleanup of proxy " << name_ << " failed: " << e.what() << "\n";
+        }
+    }
+    ToxiHttp(const ToxiHttp&) = delete;
+    ToxiHttp& operator=(const ToxiHttp&) = delete;
+
+    std::string url() const { return "http://" + api_host_ + ":" + port_ + "/"; }
+
+    void disable() { set_enabled(false); }
+    void enable() { set_enabled(true); }
+
+    void add_toxic(const std::string& toxic_name, const std::string& type, const boost::json::object& attributes,
+                   const std::string& stream = "downstream") {
+        boost::json::object body{
+            {"name", toxic_name}, {"type", type}, {"stream", stream}, {"toxicity", 1.0}, {"attributes", attributes}};
+        call(boost::beast::http::verb::post, "/proxies/" + name_ + "/toxics", boost::json::serialize(body));
+    }
+    void remove_toxic(const std::string& toxic_name) {
+        call(boost::beast::http::verb::delete_, "/proxies/" + name_ + "/toxics/" + toxic_name, "");
+    }
+
+private:
+    void parse_api(const std::string& url) {
+        const std::string scheme = "http://";
+        if (url.rfind(scheme, 0) != 0) throw std::runtime_error("TOXIPROXY_URL must start with http://: " + url);
+        std::string hp = url.substr(scheme.size());
+        if (const auto slash = hp.find('/'); slash != std::string::npos) hp.resize(slash);
+        const auto colon = hp.rfind(':');
+        if (colon == std::string::npos) throw std::runtime_error("TOXIPROXY_URL needs a port: " + url);
+        api_host_ = hp.substr(0, colon);
+        api_port_ = hp.substr(colon + 1);
+    }
+
+    void set_enabled(bool on) {
+        boost::json::object body{{"enabled", on}};
+        call(boost::beast::http::verb::post, "/proxies/" + name_, boost::json::serialize(body));
+    }
+
+    std::string call(boost::beast::http::verb verb, const std::string& target, const std::string& body) {
+        namespace http = boost::beast::http;
+        boost::asio::io_context io;
+        boost::asio::ip::tcp::resolver resolver(io);
+        boost::beast::tcp_stream stream(io);
+        stream.expires_after(std::chrono::seconds(5));
+        stream.connect(resolver.resolve(api_host_, api_port_));
+
+        http::request<http::string_body> req{verb, target, 11};
+        req.set(http::field::host, api_host_);
+        req.set(http::field::content_type, "application/json");
+        req.body() = body;
+        req.prepare_payload();
+        http::write(stream, req);
+
+        boost::beast::flat_buffer buf;
+        http::response<http::string_body> res;
+        http::read(stream, buf, res);
+        boost::beast::error_code ec;
+        stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+
+        if (res.result_int() >= 300)
+            throw std::runtime_error("toxiproxy " + std::string(http::to_string(verb)) + " " + target + " -> " +
+                                     std::to_string(res.result_int()) + ": " + res.body());
+        return res.body();
+    }
+
+    std::string api_host_, api_port_, upstream_, name_, port_;
+};
+
 }  // namespace evml::testing

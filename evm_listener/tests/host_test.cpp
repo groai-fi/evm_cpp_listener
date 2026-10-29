@@ -1595,3 +1595,243 @@ events = [
         CHECK(h.exit_code.load() == 0);
     }
 }
+
+// ---- 5-I: Chaos (toxiproxy on provider and Redis links) & Lease-Takeover Stream Integrity ----
+
+TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) on provider and Redis links recovers with an exact stream",
+          "[integration][chaos]") {
+    evml::core::log::init("info");
+    const std::string shard = "host_chaos_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-host-chaos-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const auto base_cfg = evml::test::load_base_config();
+    const std::uint64_t c0 = first_start_block(base_cfg);
+    net::io_context mock_ioc;
+    NodeState ns;
+    ns.safe = c0 + 300;
+    ns.finalized = c0 + 250;
+
+    const std::vector<std::uint64_t> log_blocks{c0 + 310, c0 + 320, c0 + 330, c0 + 340, c0 + 350};
+    for (const auto n : log_blocks) {
+        const std::string bh = hx('a', n);
+        ns.blocks[n] = head_json(n, bh, hx('a', n - 1));
+        ns.logs.emplace_back(n, cfg_log_json(base_cfg, n, bh, 0));
+    }
+
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns), "0.0.0.0");
+    evml::testing::ToxiHttp px_http(node.port());
+    evml::testing::ToxiRedis px_redis;
+
+    ScopedEnv env;
+    env.set("EVML_TEST_CHAOS_REDIS_URL", px_redis.url());
+
+    auto toml = host_toml(shard, spill, px_http.url(), 30000, true, 60000, 500);
+    replace_once(toml, "redis_url_env      = \"REDIS_URL\"", "redis_url_env      = \"EVML_TEST_CHAOS_REDIS_URL\"");
+    replace_once(toml, "request_timeout_ms = 15000", "request_timeout_ms = 800");
+    replace_once(toml, "failover_after         = 3", "failover_after         = 100");
+    replace_once(toml, "reconcile_rps          = 2", "reconcile_rps          = 100");
+    replace_once(toml, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    auto cfg = evml::core::Config::parse(toml, "chaos.toml", provider_env(px_http.url(), "chaos-host"));
+
+    RunningHost h(std::move(cfg));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    const auto wait_for = [&](std::chrono::milliseconds d) {
+        const auto end = std::chrono::steady_clock::now() + d;
+        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= end; }, d + 1s);
+    };
+
+    // 1. latency = 5000 ms (exceeds 800 ms HTTP RPC timeout) on both provider and Redis links.
+    px_http.add_toxic("lat", "latency", {{"latency", 5000}, {"jitter", 0}});
+    px_redis.add_toxic("lat", "latency", {{"latency", 5000}, {"jitter", 0}});
+    ns.safe = c0 + 315;
+    ns.finalized = c0 + 265;
+    wait_for(1200ms);
+    px_http.remove_toxic("lat");
+    px_redis.remove_toxic("lat");
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 315 || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // 2. reset_peer (TCP RST) on both provider and Redis links.
+    px_http.add_toxic("rst", "reset_peer", {{"timeout", 0}});
+    px_redis.add_toxic("rst", "reset_peer", {{"timeout", 0}});
+    ns.safe = c0 + 325;
+    ns.finalized = c0 + 275;
+    wait_for(600ms);
+    px_http.remove_toxic("rst");
+    px_redis.remove_toxic("rst");
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 325 || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // 3. timeout (blackhole / hang) on both provider and Redis links.
+    px_http.add_toxic("tmo", "timeout", {{"timeout", 0}});
+    px_redis.add_toxic("tmo", "timeout", {{"timeout", 0}});
+    ns.safe = c0 + 335;
+    ns.finalized = c0 + 285;
+    wait_for(1200ms);
+    px_http.remove_toxic("tmo");
+    px_redis.remove_toxic("tmo");
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 335 || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // 4. bandwidth = 0 KB/s on both provider and Redis links.
+    px_http.add_toxic("bw0", "bandwidth", {{"rate", 0}});
+    px_redis.add_toxic("bw0", "bandwidth", {{"rate", 0}});
+    ns.safe = c0 + 360;
+    ns.finalized = c0 + 355;
+    wait_for(1200ms);
+    px_http.remove_toxic("bw0");
+    px_redis.remove_toxic("bw0");
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return (h.status().c_s >= c0 + 360 && h.status().c_f >= c0 + 355) || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    sw::redis::Redis admin{require_env("REDIS_URL")};
+    const evml::sink::Keys keys{shard};
+    REQUIRE(evml::test::run_until(
+        mock_ioc,
+        [&] {
+            std::unordered_map<std::string, std::string> ckpt;
+            admin.hgetall(keys.ckpt(), std::inserter(ckpt, ckpt.begin()));
+            return ckpt.count("safe") && std::stoull(ckpt.at("safe")) >= c0 + 360 &&
+                   ckpt.count("finalized") && std::stoull(ckpt.at("finalized")) >= c0 + 355;
+        },
+        30s));
+
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+
+    using StreamEntry = std::pair<std::string, std::unordered_map<std::string, std::string>>;
+    std::vector<StreamEntry> entries;
+    admin.xrange(keys.stream(evml::core::StreamKind::Events), "-", "+", std::back_inserter(entries));
+    REQUIRE(entries.size() == log_blocks.size());
+    for (std::size_t i = 0; i < log_blocks.size(); ++i) {
+        CHECK(std::stoull(entries[i].second.at("block_number")) == log_blocks[i]);
+        CHECK(entries[i].second.at("type") == "log");
+    }
+    CHECK(admin.zcard(keys.released()) == 0);
+}
+
+TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free stream and fences the old leader",
+          "[integration][chaos]") {
+    evml::core::log::init("info");
+    const std::string shard = "host_takeover_stream_" + random_tag();
+    const fs::path spill_a = fs::temp_directory_path() / ("evml-takeover-a-" + random_tag());
+    const fs::path spill_b = fs::temp_directory_path() / ("evml-takeover-b-" + random_tag());
+    Cleanup cleanup_a{shard, spill_a};
+    Cleanup cleanup_b{shard, spill_b};
+
+    const auto base_cfg = evml::test::load_base_config();
+    const std::uint64_t c0 = first_start_block(base_cfg);
+    net::io_context mock_ioc;
+    NodeState ns;
+    ns.safe = c0 + 300;
+    ns.finalized = c0 + 250;
+
+    const std::vector<std::uint64_t> log_blocks{c0 + 310, c0 + 320, c0 + 330, c0 + 340};
+    for (const auto n : log_blocks) {
+        const std::string bh = hx('a', n);
+        ns.blocks[n] = head_json(n, bh, hx('a', n - 1));
+        ns.logs.emplace_back(n, cfg_log_json(base_cfg, n, bh, 0));
+    }
+
+    evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
+    std::vector<evml::test::MockRequest> posts;
+    evml::test::MockHttpServer webhook(mock_ioc, [&](const evml::test::MockRequest& r) {
+        posts.push_back(r);
+        return evml::test::MockReply{.body = "{}"};
+    });
+
+    evml::testing::ToxiRedis px_a;
+    ScopedEnv env;
+    env.set("EVML_TEST_TAKEOVER_REDIS_A", px_a.url());
+    env.set("N8N_ALERT_WEBHOOK_URL", webhook.url() + "hook");
+    env.set("N8N_ALERT_WEBHOOK_TOKEN", "takeover-test-token");
+
+    auto toml_a = host_toml(shard, spill_a, node.url(), 30000, true, 3000, 500);
+    replace_once(toml_a, "redis_url_env      = \"REDIS_URL\"", "redis_url_env      = \"EVML_TEST_TAKEOVER_REDIS_A\"");
+    replace_once(toml_a, "reconcile_rps          = 2", "reconcile_rps          = 100");
+    replace_once(toml_a, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    auto cfg_a = evml::core::Config::parse(toml_a, "takeover_a.toml", provider_env(node.url(), "hostA"));
+
+    auto toml_b = host_toml(shard, spill_b, node.url(), 30000, true, 3000, 500);
+    replace_once(toml_b, "reconcile_rps          = 2", "reconcile_rps          = 100");
+    replace_once(toml_b, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    auto cfg_b = evml::core::Config::parse(toml_b, "takeover_b.toml", provider_env(node.url(), "hostB"));
+
+    RunningHost a(std::move(cfg_a));
+    RunningHost b(std::move(cfg_b));
+
+    a.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
+    REQUIRE_FALSE(a.threw.load());
+
+    b.start();
+    evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 1000ms);
+    CHECK_FALSE(b.live());
+
+    // Host A sweeps the first 2 logs (c0 + 310, c0 + 320).
+    ns.safe = c0 + 325;
+    ns.finalized = c0 + 275;
+    sw::redis::Redis admin{require_env("REDIS_URL")};
+    const evml::sink::Keys keys{shard};
+    REQUIRE(evml::test::run_until(
+        mock_ioc,
+        [&] {
+            std::unordered_map<std::string, std::string> ckpt;
+            admin.hgetall(keys.ckpt(), std::inserter(ckpt, ckpt.begin()));
+            return ckpt.count("safe") && std::stoull(ckpt.at("safe")) >= c0 + 325 &&
+                   admin.xlen(keys.stream(evml::core::StreamKind::Events)) == 2;
+        },
+        30s));
+
+    // Cut Host A's Redis link while advancing the chain across c0 + 330 and c0 + 340. Host A spills locally while its
+    // 3 s lease expires; Host B takes over and sweeps the remaining blocks.
+    px_a.disable();
+    ns.safe = c0 + 350;
+    ns.finalized = c0 + 345;
+
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return (b.live() && b.status().c_s >= c0 + 350 && b.status().c_f >= c0 + 345) || b.threw.load(); }, 30s));
+    REQUIRE_FALSE(b.threw.load());
+    CHECK(b.leader_events.load() == 1);
+
+    // Reconnect Host A to Redis: its stale epoch token is fenced, its spilled/queued records are discarded, and it
+    // demotes cleanly to standby without writing duplicates.
+    px_a.enable();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.demoted_events.load() >= 1 || a.threw.load(); }, 15s));
+    REQUIRE_FALSE(a.threw.load());
+
+    // Wait for Host B to evaluate and post the Leader Changed alert once.
+    const auto find_leader_changed = [&]() -> std::optional<boost::json::object> {
+        for (const auto& p : posts) {
+            const auto obj = boost::json::parse(p.body).as_object();
+            if (obj.at("title").as_string() == "Leader Changed" &&
+                obj.at("details").as_object().at("new_host").as_string() == "hostB") {
+                return obj;
+            }
+        }
+        return std::nullopt;
+    };
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return find_leader_changed().has_value() || b.threw.load(); }, 20s));
+    const auto lc = find_leader_changed();
+    REQUIRE(lc.has_value());
+    CHECK(lc->at("details").as_object().at("old_host").as_string() == "hostA");
+
+    a.finish();
+    b.finish();
+    CHECK(a.exit_code.load() == 0);
+    CHECK(b.exit_code.load() == 0);
+
+    using StreamEntry = std::pair<std::string, std::unordered_map<std::string, std::string>>;
+    std::vector<StreamEntry> entries;
+    admin.xrange(keys.stream(evml::core::StreamKind::Events), "-", "+", std::back_inserter(entries));
+    REQUIRE(entries.size() == log_blocks.size());
+    for (std::size_t i = 0; i < log_blocks.size(); ++i) {
+        CHECK(std::stoull(entries[i].second.at("block_number")) == log_blocks[i]);
+        CHECK(entries[i].second.at("type") == "log");
+    }
+}

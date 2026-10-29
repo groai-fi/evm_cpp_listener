@@ -11,7 +11,8 @@ namespace http = beast::http;
 using tcp = net::ip::tcp;
 
 struct MockHttpServer::State {
-    State(net::io_context& ioc, Handler h) : handler(std::move(h)), acceptor(ioc, tcp::endpoint(net::ip::make_address("127.0.0.1"), 0)) {}
+    State(net::io_context& ioc, Handler h, const std::string& bind_addr)
+        : handler(std::move(h)), acceptor(ioc, tcp::endpoint(net::ip::make_address(bind_addr), 0)) {}
     Handler handler;
     tcp::acceptor acceptor;
     std::atomic<int> conns{0};
@@ -79,13 +80,15 @@ net::awaitable<void> session(std::shared_ptr<MockHttpServer::State> st, tcp::soc
 
 }  // namespace
 
-MockHttpServer::MockHttpServer(net::io_context& ioc, Handler handler) : st_(std::make_shared<State>(ioc, std::move(handler))) {
+MockHttpServer::MockHttpServer(net::io_context& ioc, Handler handler, const std::string& bind_addr)
+    : st_(std::make_shared<State>(ioc, std::move(handler), bind_addr)) {
     net::co_spawn(ioc, accept_loop(st_), net::detached);
 }
 
 std::string MockHttpServer::url() const {
-    return "http://127.0.0.1:" + std::to_string(st_->acceptor.local_endpoint().port()) + "/";
+    return "http://127.0.0.1:" + std::to_string(port()) + "/";
 }
+std::uint16_t MockHttpServer::port() const { return st_->acceptor.local_endpoint().port(); }
 int MockHttpServer::connections() const { return st_->conns; }
 int MockHttpServer::requests() const { return st_->reqs; }
 
