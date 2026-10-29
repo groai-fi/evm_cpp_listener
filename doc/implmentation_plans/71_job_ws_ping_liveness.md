@@ -1,7 +1,7 @@
 # Job 71: WS liveness mode `ping` (opt-in, after Phase 6)
 
-**Status:** planned, **not part of Phase 5 or Phase 6**. Moved out of plan 60 (was §5.1a, rev 7, slice 5-J) by user decision on 2026-10-22.
-**Runs after:** Phase 6 complete (go-live done, quota measurement taken in `heads` mode). File prefix 71 because 70 is the Phase 6 plan ([70_phase6_testing_rollout.md](70_phase6_testing_rollout.md)). The measurement is Phase 6 §6.4.
+**Status:** **Deferred / closed for v1 (2026-10-29)** after evaluating the Phase 6 §6.4 quota decision gate (see [§11](#11-phase-6-64-gate-decision-2026-10-29) below). Originally moved out of plan 60 (was §5.1a, rev 7, slice 5-J) by user decision on 2026-10-22.
+**Runs after:** Phase 6 §6.4 quota measurement taken in `heads` mode ([70_phase6_testing_rollout.md](70_phase6_testing_rollout.md) §6.4).
 **Default stays `heads`.** Nothing in Phase 5 or 6 depends on this job.
 
 ## 0. Why this is a separate job
@@ -73,7 +73,7 @@ A ping is **bad** if any of these happen:
 | Provider | WS in our config | `ping` mode |
 |---|---|---|
 | QuickNode | yes (WS #1) | standard `eth_blockNumber` over WSS. Billed per request; `newHeads` is billed per notification |
-| Infura | yes (WS #2, `BASE_WSS_URL` still missing, master F4) | standard `eth_blockNumber` over WSS |
+| Infura | yes (WS #2, `BASE_WSS_URL` set & verified, master F4) | standard `eth_blockNumber` over WSS |
 | Ankr, public Base, Alchemy | no WS (getLogs / HTTP only) | n/a |
 
 Credit weights per method are not verified. Measure calls/day on both dashboards in each mode (`heads` numbers come from the Phase 6 measurement; take the `ping` numbers during this job's canary) before choosing the production setting.
@@ -95,17 +95,20 @@ Log notifications (≈ 9.7k/day) are billed in both modes. If the quota is still
 - `StaleDetector`: a per-sample head comparison (`on_ws_ping_head`) next to `on_ws_head`.
 - `pool_config.cpp`: `subscribe_heads = (liveness == heads)`.
 - `config.cpp`: parses the `[ws]` section and validates it.
-- `pool_log_source` (`LogSource` adapter, Phase 5 slice 5-C): **no block-info cache** (dropped 2026-10-27, Phase 5 review Q4). The sweeper already calls `block(n)` at most once per distinct block per page ([sweeper.cpp:170-180](../../evm_listener/src/pipeline/sweeper.cpp#L170-L180), `out.blocks`). Pages cover disjoint block ranges, so a per-sweep cache would only save calls on page retries. A cache that outlives a sweep would be wrong: the final sweep must re-read canonical hashes (I3).
-- Phase 5 interplay to check at start: the `on_tag` callback and `ProviderPool` API added in Phase 5 slices 5-C/5-D, and the host's `ReorgDetector` feeding. In `ping` mode the host must not wait for heads.
+- `PoolLogSource` (`LogSource` adapter, [pool_log_source.hpp](../../evm_listener/src/app/pool_log_source.hpp), [pool_log_source.cpp](../../evm_listener/src/app/pool_log_source.cpp)): within a single page, the sweeper already calls `block(n)` at most once per distinct block ([sweeper.cpp:170-180](../../evm_listener/src/pipeline/sweeper.cpp#L170-L180), `out.blocks`). Across pages (`safe_step` followed by `final_step`), `PoolLogSource` maintains a bounded 4,096-entry FIFO `block_cache_` (`kMaxBlockCache = 4096`) and preserves I3 by calling `clear_cache()` on `report_bad(...)` (G2 hash mismatch), at the start of `Sweeper::reverify_released()`, on `Host::resync_ring()`, on `SafeRegression` / `SafeHashMismatch` gate signals, and whenever a cached entry disagrees with `ring_->ref_at(n)`.
+- Phase 5 / Stage 4 host interplay (verified during W-0 against [host.cpp](../../evm_listener/src/app/host.cpp), [ws_reconciler.cpp](../../evm_listener/src/app/ws_reconciler.cpp), and [host_telemetry.cpp](../../evm_listener/src/app/host_telemetry.cpp)):
+  1. `Host::on_tag` ([host.cpp:193-213](../../evm_listener/src/app/host.cpp#L193-L213)) drives `FinalityGate` and `PipelineDriver::set_gates` directly from `ProviderPool`'s `on_tag` callback, so the pipeline reaches `Live` without waiting for `newHeads`.
+  2. `WsReconciler` ([ws_reconciler.cpp:70-97](../../evm_listener/src/app/ws_reconciler.cpp#L70-L97)) sets `reseed_live_watermark_ = true` on a WS provider switch or disconnect (`on_ws_provider_changed`) and waits for `on_head(head_number, live_c_s)` to reseed `live_from_block_`. In `ping` mode (no `newHeads`), a good ping reply must also call `ws_reconciler.on_head(ping_block_number, live_c_s)` so the live cross-check watermark reseeds after a WS reconnect.
+  3. `HostTelemetry` ([host_telemetry.cpp:140-141,245,367](../../evm_listener/src/app/host_telemetry.cpp#L140-L141)) reads `ctx.ring->top()` for `evml_head_block` and `SnapshotInputs::head`; in `ping` mode (empty ring), W-4 must fall back to the getLogs provider's latest `eth_blockNumber` poll (per §5 above).
 
 ## 9. Task list
 Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits without the user's instruction.
 
-- [ ] **W-0 Gate check:** confirm §1 (record the Phase 6 numbers). Re-read the then-current `WsSession` / `ProviderPool` / host code; update §8 if Phase 5 changed it.
+- [x] **W-0 Gate check:** confirm §1 (record the Phase 6 numbers). Re-read the then-current `WsSession` / `ProviderPool` / host code; update §8 if Phase 5 changed it. *(Completed 2026-10-29: §1 gate evaluated against measured Phase 6 §6.4 numbers in §11 below; §8 updated for Phase 5/6 `PoolLogSource::block_cache_`, `WsReconciler::on_head`, `Host::on_tag`, and `HostTelemetry`.)*
 - [ ] **W-1 Config:** `[ws]` section parse and validation, `base.toml` keeps the defaults (`heads`). Tests in `tests/config_test.cpp`: defaults, `ping_interval_s` below 30 / above 900 exits 2, unknown `liveness` exits 2.
 - [ ] **W-2 `WsSession` ping:** timer, id-matched response, bad-ping classification (timeout, RPC error with quota/auth kinds kept, non-advancing number). Tests with `tests/mock_ws_server` answering `eth_blockNumber` mid-stream.
 - [ ] **W-3 Pool + stale detector:** stall branch and lag branch switch on mode; `on_ws_ping_head`; `subscribe_heads = (liveness == heads)`. Tests: see §10.
-- [ ] **W-4 Host + alerts:** host runs without heads in `ping` mode (empty ring path via `LogSource::block(n)`), `WebSocket Stalled` ping trigger and details. Test the ring-empty path asks a provider other than the logs provider.
+- [ ] **W-4 Host + alerts:** host runs without heads in `ping` mode (empty ring path via `LogSource::block(n)`, `WsReconciler::on_head` reseed on ping reply, `HostTelemetry` head fallback), `WebSocket Stalled` ping trigger and details. Test the ring-empty path asks a provider other than the logs provider.
 - [ ] **W-5 Canary:** deploy the new binary to **both** services first (old binaries exit 2 on `[ws]`). Then set `[ws] liveness = "ping"` on **both** services together: the standby opens no WS, so a standby-only canary measures nothing, and mixed modes would flip WS cost on every takeover. Watch the leader for 24 h: provider-dashboard calls/day against the `heads` baseline, `WebSocket Stalled` silent, stream gap-free. Roll back = remove `[ws]` and redeploy. Record the decision here.
   - Config is baked into the image (`/app/config/base.toml`), so changing mode is a redeploy; both services build from the same commit.
 
@@ -115,7 +118,7 @@ Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits witho
 - quota and auth errors on a ping keep their classification;
 - a healthy ping head is never demoted for lag between pings, but a ping head > `stale_after_blocks` behind the getLogs head for `ping_stall_count` pings is demoted;
 - with the ring empty, `block(n)` asks a provider other than the one that returned the logs;
-- calls per block: a page with 200 logs spanning 50 blocks and an empty ring makes exactly 50 `eth_getBlockByNumber` calls (the sweeper's per-page `out.blocks`; no extra cache);
+- calls per block: a first page with 200 logs spanning 50 uncached blocks and an empty ring makes 50 `eth_getBlockByNumber` calls (the sweeper's per-page `out.blocks`), and `PoolLogSource::clear_cache()` invalidates `block_cache_` on `report_bad` / `reverify_released` / safe-reorg signals;
 - `heads` mode is byte-for-byte unchanged (the existing session and pool tests pass untouched);
 - config: out-of-range `ping_interval_s` and an unknown `liveness` value exit 2.
 
@@ -128,8 +131,17 @@ Gate: `make build` / `make test` exit 0 (ASan/UBSan `-Werror`). No commits witho
 - canonical hashes come from `eth_getBlockByNumber` on a non-getLogs provider.
 - Release, safe-reorg handling and recovery are unaffected.
 
+## 11. Phase 6 §6.4 Gate Decision (2026-10-29)
+
+Measured steady-state `Live` traffic from [70_phase6_testing_rollout.md](70_phase6_testing_rollout.md) §6.4 (`evml_rpc_requests_total` and `evml_ws_messages_total` over a 180 s post-catch-up window on Base mainnet):
+
+- **QuickNode (WS primary):** `43,200` `newHeads`/day (`0.5/s`) + `4,800` `logs`/day + `1,440` HTTP `eth_getBlockByNumber("safe")`/day (60 s cross-check) = **`49,440` msgs+calls/day (`1.48M / 30d`)**, leaving **~70%–85% headroom** on the 10M credits/month Discover plan (~1.48M–2.97M credits/30d at 1–2 credits/message).
+- **Infura (HTTP primary):** **`37,920` calls/day measured (`1.14M / 30d`)** (`16,320` `eth_blockNumber` + `19,680` `eth_getBlockByNumber` + `1,920` `eth_getLogs`; **`65,280` calls/day = `1.96M / 30d`** worst-case if 100% of 3 s/15 s tag polls hit Infura), leaving **~35%–62% headroom** on the 3M requests/month Core plan.
+- **Verdict:** Neither provider breaches the `< 30% headroom` (`> 70% monthly usage`) gate in [70_phase6_testing_rollout.md](70_phase6_testing_rollout.md) §6.4. Per §1 above, `heads` mode remains the production default for go-live and **Job 71 is deferred / closed for v1** without implementing W-1..W-5 (ready to open only if provider credit weights or multi-shard expansion later require cutting `newHeads` traffic by 99.3% from `43,200/day` to `288/day`).
+
 ## Changelog
 - 2026-10-22: created from plan 60 §5.1a (rev 7), moved out of Phase 5 by user decision.
 - 2026-10-22 review: renamed from `70_ws_ping_liveness.md` (70 is the Phase 6 plan); "§6.4" now confirmed against the Phase 6 plan; W-5 canary fixed (a standby-only canary measured nothing because the standby opens no WS).
 - 2026-10-27: added a per-sweep block-info cache in the `LogSource` adapter (§5 cost row, §8, W-4) and its test in §10 (200 logs over 50 blocks → exactly 50 calls).
 - 2026-10-27 (Phase 5 review Q4): that cache is **dropped**. The sweeper already reads each distinct block once per page, and a longer-lived cache would break the final sweep's canonical-hash re-check (I3). §5 cost row, §8, W-4 and §10 updated; the 50-calls test stays, without a cache.
+- 2026-10-29: completed W-0 gate check against Phase 6 §6.4 measurements (`QuickNode` ~70%–85% headroom, `Infura` ~35%–62% headroom) and audited Phase 5/6 code (`PoolLogSource::block_cache_` with I3 invalidation on `report_bad`/`reverify_released`/safe-reorg, `WsReconciler::on_head`, `Host::on_tag`, and `HostTelemetry`); updated §8/§10, added §11, and closed/deferred Job 71 for v1.
