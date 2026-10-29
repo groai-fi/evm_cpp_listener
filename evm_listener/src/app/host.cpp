@@ -731,7 +731,8 @@ net::awaitable<void> Host::pipeline_loop() {
     try {
         for (;;) {
             const auto r = co_await driver.tick();
-            if (!rt_->ws_live_from_block && driver.status().state == pipeline::PipelineState::Live &&
+            if (!rt_->ws_live_from_block && !rt_->ws_reseed_live_watermark &&
+                driver.status().state == pipeline::PipelineState::Live &&
                 rt_->pool && rt_->pool->active_ws()) {
                 rt_->ws_live_from_block = driver.status().c_s + 1;
             }

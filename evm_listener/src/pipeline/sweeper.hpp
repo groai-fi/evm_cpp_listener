@@ -103,6 +103,10 @@ public:
     // Watch out: Requires sink.readable() to avoid diffing against incomplete released set.
     boost::asio::awaitable<StepResult> final_step(std::uint64_t g_f);
 
+    // Advances single-contract backfill by one AIMD page in (C_s, ceiling] without touching checkpoints or
+    // diffing/trimming the shared released ZSET. Emits events at `emit_finality` (tracked in released iff Safe).
+    boost::asio::awaitable<StepResult> backfill_step(std::uint64_t ceiling, core::Finality emit_finality);
+
     // Immediate re-check of (C_f, C_s] on safe reorg signal; reconciles canonical fork against released set.
     // Vanished safe logs emit reverts with full original fields; new logs emit as safe-class.
     // Watch out: Idempotent across transient provider retries; preserves lowest pending fork point.

@@ -524,8 +524,8 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
                 if (start <= c_f) {
                     const auto final_cfg = single_contract_config(cfg, *target, core::Finality::Finalized);
                     pipeline::Sweeper sw(final_cfg, ectx, source, sink, wall_now_ms, sw_opt);
-                    sw.set_cursors(c_f, start_cursor);
-                    if (!(co_await drive([&] { return sw.final_step(c_f); }))) {
+                    sw.set_cursors(start_cursor, start_cursor);
+                    if (!(co_await drive([&] { return sw.backfill_step(c_f, core::Finality::Finalized); }))) {
                         rc = kExitFailure;
                         pool->stop();
                         ioc.stop();
@@ -537,8 +537,8 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
                     if (safe_cursor < c_s) {
                         const auto safe_cfg = single_contract_config(cfg, *target, core::Finality::Safe);
                         pipeline::Sweeper sw(safe_cfg, ectx, source, sink, wall_now_ms, sw_opt);
-                        sw.set_cursors(safe_cursor, c_f);
-                        if (!(co_await drive([&] { return sw.safe_step(c_s); }))) {
+                        sw.set_cursors(safe_cursor, std::min(safe_cursor, c_f));
+                        if (!(co_await drive([&] { return sw.backfill_step(c_s, core::Finality::Safe); }))) {
                             rc = kExitFailure;
                             pool->stop();
                             ioc.stop();

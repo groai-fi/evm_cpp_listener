@@ -728,3 +728,39 @@ TEST_CASE("sweep: a failed or paused step does not pollute recent dedup state be
     CHECK(r.sink.emitted.size() == 3);
     CHECK(r.sw->stats().deduped == 0);
 }
+
+TEST_CASE("sweep: backfill_step emits without touching checkpoints or final_trim or other contracts' released entries",
+          "[unit][sweep]") {
+    Rig r;
+    // Pre-populate `released` with another contract's log at block 105 so a final_step diff would falsely retract it.
+    r.add(mklog(r.cfg, kSafeB, 105, 1, 0), 1);
+    REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
+    REQUIRE(r.sink.released.size() == 1);
+    r.sink.emitted.clear();
+    r.sink.checkpoints.clear();
+    r.sink.trims.clear();
+
+    // Now sweep (100, 110] via backfill_step for finalized (kGauge) and safe (kSafeA).
+    r.src.logs.clear();
+    r.add(mklog(r.cfg, kGauge, 104, 2, 0), 2);
+    r.add(mklog(r.cfg, kSafeA, 108, 3, 0), 3);
+
+    r.sw->set_cursors(100, 100);
+    REQUIRE(run(r.sw->backfill_step(110, Finality::Finalized)).status == StepStatus::Advanced);
+    CHECK(r.sw->c_s() == 110);
+    CHECK(r.sink.checkpoints.empty());
+    CHECK(r.sink.trims.empty());
+    CHECK(r.sink.count(EventType::Revert) == 0);
+    CHECK(r.sink.released.size() == 1);  // kSafeB's released entry untouched and no finalized log added to released
+    REQUIRE(r.sink.emitted.size() == 1);
+    CHECK(field(r.sink.emitted[0], "finality") == "finalized");
+
+    r.sw->set_cursors(100, 100);
+    REQUIRE(run(r.sw->backfill_step(110, Finality::Safe)).status == StepStatus::Advanced);
+    CHECK(r.sink.checkpoints.empty());
+    CHECK(r.sink.trims.empty());
+    CHECK(r.sink.count(EventType::Revert) == 0);
+    CHECK(r.sink.released.size() == 2);  // kSafeB + newly backfilled kSafeA
+    REQUIRE(r.sink.emitted.size() == 2);
+    CHECK(field(r.sink.emitted[1], "finality") == "safe");
+}

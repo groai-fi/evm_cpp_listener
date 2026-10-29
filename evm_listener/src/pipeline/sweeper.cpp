@@ -299,6 +299,30 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
     co_return StepResult{StepStatus::Advanced, f.range, {}, !diff.vanished.empty()};
 }
 
+boost::asio::awaitable<StepResult> Sweeper::backfill_step(std::uint64_t ceiling, core::Finality emit_finality) {
+    if (sink_.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
+    if (c_s_ >= ceiling) co_return StepResult{};
+
+    auto f = co_await fetch_page(c_s_, ceiling, cfg_.filter(emit_finality), emit_finality);
+    if (f.status != StepStatus::Advanced) co_return StepResult{f.status, std::nullopt, std::move(f.detail), false};
+
+    const bool track_released = emit_finality == core::Finality::Safe;
+    for (const auto& log : f.logs) {
+        Event ev = build_event(log, f, EventType::Log);
+        ev.finality = emit_finality;
+        if (!recent_.admit(ev.event_id, EventType::Log)) {
+            ++stats_.deduped;
+            continue;
+        }
+        sink_.emit(make_emission(ev, track_released ? std::optional<std::uint64_t>(ev.block_number) : std::nullopt));
+        if (track_released) ++stats_.emitted_safe;
+        else ++stats_.emitted_final;
+    }
+    c_s_ = f.range.to;
+    if (opt_.on_page) opt_.on_page(emit_finality, f.range, f.logs);
+    co_return StepResult{StepStatus::Advanced, f.range, {}, false};
+}
+
 // Re-verifies released safe-class logs against the canonical chain across (C_f, C_s].
 // Emits reverts for logs that disappeared in the reorg and emits new logs on the winning branch.
 // Watch out: Pulls C_s back to the lowest fork point, ensuring no gaps in subsequent sweeps (Invariant I1).
