@@ -115,7 +115,8 @@ event Withdraw(
 
 - **`PoolCreated(address indexed token0, address indexed token1, int24 indexed tickSpacing, address pool)`**:
   - **Topic0**: `0xab0d57f0b5d5d8523c14c538a7c293eb21789e02c6767eb21ee127b878349ac2`
-- **`GaugeCreated(address indexed pool, address indexed factory, address indexed gauge, address voter, ...)`**:
+- **`GaugeCreated(address indexed poolFactory, address indexed votingRewardsFactory, address indexed gaugeFactory, address pool, address bribeVotingReward, address feeVotingReward, address gauge, address creator)`**:
+  - **Canonical ABI signature**: `GaugeCreated(address,address,address,address,address,address,address,address)`
   - **Topic0**: `0xef9f7d1ffa2bb7a8b688d6be6f9e612f0e03cfc7929d912cb8ac90aa150e79e1`
 - **`GaugeKilled(address indexed gauge)`**:
   - **Topic0**: `0x04a5d3f58a980590453303d29a622a59a7f311c0f51cc7ce0ee03df449192ba7`
@@ -140,6 +141,6 @@ The listener is an **asynchronous event ingestion and indexing pipeline** that f
 
 In v1, dynamic discovery is integrated into the **single static configuration shard** without requiring a complex multi-process discovery daemon:
 1. **Unified Filter**: `CLFactory` and `Voter` are added as contracts in `config/base.toml`.
-2. **Stream Partitioning**: Pool and gauge events route to `evml:base_eurc_usdc:events`, while `PoolCreated` / `GaugeCreated` / `GaugeKilled` / `GaugeRevived` route to `evml:base_eurc_usdc:registry`.
+2. **Stream Partitioning**: Pool and gauge events route to `evml:{base_eurc_usdc}:events`, while `PoolCreated` / `GaugeCreated` / `GaugeKilled` / `GaugeRevived` route to `evml:{base_eurc_usdc}:registry`.
 3. **Operator Notification**: Downstream consumers or n8n monitor the `registry` stream. When a new pool or gauge is deployed, operators update the TOML config and redeploy.
 4. **v2 Scope**: Fully automated runtime `eth_subscribe` expansion and sub-checkpoint backfill are deferred to v2.
