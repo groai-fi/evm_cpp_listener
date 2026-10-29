@@ -5,11 +5,15 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
+#include <vector>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -25,7 +29,10 @@
 #include "core/keccak.hpp"
 #include "core/log.hpp"
 #include "core/version.hpp"
+#include "pipeline/aimd_pager.hpp"
 #include "pipeline/coverage.hpp"
+#include "pipeline/event.hpp"
+#include "pipeline/log_validation.hpp"
 #include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
 #include "rpc/backoff.hpp"
@@ -585,6 +592,368 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     return kExitOk;
 }
 
+int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_block, AuditReport* out_report) {
+    namespace net = boost::asio;
+    core::log::init("info");
+
+    AuditReport report;
+    const auto finish = [&](int code) {
+        if (out_report) *out_report = report;
+        return code;
+    };
+
+    if (from_block > to_block) {
+        std::cerr << "FAIL  invalid block range: from_block (" << from_block << ") > to_block (" << to_block << ")\n";
+        return finish(kExitUsage);
+    }
+
+    const std::string redis_url = core::env::get(cfg.sink.redis_url_env);
+    if (redis_url.empty()) {
+        std::cerr << "FAIL  environment variable " << cfg.sink.redis_url_env << " is not set\n";
+        return finish(kExitFailure);
+    }
+
+    auto pool_cfg = make_pool_config(cfg, user_agent(cfg));
+    const sink::Keys keys{cfg.shard.id};
+
+    struct FoldedEntry {
+        std::string event_id;
+        std::string last_type;
+        core::StreamKind stream{core::StreamKind::Events};
+        std::string finality;
+        std::string address;
+        std::string topics;
+        std::string data;
+        std::uint64_t block_number{0};
+        std::uint64_t log_index{0};
+        bool ever_reverted{false};
+    };
+
+    std::map<std::string, FoldedEntry> folded;
+    std::vector<std::string> dup_live_samples;
+    std::vector<std::string> order_samples;
+    std::unordered_map<std::string, std::size_t> source_counts;
+
+    try {
+        sink::RedisppConn conn(redis_url, keys);
+        const auto ck = conn.read_checkpoint();
+        if (!ck.finalized || to_block > *ck.finalized) {
+            std::cerr << "FAIL  to_block (" << to_block << ") exceeds ckpt.finalized ("
+                      << (ck.finalized ? std::to_string(*ck.finalized) : std::string("none")) << ")\n";
+            return finish(kExitUsage);
+        }
+
+        sw::redis::ConnectionOptions ropts = sw::redis::Uri(redis_url).connection_options();
+        ropts.connect_timeout = std::chrono::seconds(5);
+        ropts.socket_timeout = std::chrono::seconds(10);
+        sw::redis::Redis redis(ropts);
+
+        using Attrs = std::unordered_map<std::string, std::string>;
+        using StreamItem = std::pair<std::string, sw::redis::Optional<Attrs>>;
+
+        for (const auto stream_kind : {core::StreamKind::Events, core::StreamKind::Registry}) {
+            std::vector<StreamItem> items;
+            redis.xrange(keys.stream(stream_kind), "-", "+", std::back_inserter(items));
+
+            std::map<core::Finality, std::pair<std::uint64_t, std::uint64_t>> last_normal_pos;
+            for (const auto& [sid, opt_attrs] : items) {
+                (void)sid;
+                if (!opt_attrs) continue;
+                const auto& attrs = *opt_attrs;
+                const auto bn_it = attrs.find("block_number");
+                const auto li_it = attrs.find("log_index");
+                const auto id_it = attrs.find("event_id");
+                const auto ty_it = attrs.find("type");
+                const auto fn_it = attrs.find("finality");
+                const auto ad_it = attrs.find("address");
+                const auto tp_it = attrs.find("topics");
+                const auto da_it = attrs.find("data");
+                if (bn_it == attrs.end() || li_it == attrs.end() || id_it == attrs.end() || ty_it == attrs.end() ||
+                    fn_it == attrs.end() || ad_it == attrs.end() || tp_it == attrs.end() || da_it == attrs.end()) {
+                    continue;
+                }
+                const std::uint64_t bn = std::stoull(bn_it->second);
+                if (bn < from_block || bn > to_block) continue;
+                const std::uint64_t li = std::stoull(li_it->second);
+                const std::string& event_id = id_it->second;
+                const std::string& type = ty_it->second;
+
+                if (const auto fs_it = attrs.find("first_source"); fs_it != attrs.end() && !fs_it->second.empty()) {
+                    ++source_counts[fs_it->second];
+                }
+
+                auto& fe = folded[event_id];
+                if (fe.event_id.empty()) fe.event_id = event_id;
+
+                if (type == "log") {
+                    if (fe.last_type == "log") {
+                        ++report.dup_live;
+                        if (dup_live_samples.size() < 20) dup_live_samples.push_back(event_id);
+                    } else if (!fe.ever_reverted) {
+                        core::Finality fin_class =
+                            fn_it->second == "safe" ? core::Finality::Safe : core::Finality::Finalized;
+                        bool is_late_correction = false;
+                        for (const auto& c : cfg.contracts) {
+                            if (c.address.to_hex() == ad_it->second) {
+                                if (c.finality == core::Finality::Safe && fn_it->second == "finalized") {
+                                    is_late_correction = true;
+                                }
+                                fin_class = c.finality;
+                                break;
+                            }
+                        }
+                        if (!is_late_correction) {
+                            const auto pos = std::pair{bn, li};
+                            const auto pos_it = last_normal_pos.find(fin_class);
+                            if (pos_it != last_normal_pos.end() && pos <= pos_it->second) {
+                                ++report.order_violation;
+                                if (order_samples.size() < 20) order_samples.push_back(event_id);
+                            } else {
+                                last_normal_pos[fin_class] = pos;
+                            }
+                        }
+                    }
+                    fe.last_type = "log";
+                    fe.stream = stream_kind;
+                    fe.finality = fn_it->second;
+                    fe.address = ad_it->second;
+                    fe.topics = tp_it->second;
+                    fe.data = da_it->second;
+                    fe.block_number = bn;
+                    fe.log_index = li;
+                } else if (type == "revert") {
+                    fe.last_type = "revert";
+                    fe.ever_reverted = true;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "FAIL  redis read failed: " << e.what() << "\n";
+        return finish(kExitFailure);
+    }
+
+    // Identify the dominant first_source in the audited window and deprioritise it so eth_getLogs uses an independent
+    // provider when one is configured and healthy (§6.2).
+    std::size_t best_count = 0;
+    for (const auto& [src, cnt] : source_counts) {
+        if (cnt > best_count || (cnt == best_count && !report.dominant_source.empty() && src < report.dominant_source)) {
+            best_count = cnt;
+            report.dominant_source = src;
+        }
+    }
+    if (!report.dominant_source.empty() && pool_cfg.getlogs_order.size() > 1) {
+        auto it = std::find(pool_cfg.getlogs_order.begin(), pool_cfg.getlogs_order.end(), report.dominant_source);
+        if (it != pool_cfg.getlogs_order.end()) {
+            pool_cfg.getlogs_order.erase(it);
+            pool_cfg.getlogs_order.push_back(report.dominant_source);
+        }
+    }
+
+    net::io_context ioc;
+    auto pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
+    pool->start_http_only();
+    PoolLogSource source(pool, nullptr);
+
+    std::unordered_map<std::string, pipeline::AimdPager> pagers;
+    const auto pager_for = [&](const std::string& provider) -> pipeline::AimdPager& {
+        const auto it = pagers.find(provider);
+        if (it != pagers.end()) return it->second;
+        for (const auto& p : cfg.getlogs_chain) {
+            if (p.name == provider) {
+                return pagers.emplace(provider, pipeline::AimdPager(p.max_getlogs_range, cfg.backfill.min_range))
+                    .first->second;
+            }
+        }
+        return pagers.emplace(provider, pipeline::AimdPager(500, cfg.backfill.min_range)).first->second;
+    };
+
+    const core::LogFilter filter = cfg.filter();
+    std::vector<rpc::Log> canonical_logs;
+    bool fetch_ok = true;
+    std::string fetch_err;
+
+    net::co_spawn(
+        ioc,
+        [&]() -> net::awaitable<void> {
+            if (filter.addresses.empty()) {
+                pool->stop();
+                ioc.stop();
+                co_return;
+            }
+
+            rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
+            std::uint64_t next_from = from_block;
+            while (next_from <= to_block) {
+                bool page_done = false;
+                for (std::uint32_t attempt = 1; attempt <= 10 && !page_done; ++attempt) {
+                    const auto first = source.current_provider();
+                    if (!first) {
+                        fetch_err = "no usable getLogs provider";
+                        break;
+                    }
+                    auto* pg = &pager_for(*first);
+                    for (;;) {
+                        const std::uint64_t span_max = pg->range();
+                        const std::uint64_t page_to =
+                            next_from + std::min<std::uint64_t>(span_max - 1, to_block - next_from);
+                        const pipeline::BlockRange r{next_from, page_to};
+
+                        const pipeline::LogResult res = co_await source.get_logs(r, filter);
+                        if (res.ok) {
+                            if (const auto bad = pipeline::validate_logs(res.logs, r.from, r.to, cfg, std::nullopt)) {
+                                source.report_bad(res.provider, *bad);
+                                fetch_err = res.provider + ": " + *bad;
+                                break;
+                            }
+                            pg->on_success();
+                            if (report.audit_provider.empty()) report.audit_provider = res.provider;
+                            canonical_logs.insert(canonical_logs.end(), res.logs.begin(), res.logs.end());
+                            next_from = r.to + 1;
+                            page_done = true;
+                            backoff.reset();
+                            break;
+                        }
+
+                        if (res.kind != rpc::FailKind::RangeTooLarge) {
+                            auto& failed = pager_for(res.provider);
+                            const std::uint64_t span = r.to - r.from + 1;
+                            if ((res.kind == rpc::FailKind::Retry || res.kind == rpc::FailKind::RateLimited) &&
+                                span > failed.min()) {
+                                failed.on_range_too_large(std::nullopt);
+                            }
+                            fetch_err = "getLogs failed on " + res.provider + ": " + res.error;
+                            break;
+                        }
+
+                        pg = &pager_for(res.provider);
+                        if (pg->on_range_too_large(res.range_limit) == pipeline::AimdPager::Shrink::Shrunk) continue;
+
+                        // At minimum range and still too large: split by address.
+                        std::vector<rpc::Log> merged;
+                        std::string last_provider = res.provider;
+                        bool split_ok = true;
+                        for (const auto& addr : filter.addresses) {
+                            core::LogFilter one{std::vector<core::Address20>{addr}, filter.topic0s};
+                            const pipeline::LogResult r2 = co_await source.get_logs(r, one);
+                            if (!r2.ok) {
+                                fetch_err = "getLogs split failed on " + r2.provider + ": " + r2.error;
+                                split_ok = false;
+                                break;
+                            }
+                            if (const auto bad = pipeline::validate_logs(r2.logs, r.from, r.to, cfg, std::nullopt)) {
+                                source.report_bad(r2.provider, *bad);
+                                fetch_err = r2.provider + ": " + *bad;
+                                split_ok = false;
+                                break;
+                            }
+                            last_provider = r2.provider;
+                            merged.insert(merged.end(), r2.logs.begin(), r2.logs.end());
+                        }
+                        if (!split_ok) break;
+                        std::sort(merged.begin(), merged.end(), [](const rpc::Log& a, const rpc::Log& b) {
+                            return std::tie(a.block_number, a.log_index) < std::tie(b.block_number, b.log_index);
+                        });
+                        if (report.audit_provider.empty()) report.audit_provider = last_provider;
+                        canonical_logs.insert(canonical_logs.end(), merged.begin(), merged.end());
+                        next_from = r.to + 1;
+                        page_done = true;
+                        backoff.reset();
+                        break;
+                    }
+                    if (!page_done && attempt < 10) {
+                        net::steady_timer timer(ioc);
+                        timer.expires_after(backoff.next());
+                        co_await timer.async_wait(net::use_awaitable);
+                    }
+                }
+                if (!page_done) {
+                    fetch_ok = false;
+                    break;
+                }
+            }
+            pool->stop();
+            ioc.stop();
+        },
+        net::detached);
+    ioc.run();
+
+    if (!fetch_ok) {
+        std::cerr << "FAIL  audit-stream canonical fetch failed: " << fetch_err << "\n";
+        return finish(kExitFailure);
+    }
+
+    report.canonical_logs = canonical_logs.size();
+    std::unordered_set<std::string> canonical_ids;
+    std::vector<std::string> missing_samples;
+    std::vector<std::string> phantom_samples;
+    std::vector<std::string> mismatch_samples;
+
+    for (const auto& log : canonical_logs) {
+        const std::string event_id = pipeline::make_event_id(cfg.chain.chain_id, log.block_hash, log.log_index);
+        canonical_ids.insert(event_id);
+
+        const auto it = folded.find(event_id);
+        if (it == folded.end() || it->second.last_type != "log") {
+            ++report.missing;
+            if (missing_samples.size() < 20) missing_samples.push_back(event_id);
+            continue;
+        }
+
+        const auto& fe = it->second;
+        const auto* route = cfg.route(log.address, log.topics.at(0));
+        std::string topics_json = "[";
+        for (std::size_t i = 0; i < log.topics.size(); ++i) {
+            if (i != 0) topics_json += ",";
+            topics_json += "\"" + log.topics[i].to_hex() + "\"";
+        }
+        topics_json += "]";
+
+        const std::string expected_addr = log.address.to_hex();
+        const std::string expected_finality = route ? std::string(core::to_string(route->finality)) : std::string{};
+        const bool fin_ok = route && (fe.finality == expected_finality ||
+                                      (route->finality == core::Finality::Safe && fe.finality == "finalized"));
+        const bool stream_ok = route && fe.stream == route->stream;
+
+        if (fe.address != expected_addr || fe.topics != topics_json || fe.data != log.data || !stream_ok || !fin_ok) {
+            ++report.field_mismatch;
+            if (mismatch_samples.size() < 20) mismatch_samples.push_back(event_id);
+        }
+    }
+
+    for (const auto& [event_id, fe] : folded) {
+        if (fe.last_type != "log") continue;
+        ++report.live_stream_entries;
+        if (canonical_ids.find(event_id) == canonical_ids.end()) {
+            ++report.phantom;
+            if (phantom_samples.size() < 20) phantom_samples.push_back(event_id);
+        }
+    }
+
+    const bool clean =
+        report.missing == 0 && report.phantom == 0 && report.dup_live == 0 && report.field_mismatch == 0;
+    std::cout << (clean ? "ok    " : "FAIL  ") << "audit-stream blocks=" << from_block << ".." << to_block
+              << " provider=" << (report.audit_provider.empty() ? "none" : report.audit_provider)
+              << " dominant_source=" << (report.dominant_source.empty() ? "none" : report.dominant_source)
+              << " canonical=" << report.canonical_logs << " live=" << report.live_stream_entries
+              << " missing=" << report.missing << " phantom=" << report.phantom << " dup_live=" << report.dup_live
+              << " field_mismatch=" << report.field_mismatch << " order_violation=" << report.order_violation << "\n";
+
+    const auto print_samples = [](const char* label, const std::vector<std::string>& samples) {
+        for (const auto& id : samples) {
+            std::cerr << "  " << label << ": " << id << "\n";
+        }
+    };
+    if (!clean) {
+        print_samples("missing", missing_samples);
+        print_samples("phantom", phantom_samples);
+        print_samples("dup_live", dup_live_samples);
+        print_samples("field_mismatch", mismatch_samples);
+        print_samples("order_violation", order_samples);
+        return finish(kExitFailure);
+    }
+    return finish(kExitOk);
+}
+
 /// @brief Command-line interface dispatcher for offline audits and pre-flight probes.
 int run_cli(int argc, char** argv) {
     const auto usage = [] {
@@ -594,12 +963,14 @@ int run_cli(int argc, char** argv) {
                      "       evm_listener --config <file> --check-redis\n"
                      "       evm_listener --config <file> --find-deploy-block <address>\n"
                      "       evm_listener --config <file> --probe-transport <seconds>\n"
-                     "       evm_listener --config <file> --backfill-contract <name>\n";
+                     "       evm_listener --config <file> --backfill-contract <name>\n"
+                     "       evm_listener --config <file> --audit-stream <from_block> <to_block>\n";
         return kExitUsage;
     };
 
     std::optional<std::string> config_path, find_addr, backfill_name;
     std::optional<unsigned> probe_seconds;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> audit_range;
     std::optional<std::chrono::seconds> freeze_io_after;  // test hook, see EVML_TEST_HOOKS
     bool version = false, check = false, check_redis_flag = false;
     // Parse command line arguments.
@@ -618,6 +989,18 @@ int run_cli(int argc, char** argv) {
         } else if (a == "--backfill-contract" && i + 1 < argc) {
             backfill_name = argv[++i];
             if (backfill_name->empty()) return usage();
+        } else if (a == "--audit-stream" && i + 2 < argc) {
+            const std::string f_str = argv[++i];
+            const std::string t_str = argv[++i];
+            const auto is_u64 = [](const std::string& s) {
+                return !s.empty() && s.size() <= 20 &&
+                       std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+            };
+            if (!is_u64(f_str) || !is_u64(t_str)) {
+                std::cerr << "--audit-stream needs <from_block> <to_block> as unsigned integers\n";
+                return usage();
+            }
+            audit_range = std::pair{std::stoull(f_str), std::stoull(t_str)};
         } else if (a == "--probe-transport" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v.empty() || v.size() > 4 || !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); })) {
@@ -645,7 +1028,7 @@ int run_cli(int argc, char** argv) {
     // The tool actions are mutually exclusive; none of them means "run the listener".
     const int actions = static_cast<int>(check) + static_cast<int>(check_redis_flag) +
                         static_cast<int>(find_addr.has_value()) + static_cast<int>(probe_seconds.has_value()) +
-                        static_cast<int>(backfill_name.has_value());
+                        static_cast<int>(backfill_name.has_value()) + static_cast<int>(audit_range.has_value());
     if (actions > 1) return usage();
     if (!config_path) {
         std::cerr << "--config <file> is required\n";
@@ -664,6 +1047,7 @@ int run_cli(int argc, char** argv) {
         if (check_redis_flag) return check_redis(cfg);
         if (probe_seconds) return probe_transport(cfg, *probe_seconds);
         if (backfill_name) return backfill_contract(cfg, *backfill_name);
+        if (audit_range) return audit_stream(cfg, audit_range->first, audit_range->second);
         if (!find_addr) return run_listener(cfg, freeze_io_after);
         const auto addr = Address20::from_hex(*find_addr);
         std::cout << find_deploy_block(cfg, addr) << "\n";

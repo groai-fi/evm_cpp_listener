@@ -80,6 +80,31 @@ int check_redis(const core::Config& cfg);
 int backfill_contract(const core::Config& cfg, std::string_view contract_name,
                       std::chrono::milliseconds lease_timeout = std::chrono::seconds(60));
 
+/// @brief Defect counters and metadata produced by `--audit-stream` (§6.2).
+struct AuditReport {
+    std::size_t missing{0};
+    std::size_t phantom{0};
+    std::size_t dup_live{0};
+    std::size_t field_mismatch{0};
+    std::size_t order_violation{0};
+    std::size_t canonical_logs{0};
+    std::size_t live_stream_entries{0};
+    std::string dominant_source;
+    std::string audit_provider;
+};
+
+/// @brief Audits the Redis `events` and `registry` streams over `[from_block, to_block]` against an independent
+/// `eth_getLogs` re-read (§6.2, read-only, no lease).
+///
+/// @param cfg Validated core configuration.
+/// @param from_block Inclusive start block of the audit window.
+/// @param to_block Inclusive end block of the audit window (must be `>= from_block` and `<= ckpt.finalized`).
+/// @param out_report Optional pointer populated with the computed defect and entry counts.
+/// @return kExitOk if `missing == phantom == dup_live == field_mismatch == 0`, kExitFailure on defects or RPC/Redis
+///         errors, or kExitUsage if `from_block > to_block` or `to_block > ckpt.finalized`.
+int audit_stream(const core::Config& cfg, std::uint64_t from_block, std::uint64_t to_block,
+                 AuditReport* out_report = nullptr);
+
 /// @brief Primary command-line interface entry point invoked from `main()`.
 ///
 /// Dynamically resolves `.env` files, parses command-line arguments, loads TOML configuration,

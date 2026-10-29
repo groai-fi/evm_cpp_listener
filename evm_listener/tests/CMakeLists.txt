@@ -49,6 +49,7 @@ add_executable(evml_tests
     ops_http_server_test.cpp
     http_client_test.cpp
     host_test.cpp
+    tools_test.cpp
 )
 target_link_libraries(evml_tests PRIVATE evml_core Catch2::Catch2WithMain)
 target_compile_definitions(evml_tests PRIVATE
