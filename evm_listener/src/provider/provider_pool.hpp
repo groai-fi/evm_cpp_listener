@@ -185,6 +185,10 @@ public:
     const std::map<std::string, std::uint64_t>& rpc_requests_total(const std::string& provider) const {
         return nodes_.at(provider).rpc_requests;
     }
+    /// @brief Total WebSocket subscription notifications received from the provider, keyed by stream ("heads", "logs").
+    const std::map<std::string, std::uint64_t>& ws_messages_total(const std::string& provider) const {
+        return nodes_.at(provider).ws_messages;
+    }
 
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
     // provider; a null block counts as a failure too).
@@ -235,6 +239,7 @@ private:
         std::uint64_t throttled{0};
         std::map<std::string, std::uint64_t> rpc_requests{
             {"eth_getLogs", 0}, {"eth_getBlockByNumber", 0}, {"eth_blockNumber", 0}, {"eth_chainId", 0}};
+        std::map<std::string, std::uint64_t> ws_messages{{"heads", 0}, {"logs", 0}};
         std::vector<boost::asio::steady_timer*> wait_timers;
         // The last Quota / Auth / Config failure, kept so health() can say why a provider is in Cooldown / Disabled.
         struct Fault {

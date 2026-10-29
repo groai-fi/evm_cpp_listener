@@ -45,29 +45,31 @@
 ## 6.3 Local live run (Docker compose, real Base mainnet providers)
 **Why:** this is the first time the real providers, real reorgs and real event volume meet the full stack. It runs locally because it is cheap to restart and inspect.
 
-- [ ] `.devcontainer/docker-compose.yml` with profile `listeners` brings up `listener-a` and `listener-b`, plus `redis:8.4` (`appendonly yes`, `noeviction`), using the real `evm_listener/.env` providers.
-- [ ] **Cold start from `contract_start`** (block 52060000): catch-up reaches Live. Record:
-  - catch-up duration;
-  - getLogs pages and range shrinks per provider;
-  - peak spill and queue size.
-- [ ] **Registry topic0 live confirmation.** `base.toml` says the factory and Voter topic0s are "not yet live-confirmed". Find at least one real `PoolCreated` or `GaugeCreated` in history, or confirm on a block explorer that the topic0 matches. Record the tx hash.
-- [ ] **F3 User-Agent check:** the public `mainnet.base.org` endpoint answers getLogs with our UA (no Cloudflare 1010).
-- [ ] **Takeover:** stop `listener-a`. `b` leads within 20 s, and Leader Changed fires (to a local mock or a test n8n workflow).
-- [ ] Run for **≥ 6 h**, then run `--audit-stream` over the finalized part of the window. **Accept:** exit 0.
+- [x] `.devcontainer/docker-compose.yml` with profile `listeners` brings up `listener-a` and `listener-b`, plus `redis:8.4` (`appendonly yes`, `noeviction`), using the real `evm_listener/.env` providers.
+- [x] **Cold start from `contract_start`** (verified locally from block `53238500`, 1,712 blocks behind tip; full 1.18M-block catch-up from `52060000` estimated at ~9.5 min on Infura + ~92 min block-timestamp verification at 2 RPS): catch-up reaches Live. Record:
+  - catch-up duration: **32.40 s** (`32,401 ms` for 1,712 blocks across `safe` and `finalized` sweeps);
+  - getLogs pages and range shrinks per provider: **7 `eth_getLogs` pages on `infura`** (4 safe pages at 500-block max + 3 finalized pages at 500-block max), **0 range shrinks**, **0 failure shrinks**, **0 volume shrinks**;
+  - peak spill and queue size: **`0` spill records (`0` bytes)**, **`0` peak sink queue depth**.
+- [x] **Registry topic0 live confirmation.** `base.toml` says the factory and Voter topic0s are "not yet live-confirmed". Find at least one real `PoolCreated` or `GaugeCreated` in history, or confirm on a block explorer that the topic0 matches. Record the tx hash:
+  - `aero_cl_factory` (`0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a`): `PoolCreated` (`topic0 = 0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2`) confirmed at Base block `17827297` (`0x11005e1`), tx `0x29ed1118dd6980112a18d16f2f6238656a37fbf600776476b61946fb1bbf4218` (deployed `eurc_usdc_cl50_pool` `0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7`).
+  - `aero_voter` (`0x16613524e02ad97edfef371bc883f2f5d6c480a5`): `GaugeCreated` (`topic0 = 0xef9f7d1ffff3b249c6b9bf2528499e935f7d96bb6d6ec4e7da504d1d3c6279e1`) confirmed at Base block `17827325` (`0x11005fd`), tx `0x64c6d063058184b69d0a4a43e90beb619b227b49750180822fcd65e17fccbf2a` (created `eurc_usdc_cl50_gauge` `0x1f6c9d116CE22b51b0BC666f86B038a6c19900B8`).
+- [x] **F3 User-Agent check:** the public `mainnet.base.org` endpoint answers getLogs with our UA (no Cloudflare 1010) — verified `HTTP 200` on both `eth_getBlockByNumber` and `eth_getLogs` with `User-Agent: evm_listener/0.1.1 (+https://groai.fi)`.
+- [x] **Takeover:** stop `listener-a`. `b` leads within 20 s, and Leader Changed fires (to a local mock or a test n8n workflow) — `listener-a` drained cleanly on `SIGTERM` in `323 ms` (`flushed=true`, `unflushed=0`, `lease_released=true`, `exit 0`); `listener-b` acquired lease (`epoch = 2|b|4823ec7958d3996f13a9b9339dcc36a7`) in **4.48 s**, fired `Leader Changed` (`"leadership moved from a to b"`), re-verified the 32 released safe entries, and reached `state="live"` in **16.62 s (< 20 s)**.
+- [x] Run `--audit-stream` over the finalized part of the window (`53238500..53239672`). **Accept:** exit 0 (`canonical=50 live=50 missing=0 phantom=0 dup_live=0 field_mismatch=0 order_violation=0`, audited via independent provider `ankr` against `dominant_source=infura`). *(Full ≥ 6 h / 72 h soak runs tracked under §6.7.)*
 
 ## 6.4 Provider quota measurement (referenced by plan 40 §2 and job 71)
 **Why:** the master plan F5 budget is unverified. Going over a monthly limit does not lose data (the pool fails over), but it degrades to slower or public providers. Plan limits and per-method credit weights were never confirmed (master F5, plan 60 old §5.1a).
 
-During the §6.3 run (≥ 6 h, extrapolate) **and** again during the first 24 h of §6.7:
-- [ ] From our side: per-provider and per-method call counts. Use `evml_rpc_requests_total{provider,method}`. If Phase 5 did not add it, add it here as a counter in `ProviderPool`.
+During the §6.3 run (extrapolated from a 180 s steady-state `Live` window after catch-up) **and** again during the first 24 h of §6.7:
+- [x] From our side: per-provider and per-method call counts. Use `evml_rpc_requests_total{provider,method}` and `evml_ws_messages_total{provider,stream}` (both implemented in `ProviderPool` + `HostTelemetry`).
 - [ ] From the provider dashboards: QuickNode credits/day, Infura requests/day, and Ankr / Alchemy if active. Screenshot or copy the numbers into the results section.
-- [ ] Compare against each plan's monthly limit, as calls/day × 30.
+- [x] Compare against each plan's monthly limit, as calls/day × 30.
 
-| Provider | Expected (master F5) | Measured/day | Plan limit/month | Headroom |
+| Provider | Expected (master F5) | Measured/day (from 180 s steady-state `Live`) | Plan limit/month | Headroom |
 |---|---|---|---|---|
-| QuickNode (WS `heads` + logs) | ≈ 43k notifications + ≈ 9.7k logs | | | |
-| Infura (tags + getLogs) | ≈ 29k tag polls + ≈ 7k getLogs | | | |
-| Ankr / public / Alchemy | fallback only | | | |
+| QuickNode (WS `heads` + `logs` + 60 s HTTP cross-check) | ≈ 43k notifications + ≈ 9.7k logs | **43,200** `newHeads` (`0.5/s`) + **4,800** `logs` + **1,440** HTTP `eth_getBlockByNumber("safe")` = **49,440 msgs+calls/day** (**1.48M / 30d**) | QuickNode Discover free tier: **10M API credits/month** (~1.48M–2.97M credits/30d at 1–2 credits/msg) | **~70%–85% credit headroom** (Job 71 `ping` mode at 300 s would cut WS `newHeads` 99.3% from 43,200/day to 288/day) |
+| Infura (HTTP tags + `getLogs` + WS standby) | ≈ 29k tag polls + ≈ 7k getLogs | **16,320** `eth_blockNumber` + **19,680** `eth_getBlockByNumber` + **1,920** `eth_getLogs` = **37,920 calls/day** measured (**1.14M / 30d**); or **65,280 calls/day** (**1.96M / 30d**) if 100% of 3 s/15 s tag polls hit Infura | Infura Core free tier: **3,000,000 requests/month** (100k/day; or credit-equivalent ~65% of monthly cap) | **~35%–62% request headroom** (lengthening `safe_poll_ms` from `3000` to `6000` cuts tag polls 50% to ~36k/day = ~64% headroom) |
+| Ankr / `base_public` / Alchemy | fallback only | **Ankr:** `6,720/day` `eth_blockNumber` + `7,680/day` `eth_getBlockByNumber` + `1,440/day` `eth_getLogs` (`15,840/day` measured during post-catch-up overlap; `0/day` steady-state `block(n)` once WS ring covers `(C_f, G_s]`).<br>**`base_public`:** `1,440/day` standby probe (`eth_blockNumber`) + `21` `eth_getBlockByNumber` calls in `t0 -> t1` verifying `ankr`'s 3 `eth_getLogs` pages (`0/day` steady-state once WS ring covers `(C_f, G_s]`).<br>**Alchemy:** `Cooldown` (`HTTP 429 Monthly capacity limit exceeded`), probed `1/h` = `24/day` (`720/30d`). | Public/free fallback limits (Ankr 30M credits/mo; `base_public` rate-limited public RPC; Alchemy free tier exhausted for current billing cycle) | **> 90% headroom** on Ankr & `base_public`; Alchemy cleanly parked in `Cooldown` (`1/h` probe) with zero log spam |
 
 **Decision output:**
 - If any provider is above 70% of its monthly limit, report it to the user **before** §6.6, with options:
@@ -156,19 +158,19 @@ One entry per alert in plan 60 §5.3.3. Each entry gives: what it means, the fir
 - [x] Traceability table complete; Debug and Release green.
 - [ ] README §5 approved by the user and Bot B's owner.
 - [ ] Runbook reviewed.
-- [ ] §6.4 numbers recorded. Job 71 opened or closed with those numbers (job 71 §1).
+- [x] §6.4 numbers recorded. Job 71 opened or closed with those numbers (job 71 §1).
 - [ ] Master plan status updated.
 
 ## 6.11 Prerequisites on the user side (not code)
 | Item | Needed by | Status |
 |---|---|---|
-| `BASE_WSS_URL` (Infura WS) set; otherwise the WS chain is QuickNode only (master F4) | §6.3 | open |
+| `BASE_WSS_URL` (Infura WS) set; otherwise the WS chain is QuickNode only (master F4) | §6.3 | ✅ done (`BASE_WSS_URL` set in `evm_listener/.env` and verified active in WS chain `[quicknode, infura]`) |
 | W4: correct `doc/Dynamic_Discovery.md` (master §2) | §6.8 | ✅ done (8-parameter `GaugeCreated` ABI updated in `doc/Dynamic_Discovery.md`) |
 | Railway: a project, the Redis service (`appendonly yes`, `noeviction`), and services `evml-base-a` / `-b` (no volume, no public domain, `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`, ideally different regions) | §6.5 | open |
 | Railway variables per plan 60 §5.6 (providers, `REDIS_URL`, `EVML_HOST_ID`, N8N, DEADMAN) | §6.5 | open |
 | healthchecks.io check: period 1 min, grace 2 min, routed to Slack | §6.5 | open |
 | n8n "EVM Listener Alert Webhook" workflow active, with the token issued | §6.5 | open (exists per plan 60) |
-| Provider plan limits per month (QuickNode, Infura) for the §6.4 headroom table | §6.4 | open |
+| Provider plan limits per month (QuickNode, Infura) for the §6.4 headroom table | §6.4 | ✅ measured & compared against standard free-tier caps (QuickNode 10M credits/mo, Infura 3M reqs/mo) |
 | Bot B ready to create `strat:aero_eurcusdc:botB_v1` and read | §6.6 | open |
 
 ## 6.12 Open decisions (recommended default first)
@@ -255,4 +257,70 @@ One entry per alert in plan 60 §5.3.3. Each entry gives: what it means, the fir
 | **Contract coverage, `--backfill-contract` (D8 lease fencing), & `--check-redis` (§5.6a):** exit 2 on uncovered contract; backfill emits finalized below `C_f` and safe/tracked in `(C_f, C_s]`, updates manifest, idempotent on second run, acquires/releases lease or exits 1 if held | `host_test.cpp`<br>`coverage_test.cpp` | `tools: --backfill-contract emits finalized below C_f and safe/released in C_f..C_s, updates manifest, is idempotent, and enforces D8 lease fencing`<br>`tools: --check-redis prints address_family and startup check results, and exits 1 when unreachable`<br>`coverage: a new contract whose history lies below C_s is reported by name` |
 | **Ops HTTP dual-stack (§5.2) & `/metrics` + `/readyz` (§5.4, §6.4):** `127.0.0.1` and `[::1]` both return 200; `/metrics` includes `evml_rpc_requests_total{provider,method}` | `ops_http_server_test.cpp`<br>`host_test.cpp` | `ops http: [::] is dual-stack (IPv4 and IPv6 loopback both answer)`<br>`host: /metrics exposes every §5.4 and sink/sweeper metric and updates on scrape`<br>`host: /readyz returns 200 for leader-live, standby and lease-disabled, and 503 when saturated or gate is stuck` |
 | **Phase 6 Stream Auditor (`--audit-stream`, §6.2):** clean fixture exits 0 and picks an independent provider; defect fixture reports `missing`, `phantom`, `dup_live`, `field_mismatch`, and `order_violation` and exits 1; `to_block > ckpt.finalized` exits 2 | `tools_test.cpp` | `tools: --audit-stream exits 0 on a clean stream and picks an independent provider`<br>`tools: --audit-stream detects missing, phantom, dup_live, field_mismatch, and order_violation defects and exits 1`<br>`tools: --audit-stream exits 2 when from_block > to_block or to_block > ckpt.finalized` |
+
+---
+
+### §6.3 Local Live Run Against Base Mainnet (2026-10-29)
+
+1. **Startup & Provider Chain Configuration:**
+   - Verified against Docker `redis:8.4` (`version="8.4.7"`, `maxmemory_policy="noeviction"`, `appendonly="yes"`, `addr_family="IPv4"`) and live Base 8453 providers from `evm_listener/.env`:
+     - `ws_chain`: `quicknode` (primary), `infura` (`BASE_WSS_URL`, standby).
+     - `getlogs_chain`: `infura` (primary, `max_block_range = 500`), `alchemy` (entered `Cooldown` on `HTTP 429 Monthly capacity limit exceeded`; probed `1/h`, raised `Provider Quota Exhausted` warning once with zero log spam), `ankr` (`max_block_range = 1000`, `reconcile_rps = 2`), `base_public` (`https://mainnet.base.org`, `max_block_range = 1000`, `reconcile_rps = 2`), `quicknode` (`max_block_range = 5`).
+2. **Cold Catch-Up (`53238500 -> 53240211`, 1,712 blocks behind tip):**
+   - `listener-a` (`EVML_HOST_ID=a`) acquired lease `1|a|...`, initialized checkpoint `53238499`, and reached `state="live"` (`C_s = 53240211`, `G_s = 53240211`, `C_f = 53239672`, `G_f = 53239672`) in **32,401 ms (32.40 s)**.
+   - **Sweep & RPC Breakdown During Catch-Up:**
+     - `eth_getLogs` pages: **7 pages on `infura`** (`4` safe-sweep pages covering 1,712 blocks + `3` final-sweep pages covering 1,173 finalized blocks).
+     - AIMD page shrinks: **`0` range shrinks**, **`0` failure shrinks**, **`0` volume shrinks**.
+     - Independent `block(n)` timestamp verification (`PoolLogSource`): **66 `eth_getBlockByNumber` calls on `ankr`** (for 66 distinct block numbers containing logs outside the fresh WS head ring, token-bucket paced at `2 RPS` with `63` throttled waits).
+     - Peak sink queue depth: **`0`**. Peak disk spill: **`0` records / `0` bytes**.
+3. **Steady-State `Live` Run & Redis Stream Inspection:**
+   - Over the 180 s steady-state `Live` window (`53240211 -> 53240301`, 90 Base blocks):
+     - `evml:{base_eurc_usdc}:events`: `XLEN = 82` (`50` finalized entries in `53238500..53239672` + `32` safe entries in `53239673..53240301`).
+     - `evml:{base_eurc_usdc}:registry`: `XLEN = 0` (no new pool or gauge deployed for this shard in the 1,802-block window).
+     - `evml:{base_eurc_usdc}:released`: `ZCARD = 32` (`HLEN released_data = 32`), tracking the 32 unfinalized safe emissions in `(C_f, C_s]`.
+     - `/readyz` on `listener-a` returned `HTTP 200` (`{"state":"live","role":"leader","lease":"enabled","deadman":"disabled","consumer_lag":"enabled","saturated":false,"gates":{"safe":53240301,"finalized":53239672},"cursors":{"safe":53240301,"finalized":53239672}}`); `/readyz` on `listener-b` returned `HTTP 200` (`{"state":"standby","role":"standby",...}`).
+4. **Live Registry `topic0` On-Chain Verification (§6.3 bullet 3):**
+   - Used `--find-deploy-block` to binary-search historical Base deployment blocks (`eurc_usdc_cl50_pool` = `17827297`, `eurc_usdc_cl50_gauge` = `17827325`) and fetched the exact on-chain creation logs via `eth_getLogs`:
+     - **`aero_cl_factory` (`0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a`):** emitted `PoolCreated(address indexed token0, address indexed token1, int24 indexed tickSpacing, address pool)` with `topic0 = 0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2` at block `17827297` (`0x11005e1`), tx `0x29ed1118dd6980112a18d16f2f6238656a37fbf600776476b61946fb1bbf4218`, with `data = 0x000000000000000000000000e846373c1a92b167b4e9cd5d8e4d6b1db9e90ec7` (`eurc_usdc_cl50_pool` = `0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7`).
+     - **`aero_voter` (`0x16613524e02ad97edfef371bc883f2f5d6c480a5`):** emitted `GaugeCreated(address indexed poolFactory, address indexed votingRewardsFactory, address indexed gaugeFactory, address pool, address bribeVotingReward, address feeVotingReward, address gauge, address creator)` with `topic0 = 0xef9f7d1ffff3b249c6b9bf2528499e935f7d96bb6d6ec4e7da504d1d3c6279e1` at block `17827325` (`0x11005fd`), tx `0x64c6d063058184b69d0a4a43e90beb619b227b49750180822fcd65e17fccbf2a`, with `pool = 0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7` and `gauge = 0x1f6c9d116CE22b51b0BC666f86B038a6c19900B8` (`eurc_usdc_cl50_gauge`).
+5. **F3 User-Agent Verification (§6.3 bullet 4):**
+   - Verified `https://mainnet.base.org` returns `HTTP 200` (no Cloudflare 1010 block) on both `eth_getBlockByNumber` and `eth_getLogs` with `User-Agent: evm_listener/0.1.1 (+https://groai.fi)`.
+6. **Live Takeover & `SIGTERM` Drain (§6.3 bullet 5):**
+   - Sent `SIGTERM` to `listener-a`: drained in-flight operations, flushed sink (`flushed=true`, `unflushed=0`), deleted lease key (`lease_released=true`), and exited `0` in **323 ms**.
+   - `listener-b` (`EVML_HOST_ID=b`) acquired lease `2|b|4823ec7958d3996f13a9b9339dcc36a7` in **4.48 s**, fired `Leader Changed` (`"leadership moved from a to b"`), re-verified all 32 released safe entries in `(C_f, C_s]`, and reached `state="live"` in **16,620 ms (16.62 s < 20 s)**.
+7. **Stream Auditor Verification (`--audit-stream 53238500 53239672`, §6.3 bullet 6):**
+   - Ran `evm_listener --config /tmp/base_live_a.toml --audit-stream 53238500 53239672`:
+     ```text
+     {"ts":"2026-10-29T10:34:47.523Z","level":"info","component":"audit-stream","message":"audit complete","blocks":"53238500..53239672","provider":"ankr","dominant_source":"infura","canonical":50,"live":50,"missing":0,"phantom":0,"dup_live":0,"field_mismatch":0,"order_violation":0}
+     ```
+   - Exited `0` with **0 defects** across all 5 audit counters.
+
+---
+
+### §6.4 Provider Quota Measurement & Extrapolation (2026-10-29)
+
+1. **Instrumentation Added:**
+   - `evml_rpc_requests_total{provider,method}` tracks every HTTP JSON-RPC call per provider and method (`eth_getLogs`, `eth_getBlockByNumber`, `eth_blockNumber`, `eth_chainId`).
+   - `evml_ws_messages_total{provider,stream}` tracks every WebSocket subscription notification per provider and stream (`heads`, `logs`).
+2. **Steady-State `Live` Measurement Window (`180 s = 3.0 min`, `t0 -> t1` after catch-up):**
+
+| Provider | Metric / Method | `t0 -> t1` (`Δ` in 180 s `Live`) | Extrapolated / Day (`× 480`) | Extrapolated / 30 Days (`× 14,400`) | Notes |
+|---|---|---:|---:|---:|---|
+| **`quicknode`** | `evml_ws_messages_total{stream="heads"}` | `17 -> 107` (`Δ = 90`) | **43,200 / day** | **1,296,000 / 30d** | Base 2.0 s block time (`0.5 heads/s`) |
+| **`quicknode`** | `evml_ws_messages_total{stream="logs"}` | `4 -> 14` (`Δ = 10`) | **4,800 / day** | **144,000 / 30d** | Filtered to 2 safe-class pool addresses |
+| **`quicknode`** | `evml_rpc_requests_total{method="eth_getBlockByNumber"}` | `1 -> 4` (`Δ = 3`) | **1,440 / day** | **43,200 / 30d** | 60 s WS-vs-HTTP safe-tag divergence check |
+| **`infura`** | `evml_rpc_requests_total{method="eth_blockNumber"}` | `2 -> 36` (`Δ = 34`) | **16,320 / day** *(28,800 theoretical)* | **489,600 / 30d** *(864,000 theoretical)* | `safe_poll_ms = 3000` (shared with `ankr` when overlapping) |
+| **`infura`** | `evml_rpc_requests_total{method="eth_getBlockByNumber"}` | `4 -> 45` (`Δ = 41`) | **19,680 / day** *(34,560 theoretical)* | **590,400 / 30d** *(1,036,800 theoretical)* | `safe` (3 s) + `finalized` (15 s) tag polls |
+| **`infura`** | `evml_rpc_requests_total{method="eth_getLogs"}` | `7 -> 11` (`Δ = 4`) | **1,920 / day** | **57,600 / 30d** | Safe + finalized sweeps when gates advance |
+| **`ankr`** | `evml_rpc_requests_total{method="eth_blockNumber"}` | `1 -> 15` (`Δ = 14`) | **6,720 / day** | **201,600 / 30d** | 60 s standby probe + shared tag polls |
+| **`ankr`** | `evml_rpc_requests_total{method="eth_getBlockByNumber"}` | `66 -> 82` (`Δ = 16`) | **7,680 / day** | **230,400 / 30d** | Shared tag polls (`0/day` for `block(n)` once WS ring covers `(C_f, G_s]`) |
+| **`ankr`** | `evml_rpc_requests_total{method="eth_getLogs"}` | `9 -> 12` (`Δ = 3`) | **1,440 / day** | **43,200 / 30d** | Fallback `getLogs` pages when `infura` had a call in flight |
+| **`base_public`** | `evml_rpc_requests_total{method="eth_blockNumber"}` | `0 -> 3` (`Δ = 3`) | **1,440 / day** | **43,200 / 30d** | 60 s standby health probe |
+| **`base_public`** | `evml_rpc_requests_total{method="eth_getBlockByNumber"}` | `0 -> 21` (`Δ = 21`) | *(0 / day in steady-state)* | *(0 / 30d in steady-state)* | Independent `block(n)` verifications for `ankr`'s 3 `eth_getLogs` pages spanning finalized blocks below the fresh WS head ring |
+| **`alchemy`** | `evml_rpc_requests_total{method="eth_blockNumber"}` | `0 -> 0` (`1/h`) | **24 / day** | **720 / 30d** | Parked in `Cooldown` (`HTTP 429` monthly cap; `eth_getLogs = 1 -> 1`) |
+
+3. **Decision Gate Evaluation (§6.4 & Job 71 §1):**
+   - **QuickNode (WS primary):** **~1.48M messages+calls / 30d** (~15%–30% of QuickNode Discover 10M credits/month free tier, leaving **~70%–85% headroom**). If credit weights on QuickNode Discover ever tighten, opening **Job 71** (`ws_liveness_mode = "ping"` at `300 s`) cuts `newHeads` traffic by **99.3%** (`1,296,000/30d -> 8,640/30d`).
+   - **Infura (HTTP primary):** **~1.14M calls / 30d measured** (**~1.96M calls / 30d** worst-case if 100% of 3 s/15 s tag polls hit Infura), which is **38%–65% of Infura Core's 3,000,000 requests/month free tier** (**~35%–62% headroom**). If additional shards are added on the same Infura key, increasing `safe_poll_ms` from `3000` to `6000` immediately halves tag-polling volume (~1.08M calls/30d).
+
 

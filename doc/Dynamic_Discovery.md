@@ -114,14 +114,14 @@ event Withdraw(
 #### C. Registry & Governance Events (`finality: finalized`, Stream: `evml:{shard}:registry`)
 
 - **`PoolCreated(address indexed token0, address indexed token1, int24 indexed tickSpacing, address pool)`**:
-  - **Topic0**: `0xab0d57f0b5d5d8523c14c538a7c293eb21789e02c6767eb21ee127b878349ac2`
+  - **Topic0**: `0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2` *(live-confirmed on Base mainnet at block `17827297`, tx `0x29ed1118dd6980112a18d16f2f6238656a37fbf600776476b61946fb1bbf4218`)*
 - **`GaugeCreated(address indexed poolFactory, address indexed votingRewardsFactory, address indexed gaugeFactory, address pool, address bribeVotingReward, address feeVotingReward, address gauge, address creator)`**:
   - **Canonical ABI signature**: `GaugeCreated(address,address,address,address,address,address,address,address)`
-  - **Topic0**: `0xef9f7d1ffa2bb7a8b688d6be6f9e612f0e03cfc7929d912cb8ac90aa150e79e1`
+  - **Topic0**: `0xef9f7d1ffff3b249c6b9bf2528499e935f7d96bb6d6ec4e7da504d1d3c6279e1` *(live-confirmed on Base mainnet at block `17827325`, tx `0x64c6d063058184b69d0a4a43e90beb619b227b49750180822fcd65e17fccbf2a`)*
 - **`GaugeKilled(address indexed gauge)`**:
-  - **Topic0**: `0x04a5d3f58a980590453303d29a622a59a7f311c0f51cc7ce0ee03df449192ba7`
+  - **Topic0**: `0x04a5d3f5d80d22d9345acc80618f4a4e7e663cf9e1aed23b57d975acec002ba7`
 - **`GaugeRevived(address indexed gauge)`**:
-  - **Topic0**: `0xed18e9fa07e153096057a6e1cb2a5e4d2a13809e530faeecdc5e3aefb20eb1aa`
+  - **Topic0**: `0xed18e9faa3dccfd8aa45f69c4de40546b2ca9cccc4538a2323531656516db1aa`
 
 ---
 

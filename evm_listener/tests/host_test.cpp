@@ -1228,12 +1228,18 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
 
     const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
     net::io_context mock_ioc;
+    HeadFeed feed;
     evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
-    auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "metrics.toml", provider_env(node.url()));
+    evml::test::MockWsServer ws(mock_ioc, head_script(feed));
+    auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "metrics.toml",
+                                         ws_provider_env(node.url(), ws.url()));
+    feed.out.push_back(head_msg(c0 + 300, hx('a', c0 + 300), hx('a', c0 + 299)));
+    feed.out.push_back(logs_msg(cfg_log_json(cfg, c0 + 300, hx('a', c0 + 300), 0)));
 
     RunningHost h(std::move(cfg));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return (h.live() && feed.out.empty()) || h.threw.load(); }, 30s));
+    evml::test::run_until(mock_ioc, [] { return false; }, 100ms);
     REQUIRE_FALSE(h.threw.load());
 
     const auto m = ops_get(h.ops_port.load(), "/metrics");
@@ -1248,6 +1254,7 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
         "evml_alerts_fired_total",
         "evml_provider_inconsistency_total",
         "evml_rpc_requests_total",
+        "evml_ws_messages_total",
         "evml_safe_missed_total",
         "evml_reverify_total",
         "evml_getlogs_throttled_total",
@@ -1292,6 +1299,8 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
     CHECK_THAT(m.body, ContainsSubstring("evml_role{role=\"standby\"} 0"));
     CHECK_THAT(m.body, ContainsSubstring("evml_checkpoint_block{class=\"safe\"} " + std::to_string(c0 + 300)));
     CHECK_THAT(m.body, ContainsSubstring("evml_checkpoint_block{class=\"finalized\"} " + std::to_string(c0 + 250)));
+    CHECK_THAT(m.body, ContainsSubstring("evml_ws_messages_total{provider=\"quicknode\",stream=\"heads\"} 1"));
+    CHECK_THAT(m.body, ContainsSubstring("evml_ws_messages_total{provider=\"quicknode\",stream=\"logs\"} 1"));
 
     h.finish();
     CHECK(h.exit_code.load() == 0);

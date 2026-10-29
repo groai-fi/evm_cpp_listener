@@ -201,12 +201,14 @@ void ProviderPool::start_session(const std::string& name) {
     h.on_head = [w, gen](const rpc::Head& head) {
         auto p = w.lock();
         if (!p || p->session_gen_ != gen) return;
+        ++p->nodes_.at(p->session_name_).ws_messages["heads"];
         p->detector_.on_ws_head(head.number, Clock::now());
         if (p->handlers_.on_head) p->handlers_.on_head(head, p->session_name_);
     };
     h.on_log = [w, gen](const rpc::Log& log) {
         auto p = w.lock();
         if (!p || p->session_gen_ != gen) return;
+        ++p->nodes_.at(p->session_name_).ws_messages["logs"];
         if (p->handlers_.on_log) p->handlers_.on_log(log, p->session_name_);
     };
     h.on_closed = [w, gen](const rpc::WsClosed& closed) {
