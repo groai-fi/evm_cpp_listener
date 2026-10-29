@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 #include "app/ws_reconciler.hpp"
@@ -144,6 +146,63 @@ TEST_CASE("pending: purge_from drops buckets at and above the fork block", "[uni
 
 TEST_CASE("pending: zero cap is rejected", "[unit][pending]") {
     CHECK_THROWS_AS(PendingBuffer(0), std::invalid_argument);
+}
+
+TEST_CASE("pending: memory ceiling at 10,000 logs stays well under 50 MB", "[unit][pending]") {
+#if defined(__linux__)
+    const auto read_rss_kb = []() -> std::size_t {
+        std::ifstream in("/proc/self/status");
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.rfind("VmRSS:", 0) == 0) {
+                std::istringstream iss(line.substr(6));
+                std::size_t kb = 0;
+                iss >> kb;
+                return kb;
+            }
+        }
+        return 0;
+    };
+    const auto rss_before_kb = read_rss_kb();
+    REQUIRE(rss_before_kb > 0);
+#endif
+
+    PendingBuffer p(10000);
+    // Realistic Swap log: 160-byte ABI data payload (5 x 32-byte words = 320 hex chars) + 3 indexed topics.
+    const std::string swap_data = "0x" + std::string(320, 'a');
+    const std::vector<evml::core::Hash32> swap_topics{hash_of(0x11), hash_of(0x22), hash_of(0x33)};
+
+    for (std::uint64_t i = 0; i < 10000; ++i) {
+        const std::uint64_t block = 1000 + (i / 10);
+        const std::uint64_t log_idx = i % 10;
+        auto l = mk(block, static_cast<std::uint8_t>((block % 250) + 1), log_idx);
+        l.topics = swap_topics;
+        l.data = swap_data;
+        l.tx_hash = hash_of(static_cast<std::uint8_t>((i % 250) + 1));
+        l.tx_index = log_idx;
+        REQUIRE(p.stage(l, "quicknode") == StageResult::Added);
+    }
+
+    CHECK(p.size() == 10000);
+    CHECK(p.bucket_count() == 1000);
+    CHECK(p.evicted_total() == 0);
+
+#if defined(__linux__)
+    const auto rss_after_kb = read_rss_kb();
+    REQUIRE(rss_after_kb > 0);
+    const auto rss_delta_kb = rss_after_kb > rss_before_kb ? (rss_after_kb - rss_before_kb) : 0;
+    INFO("rss_before_kb=" << rss_before_kb << " rss_after_kb=" << rss_after_kb << " rss_delta_kb=" << rss_delta_kb);
+    CHECK(rss_delta_kb < 50 * 1024);
+#endif
+
+    // Stage 10,001st log at block 2000: evict_to_cap() evicts the oldest block bucket (block 1000, 10 logs).
+    auto extra = mk(2000, 0xfe, 0);
+    extra.topics = swap_topics;
+    extra.data = swap_data;
+    CHECK(p.stage(extra, "quicknode") == StageResult::Added);
+    CHECK(p.size() == 9991);
+    CHECK(p.bucket_count() == 1000);
+    CHECK(p.evicted_total() == 10);
 }
 
 TEST_CASE("ws reconciler: disconnect during catch-up waits for first live head before cross-checking", "[unit][pipeline]") {

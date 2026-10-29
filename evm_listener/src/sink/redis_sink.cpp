@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <boost/asio/experimental/concurrent_channel.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/json.hpp>
@@ -281,14 +282,52 @@ boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
     if (!readable()) co_return std::nullopt;  // degraded / replaying / terminal: nothing to wait for (rev 6, A)
 
     using Channel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, std::optional<T>)>;
-    // Capacity 1 channel allows sink thread to deliver read result without blocking either thread.
-    auto channel = std::make_shared<Channel>(co_await boost::asio::this_coro::executor, 1);
+    auto ex = co_await boost::asio::this_coro::executor;
+    // Capacity 1 channel owned only on the caller coroutine so ~Channel() never runs on the sink thread after io_context exits.
+    auto channel = std::make_shared<Channel>(ex, 1);
+
+    using Executor = decltype(ex);
+    struct State {
+        std::mutex mu;
+        Executor ex;
+        std::weak_ptr<Channel> weak_ch;
+        bool active{true};
+        State(Executor e, std::weak_ptr<Channel> c) : ex(std::move(e)), weak_ch(std::move(c)) {}
+    };
+    auto state = std::make_shared<State>(ex, channel);
+    struct Guard {
+        std::shared_ptr<State> state;
+        ~Guard() {
+            std::lock_guard lk(state->mu);
+            state->active = false;
+            state->ex = nullptr;
+        }
+    } guard{state};
 
     ReadItem item;
-    item.run = [channel, op](RedisConn& conn) {
-        channel->try_send(boost::system::error_code{}, std::optional<T>(op(conn)));
+    item.run = [state, op](RedisConn& conn) {
+        {
+            std::lock_guard lk(state->mu);
+            if (!state->active) return;
+        }
+        std::optional<T> res(op(conn));
+        std::lock_guard lk(state->mu);
+        if (!state->active) return;
+        state->active = false;
+        boost::asio::post(state->ex, [weak_ch = state->weak_ch, res = std::move(res)]() mutable {
+            if (auto ch = weak_ch.lock()) ch->try_send(boost::system::error_code{}, std::move(res));
+        });
+        state->ex = nullptr;
     };
-    item.abandon = [channel] { channel->try_send(boost::system::error_code{}, std::optional<T>{}); };
+    item.abandon = [state] {
+        std::lock_guard lk(state->mu);
+        if (!state->active) return;
+        state->active = false;
+        boost::asio::post(state->ex, [weak_ch = state->weak_ch] {
+            if (auto ch = weak_ch.lock()) ch->try_send(boost::system::error_code{}, std::optional<T>{});
+        });
+        state->ex = nullptr;
+    };
 
     {
         std::lock_guard lk(mu_);

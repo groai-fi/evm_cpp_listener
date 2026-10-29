@@ -1040,6 +1040,19 @@ TEST_CASE("redis sink: stop() resolves a queued read to nullopt instead of leavi
     CHECK_FALSE(r.sink->readable());
 }
 
+TEST_CASE("redis sink: a queued read whose caller io_context is destroyed before pump() or stop() is safely ignored",
+          "[unit][sink]") {
+    Rig r;
+    {
+        net::io_context io;
+        net::co_spawn(io, r.sink->load_checkpoint(), net::detached);
+        net::co_spawn(io, r.sink->released_range(0, 10), net::detached);
+        io.poll();  // both reads are queued in r.sink, then io is destroyed before pump()/stop()
+    }
+    CHECK(r.sink->pump());  // pops first read; item.run() sees inactive caller state and skips op/post
+    r.sink->stop();         // abandons second read; item.abandon() sees inactive caller state and skips post
+}
+
 TEST_CASE("redis sink: wait_idle times out while work is pending and returns once it is acked", "[unit][sink]") {
     Rig r;
     r.sink->emit(mk("a"));
