@@ -40,18 +40,17 @@ GateSignal FinalityGate::on_safe(const std::string& provider, std::uint64_t numb
     return sig;
 }
 
-// Inspects finalized block tag updates; flags impossible regressions as fatal anomalies.
-// Watch out: Permanently freezes the gate on regression or hash mismatch (requires operator investigation).
+// Inspects finalized block tag updates; ignores stale heights from load-balanced nodes and flags hash conflicts.
+// Watch out: Permanently freezes the gate on same-height hash mismatch (requires operator investigation).
 GateSignal FinalityGate::on_finalized(const std::string& provider, std::uint64_t number, const core::Hash32& hash) {
     GateSignal sig = GateSignal::None;
     const auto it = finalized_by_provider_.find(provider);
     if (it != finalized_by_provider_.end()) {
         if (number < it->second.number) {
-            // Finalized block height regressed: catastrophic RPC bug or impossible L1 consensus failure
-            sig = GateSignal::FinalizedAnomaly;
-            frozen_reason_ = provider + ": finalized regressed " + std::to_string(it->second.number) + " -> " +
-                             std::to_string(number);
-        } else if (number == it->second.number && !(hash == it->second.hash)) {
+            // Load-balanced RPC gateway routed poll to a lagging backend node; ignore stale height so G_f stays monotonic
+            return GateSignal::None;
+        }
+        if (number == it->second.number && !(hash == it->second.hash)) {
             // Finalized block changed canonical hash: catastrophic violation of EVM finality
             sig = GateSignal::FinalizedAnomaly;
             frozen_reason_ = provider + ": finalized block " + std::to_string(number) + " changed hash";

@@ -13,7 +13,7 @@ enum class GateSignal {
     None,
     SafeRegression,    // the SAME provider's `safe` went backwards: possible L1 reorg (plan 3.3/3.6)
     SafeHashMismatch,  // the SAME provider returned a different hash for the same `safe` number
-    FinalizedAnomaly,  // `finalized` regressed or changed hash for the same provider: CRITICAL, release frozen
+    FinalizedAnomaly,  // `finalized` changed hash at the same height: CRITICAL, release frozen
 };
 const char* to_string(GateSignal s);
 
@@ -22,8 +22,9 @@ const char* to_string(GateSignal s);
 //
 // Regressions are judged per provider: after a getLogs failover the new provider may legitimately report lower
 // tags; that is not an anomaly (the sweeps simply wait until the tag passes their cursors, checkpoints never
-// regress). A `finalized` anomaly freezes the gate permanently (restart required): finalized data moving is a
-// provider fault or a catastrophic L1 event, and the pipeline must stop releasing and alert.
+// regress). A `finalized` hash mismatch at the same block height freezes the gate permanently (restart required):
+// conflicting finalized hashes indicate a provider fault or catastrophic L1 event, whereas a lower finalized
+// block number from the same provider is ignored as stale load-balanced backend node jitter so G_f stays monotonic.
 // Pure state machine tracking consensus finality gates G_s (safe) and G_f (finalized) across providers (plan 3.3).
 // Evaluates tag regressions per-provider to distinguish benign failover gaps from genuine chain reorgs.
 // Invariants enforced: Invariant I2 (G_f <= G_s), Invariant I5 (freeze pipeline permanently on FinalizedAnomaly).
@@ -34,7 +35,8 @@ public:
     GateSignal on_safe(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
 
     // Evaluates incoming finalized block tag from the specified provider.
-    // Watch out: Returns FinalizedAnomaly and permanently freezes release if finalized height or hash regresses.
+    // Watch out: Ignores stale lower heights from load-balanced nodes; returns FinalizedAnomaly and permanently
+    // freezes release if a finalized block changes hash at the same height.
     GateSignal on_finalized(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
 
     // Latest observed safe block height (nullopt until first tag received).

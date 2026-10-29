@@ -142,13 +142,14 @@ std::string rpc_reply(std::uint64_t id, const std::string& result_json) {
     return R"({"jsonrpc":"2.0","id":)" + std::to_string(id) + R"(,"result":)" + result_json + "}";
 }
 
-std::string block_json(std::uint64_t n) {
-    return R"({"number":")" + evml::core::to_hex_u64(n) + R"(","hash":"0x)" + std::string(64, 'a') +
+std::string block_json(std::uint64_t n, char hash_char = 'a') {
+    return R"({"number":")" + evml::core::to_hex_u64(n) + R"(","hash":"0x)" + std::string(64, hash_char) +
            R"(","parentHash":"0x)" + std::string(64, 'b') + R"(","timestamp":"0x1"})";
 }
 
 // A healthy node a few hundred blocks above the contracts' start block; unknown methods fail loudly (HTTP 500).
-evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64_t finalized) {
+evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64_t finalized,
+                                                 char finalized_hash_char = 'a') {
     return [=](const evml::test::MockRequest& r) {
         const auto v = boost::json::parse(r.body).as_object();
         const std::string method(v.at("method").as_string());
@@ -160,7 +161,8 @@ evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64
         if (method == "eth_getBlockByNumber") {
             const std::string tag(v.at("params").as_array().at(0).as_string());
             const auto n = tag == "safe" ? safe : tag == "finalized" ? finalized : safe + 10;
-            return evml::test::MockReply{.body = rpc_reply(id, block_json(n))};
+            const char hc = tag == "finalized" ? finalized_hash_char : 'a';
+            return evml::test::MockReply{.body = rpc_reply(id, block_json(n, hc))};
         }
         if (method == "eth_getLogs") return evml::test::MockReply{.body = rpc_reply(id, "[]")};
         return evml::test::MockReply{.status = 500, .body = "unexpected method " + method};
@@ -172,6 +174,7 @@ evml::test::MockHttpServer::Handler healthy_node(std::uint64_t safe, std::uint64
 struct NodeState {
     std::uint64_t safe{0};
     std::uint64_t finalized{0};
+    char finalized_hash_char{'a'};
     bool fail{false};  // every request answers HTTP 500
     int getlogs_calls{0};
     std::map<std::uint64_t, std::string> blocks{};  // eth_getBlockByNumber(<hex number>): block JSON; absent -> null
@@ -208,7 +211,7 @@ evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
             arr += "]";
             return evml::test::MockReply{.body = rpc_reply(static_cast<std::uint64_t>(v.at("id").as_int64()), arr)};
         }
-        return healthy_node(s.safe, s.finalized)(r);
+        return healthy_node(s.safe, s.finalized, s.finalized_hash_char)(r);
     };
 }
 
@@ -561,7 +564,7 @@ TEST_CASE("host: losing the lease demotes the host to standby and it leads again
 
 // ---- 5-D3: the gate bridge (on_tag -> FinalityGate -> driver) as seen from the host ----
 
-TEST_CASE("host: a finalized regression on the current provider freezes release and stops the sweeps", "[integration]") {
+TEST_CASE("host: a finalized hash conflict on the current provider freezes release and stops the sweeps", "[integration]") {
     evml::core::log::init("info");
     const std::string shard = "t_host_" + random_tag();
     const fs::path spill = fs::temp_directory_path() / ("evml-host-frozen-" + random_tag());
@@ -577,16 +580,23 @@ TEST_CASE("host: a finalized regression on the current provider freezes release 
     REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
     // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
-    // `current_getlogs()` and records `finalized = c0 + 250` before we regress the tag.
+    // `current_getlogs()` and records `finalized = c0 + 250` before we test load-balanced jitter and hash conflict.
     evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
     CHECK_FALSE(h.status().frozen);
 
-    ns.finalized = c0 + 100;  // an impossible regression of the finalized tag
+    // Load-balanced stale lower finalized height is ignored and does not freeze the host.
+    ns.finalized = c0 + 100;
+    evml::test::run_until(mock_ioc, [] { return false; }, 300ms);
+    CHECK_FALSE(h.status().frozen);
+
+    // Same finalized height with a different canonical hash is a fatal anomaly that freezes release.
+    ns.finalized = c0 + 250;
+    ns.finalized_hash_char = 'c';
     const bool frozen = evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s);
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(frozen);
     const auto st = h.status();
-    CHECK(st.frozen_reason.find("finalized regressed") != std::string::npos);
+    CHECK(st.frozen_reason.find("changed hash") != std::string::npos);
     CHECK(st.c_s == c0 + 300);  // frozen: the cursors did not move
     CHECK(st.c_f == c0 + 250);
 

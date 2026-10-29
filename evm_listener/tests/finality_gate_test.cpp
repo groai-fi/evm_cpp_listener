@@ -56,15 +56,15 @@ TEST_CASE("gate: a lower tag from a DIFFERENT provider (getLogs failover) is not
     CHECK(g.on_safe("infura", 95, hash_of(5)) == GateSignal::SafeRegression);
 }
 
-TEST_CASE("gate: a finalized regression or hash change freezes release permanently", "[unit][gate]") {
-    SECTION("regression") {
+TEST_CASE("gate: finalized ignores load-balanced stale heights and freezes on same-height hash conflict", "[unit][gate]") {
+    SECTION("stale lower height from load-balanced node is ignored (monotonic G_f)") {
         FinalityGate g;
         g.on_finalized("infura", 90, hash_of(1));
-        CHECK(g.on_finalized("infura", 89, hash_of(2)) == GateSignal::FinalizedAnomaly);
-        CHECK(g.frozen());
-        CHECK(g.frozen_reason().find("infura") != std::string::npos);
-        CHECK(g.frozen_reason().find("90 -> 89") != std::string::npos);
-        g.on_finalized("infura", 120, hash_of(3));  // recovering does not unfreeze: restart required
+        CHECK(g.on_finalized("infura", 89, hash_of(2)) == GateSignal::None);
+        CHECK_FALSE(g.frozen());
+        CHECK(g.finalized() == 90u);
+        // Stored height 90 hash is preserved: a conflicting hash at 90 still freezes release.
+        CHECK(g.on_finalized("infura", 90, hash_of(2)) == GateSignal::FinalizedAnomaly);
         CHECK(g.frozen());
     }
     SECTION("same number, different hash") {
@@ -72,7 +72,10 @@ TEST_CASE("gate: a finalized regression or hash change freezes release permanent
         g.on_finalized("infura", 90, hash_of(1));
         CHECK(g.on_finalized("infura", 90, hash_of(2)) == GateSignal::FinalizedAnomaly);
         CHECK(g.frozen());
+        CHECK(g.frozen_reason().find("infura") != std::string::npos);
         CHECK(g.frozen_reason().find("changed hash") != std::string::npos);
+        g.on_finalized("infura", 120, hash_of(3));  // recovering does not unfreeze: restart required
+        CHECK(g.frozen());
     }
     SECTION("cross-provider same height hash mismatch") {
         FinalityGate g;
