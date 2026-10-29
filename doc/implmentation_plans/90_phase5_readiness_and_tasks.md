@@ -158,7 +158,7 @@ See plan 60 "results and deviations".
 - [x] **[P0-2] Coroutine & socket teardown (`ProviderPool::stop()` + `Deadman`):** Cancel `call_to` timers / close `HttpRpcClient` on `stop()`, and hold shared state in `Deadman::tick()` so leadership demotion and shutdown (`kShutdownGrace = 300 ms`) cannot use-after-free or leak sockets into the next term.
 - [x] **[P0-1] & [P1-2] Catch-up behavior (`PoolLogSource` + `PendingBuffer`):**
   - Skip `PendingBuffer::reconcile` (`ws_missed_total_` increments) for historical blocks below the live watermark (`ws_live_from_block = c_s + 1` latched on first `Live` transition) in the term (prevents false `WS Missed Logs` alerts during `CatchingUp`).
-  - Avoid stalling `safe_step` / `final_step` on the 2 RPS `call_to` bucket when a historical catch-up page has many distinct blocks (bounded 4,096-entry verified-block cache in `PoolLogSource::block()` cleared on reorg / ring resync / WS failover).
+  - Avoid stalling `safe_step` / `final_step` on the 2 RPS `call_to` bucket when a historical catch-up page has many distinct blocks (bounded 4,096-entry verified-block cache in `PoolLogSource::block()` cleared on G2 `report_bad`, `reverify_released`, `SafeRegression` / `SafeHashMismatch`, reorg, ring resync, and WS failover).
 - [x] **[P1-1] & [P1-4] Pipeline edge cases (`FinalityGate` + `Sweeper` / `emit.lua`):**
   - `FinalityGate`: check cross-provider same-height hash mismatch across provider failovers (`SafeHashMismatch` on `on_safe`, `FinalizedAnomaly` on `on_finalized`).
   - `Sweeper`: verified Layer-1 dedup (`recent_.admit`) runs only after `fetch_page()` and `released_range()` succeed immediately before `sink_.emit()`, and verified `BELOW_FINALIZED` handling in `emit.lua`.
