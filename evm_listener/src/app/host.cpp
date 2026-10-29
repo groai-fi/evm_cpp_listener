@@ -70,6 +70,12 @@ std::uint64_t wall_ms() {
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+/// A WS head and the provider that delivered it.
+struct HeadEvent {
+    chain::BlockRef ref;
+    std::string provider;
+};
+
 /// Everything that exists only while the pipeline runs. Members are declared in dependency order, so the reverse
 /// destruction order tears down the driver first and the sink last.
 struct Runtime {
@@ -90,12 +96,9 @@ struct Runtime {
     bool ws_reseed_live_watermark{false};
     std::uint64_t ws_reconciled_safe_to{0};
     std::uint64_t ws_reconciled_final_to{0};
-};
-
-/// A WS head and the provider that delivered it.
-struct HeadEvent {
-    chain::BlockRef ref;
-    std::string provider;
+    // Head handling: a walk in flight defers newer heads (the ring must not change under it).
+    bool walking{false};
+    std::optional<HeadEvent> deferred_head;
 };
 
 class Host {
@@ -138,8 +141,15 @@ private:
     // plan 5.3: every kOpsPeriod build the alert snapshot, send what the engine returns; every [ops].deadman_ping_s
     // feed the dead-man. io thread, from on_beat().
     void ops_tick();
+    ops::SnapshotInputs build_snapshot_inputs(std::chrono::steady_clock::time_point now, bool leader);
     void init_metrics();
     void update_metrics();
+    void set_sink_counters(const sink::SinkStatus& sk);
+    void set_sweeper_counters(const pipeline::SweepStats& sw);
+    void set_leader_gauges(const sink::SinkStatus* sk, const pipeline::DriverStatus* st,
+                           std::optional<std::uint64_t> head);
+    void set_consumer_lag_gauges(const ops::Metrics::Labels& lbl, double undelivered_age_s, double pending_age_s,
+                                 double lag_entries);
     void schedule_beat();
     void on_beat();
     void request_exit(int code, const std::string& why);  // first reason wins
@@ -182,10 +192,7 @@ private:
     std::optional<std::uint64_t> epoch_n_;                // io thread; the `n` of this term's lease token
     std::optional<std::chrono::steady_clock::time_point> sink_degraded_since_;  // io thread
     bool demoting_{false};
-    // Head handling: a walk in flight defers newer heads (the ring must not change under it); `head_epoch_` ends stale
-    // walks when the term ends or the WS provider changes.
-    bool walking_{false};
-    std::optional<HeadEvent> deferred_head_;
+    // `head_epoch_` is monotonic across terms and ends stale fork walks when a term ends or the WS provider changes.
     std::uint64_t head_epoch_{0};
     std::chrono::steady_clock::time_point next_heartbeat_{};  // io thread; reset per term so the first beat publishes
     std::uint64_t ws_missed_total_{0};
@@ -214,46 +221,83 @@ const char* Host::role_name() const {
     return phase_.load() == Phase::Standby ? "standby" : "none";
 }
 
+void Host::set_sink_counters(const sink::SinkStatus& sk) {
+    metrics_.counter_total("evml_lease_renew_failures_total", "Lease renew failures", {}, sk.renew_failures_total);
+    metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink", {},
+                           sk.discarded_total);
+    metrics_.counter_total("evml_sink_dup_total", "Duplicate emissions collapsed by Redis emit.lua", {}, sk.dup_total);
+    metrics_.counter_total("evml_sink_below_finalized_total", "Tracked emissions refused at or below finalized checkpoint", {},
+                           sk.below_finalized_total);
+    metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {}, sk.heartbeat_failures_total);
+    metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {},
+                           sk.consumer_lag_failures_total);
+    metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, sk.reconnects_total);
+}
+
+void Host::set_sweeper_counters(const pipeline::SweepStats& sw) {
+    metrics_.counter_total("evml_safe_missed_total", "Safe-class logs missed by safe sweep and emitted late by final sweep", {},
+                           sw.late);
+    metrics_.counter_total("evml_sweep_emitted_safe_total", "Safe-sweep log emissions", {}, sw.emitted_safe);
+    metrics_.counter_total("evml_sweep_emitted_final_total", "Final-sweep log emissions", {}, sw.emitted_final);
+    metrics_.counter_total("evml_sweep_deduped_total", "Emissions skipped by in-process dedup layer", {}, sw.deduped);
+    metrics_.counter_total("evml_reverts_emitted_total", "Revert events emitted", {}, sw.reverts);
+    metrics_.counter_total("evml_sweep_matched_total", "Safe-released logs confirmed by final sweep", {}, sw.matched);
+    metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {}, sw.range_shrinks);
+    metrics_.counter_total("evml_sweep_failure_shrinks_total", "AIMD page shrinks due to rate limit/timeout/5xx", {},
+                           sw.failure_shrinks);
+    metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {}, sw.volume_shrinks);
+    metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {}, sw.reverified_new);
+    metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {}, sw.address_splits);
+}
+
+void Host::set_leader_gauges(const sink::SinkStatus* sk, const pipeline::DriverStatus* st,
+                             std::optional<std::uint64_t> head) {
+    metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, sk ? static_cast<double>(sk->queue_depth) : 0.0);
+    metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {},
+                   sk ? static_cast<double>(sk->spill_records) : 0.0);
+    metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {},
+                   sk ? static_cast<double>(sk->spill_bytes) : 0.0);
+    metrics_.gauge("evml_sink_pending_writes", "Total unacknowledged sink writes (queue + batch + spill)", {},
+                   sk ? static_cast<double>(sk->pending_writes) : 0.0);
+    metrics_.gauge("evml_sink_oldest_record_age_seconds", "Age in seconds of oldest unacknowledged sink write", {},
+                   sk ? static_cast<double>(sk->oldest_record_age_s) : 0.0);
+    metrics_.gauge("evml_head_block", "Highest block number in the WS head ring", {},
+                   static_cast<double>(head.value_or(0)));
+    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "safe"}},
+                   st ? static_cast<double>(st->g_s.value_or(0)) : 0.0);
+    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "finalized"}},
+                   st ? static_cast<double>(st->g_f.value_or(0)) : 0.0);
+    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}},
+                   st ? static_cast<double>(st->c_s) : 0.0);
+    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}},
+                   st ? static_cast<double>(st->c_f) : 0.0);
+}
+
+void Host::set_consumer_lag_gauges(const ops::Metrics::Labels& lbl, double undelivered_age_s, double pending_age_s,
+                                   double lag_entries) {
+    metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry", lbl,
+                   undelivered_age_s);
+    metrics_.gauge("evml_consumer_pending_age_seconds",
+                   "Age in seconds of oldest pending unacknowledged stream entry", lbl, pending_age_s);
+    metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)", lbl,
+                   lag_entries);
+}
+
 void Host::init_metrics() {
     metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}}, 0.0);
     metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}}, 0.0);
-    metrics_.counter_total("evml_lease_renew_failures_total", "Lease renew failures", {}, 0);
     metrics_.counter_total("evml_provider_failovers_total", "WS provider failovers", {}, 0);
     metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", "Safe Gate Stuck"}}, 0);
-    metrics_.counter_total("evml_safe_missed_total", "Safe-class logs missed by safe sweep and emitted late by final sweep", {}, 0);
     metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, 0);
     metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}}, 0);
-    metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink", {}, 0);
     metrics_.counter_total("evml_alert_send_failures_total", "Alert webhook send failures after retries", {}, 0);
     metrics_.counter_total("evml_deadman_ping_failures_total", "Dead-man switch ping failures", {}, 0);
     metrics_.counter_total("evml_ws_missed_logs_total", "Logs found by getLogs sweep that WS missed", {}, 0);
     metrics_.counter_total("evml_ws_extra_logs_total", "Staged WS logs not present in canonical getLogs sweep", {}, 0);
     metrics_.counter_total("evml_pending_evicted_logs_total", "Staged WS logs evicted at pending_max_logs cap", {}, 0);
-    metrics_.counter_total("evml_sink_dup_total", "Duplicate emissions collapsed by Redis emit.lua", {}, 0);
-    metrics_.counter_total("evml_sink_below_finalized_total", "Tracked emissions refused at or below finalized checkpoint", {}, 0);
-    metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {}, 0);
-    metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {}, 0);
-    metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, 0);
-    metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, 0.0);
-    metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {}, 0.0);
-    metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {}, 0.0);
-    metrics_.gauge("evml_sink_pending_writes", "Total unacknowledged sink writes (queue + batch + spill)", {}, 0.0);
-    metrics_.gauge("evml_sink_oldest_record_age_seconds", "Age in seconds of oldest unacknowledged sink write", {}, 0.0);
-    metrics_.counter_total("evml_sweep_emitted_safe_total", "Safe-sweep log emissions", {}, 0);
-    metrics_.counter_total("evml_sweep_emitted_final_total", "Final-sweep log emissions", {}, 0);
-    metrics_.counter_total("evml_sweep_deduped_total", "Emissions skipped by in-process dedup layer", {}, 0);
-    metrics_.counter_total("evml_reverts_emitted_total", "Revert events emitted", {}, 0);
-    metrics_.counter_total("evml_sweep_matched_total", "Safe-released logs confirmed by final sweep", {}, 0);
-    metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {}, 0);
-    metrics_.counter_total("evml_sweep_failure_shrinks_total", "AIMD page shrinks due to rate limit/timeout/5xx", {}, 0);
-    metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {}, 0);
-    metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {}, 0);
-    metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {}, 0);
-    metrics_.gauge("evml_head_block", "Highest block number in the WS head ring", {}, 0.0);
-    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "safe"}}, 0.0);
-    metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "finalized"}}, 0.0);
-    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}}, 0.0);
-    metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}}, 0.0);
+    set_sink_counters({});
+    set_sweeper_counters({});
+    set_leader_gauges(nullptr, nullptr, std::nullopt);
 
     const auto init_provider_metrics = [this](const std::string& name) {
         metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", name}}, 0.0);
@@ -269,18 +313,10 @@ void Host::init_metrics() {
     for (const auto& p : cfg_.getlogs_chain) init_provider_metrics(p.name);
     for (const auto& p : cfg_.ws_chain) init_provider_metrics(p.name);
     if (cfg_.sink.consumer_groups.empty()) {
-        metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry",
-                       {{"stream", "events"}, {"group", "none"}}, 0.0);
-        metrics_.gauge("evml_consumer_pending_age_seconds", "Age in seconds of oldest pending unacknowledged stream entry",
-                       {{"stream", "events"}, {"group", "none"}}, 0.0);
-        metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)",
-                       {{"stream", "events"}, {"group", "none"}}, 0.0);
+        set_consumer_lag_gauges({{"stream", "events"}, {"group", "none"}}, 0.0, 0.0, 0.0);
     } else {
         for (const auto& g : cfg_.sink.consumer_groups) {
-            const ops::Metrics::Labels lbl{{"stream", core::to_string(g.stream)}, {"group", g.group}};
-            metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry", lbl, 0.0);
-            metrics_.gauge("evml_consumer_pending_age_seconds", "Age in seconds of oldest pending unacknowledged stream entry", lbl, 0.0);
-            metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)", lbl, 0.0);
+            set_consumer_lag_gauges({{"stream", core::to_string(g.stream)}, {"group", g.group}}, 0.0, 0.0, 0.0);
         }
     }
 }
@@ -303,31 +339,8 @@ void Host::update_metrics() {
 
     if (rt_ && rt_->driver) {
         const auto sk = rt_->sink->status();
-        metrics_.counter_total("evml_lease_renew_failures_total", "Lease renew failures", {}, sk.renew_failures_total);
-        metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink", {},
-                               sk.discarded_total);
-        metrics_.counter_total("evml_sink_dup_total", "Duplicate emissions collapsed by Redis emit.lua", {}, sk.dup_total);
-        metrics_.counter_total("evml_sink_below_finalized_total", "Tracked emissions refused at or below finalized checkpoint", {},
-                               sk.below_finalized_total);
-        metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {}, sk.heartbeat_failures_total);
-        metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {},
-                               sk.consumer_lag_failures_total);
-        metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, sk.reconnects_total);
-
-        const auto& sw = rt_->sweeper->stats();
-        metrics_.counter_total("evml_safe_missed_total", "Safe-class logs missed by safe sweep and emitted late by final sweep", {},
-                               sw.late);
-        metrics_.counter_total("evml_sweep_emitted_safe_total", "Safe-sweep log emissions", {}, sw.emitted_safe);
-        metrics_.counter_total("evml_sweep_emitted_final_total", "Final-sweep log emissions", {}, sw.emitted_final);
-        metrics_.counter_total("evml_sweep_deduped_total", "Emissions skipped by in-process dedup layer", {}, sw.deduped);
-        metrics_.counter_total("evml_reverts_emitted_total", "Revert events emitted", {}, sw.reverts);
-        metrics_.counter_total("evml_sweep_matched_total", "Safe-released logs confirmed by final sweep", {}, sw.matched);
-        metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {}, sw.range_shrinks);
-        metrics_.counter_total("evml_sweep_failure_shrinks_total", "AIMD page shrinks due to rate limit/timeout/5xx", {},
-                               sw.failure_shrinks);
-        metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {}, sw.volume_shrinks);
-        metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {}, sw.reverified_new);
-        metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {}, sw.address_splits);
+        set_sink_counters(sk);
+        set_sweeper_counters(rt_->sweeper->stats());
 
         const auto st = rt_->driver->status();
         metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, st.reverify_clean);
@@ -347,25 +360,7 @@ void Host::update_metrics() {
         }
 
         if (leader) {
-            metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, static_cast<double>(sk.queue_depth));
-            metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {},
-                           static_cast<double>(sk.spill_records));
-            metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {},
-                           static_cast<double>(sk.spill_bytes));
-            metrics_.gauge("evml_sink_pending_writes", "Total unacknowledged sink writes (queue + batch + spill)", {},
-                           static_cast<double>(sk.pending_writes));
-            metrics_.gauge("evml_sink_oldest_record_age_seconds", "Age in seconds of oldest unacknowledged sink write", {},
-                           static_cast<double>(sk.oldest_record_age_s));
-            metrics_.gauge("evml_head_block", "Highest block number in the WS head ring", {},
-                           static_cast<double>(rt_->ring.top().value_or(0)));
-            metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "safe"}},
-                           static_cast<double>(st.g_s.value_or(0)));
-            metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "finalized"}},
-                           static_cast<double>(st.g_f.value_or(0)));
-            metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}},
-                           static_cast<double>(st.c_s));
-            metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}},
-                           static_cast<double>(st.c_f));
+            set_leader_gauges(&sk, &st, rt_->ring.top());
 
             const auto ws = rt_->pool->active_ws();
             const auto getlogs = rt_->pool->current_getlogs();
@@ -377,13 +372,9 @@ void Host::update_metrics() {
 
             for (const auto& c : rt_->sink->consumer_lag()) {
                 if (c.probed_at_ms == 0) continue;
-                const ops::Metrics::Labels lbl{{"stream", core::to_string(c.stream)}, {"group", c.group}};
-                metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry", lbl,
-                               static_cast<double>(c.undelivered_age_s));
-                metrics_.gauge("evml_consumer_pending_age_seconds", "Age in seconds of oldest pending unacknowledged stream entry", lbl,
-                               static_cast<double>(c.pending_age_s));
-                metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)", lbl,
-                               c.lag ? static_cast<double>(*c.lag) : -1.0);
+                set_consumer_lag_gauges({{"stream", core::to_string(c.stream)}, {"group", c.group}},
+                                        static_cast<double>(c.undelivered_age_s), static_cast<double>(c.pending_age_s),
+                                        c.lag ? static_cast<double>(*c.lag) : -1.0);
             }
         }
     }
@@ -397,16 +388,7 @@ void Host::update_metrics() {
             metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs",
                            {{"provider", p.name}}, 0.0);
         }
-        metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, 0.0);
-        metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {}, 0.0);
-        metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {}, 0.0);
-        metrics_.gauge("evml_sink_pending_writes", "Total unacknowledged sink writes (queue + batch + spill)", {}, 0.0);
-        metrics_.gauge("evml_sink_oldest_record_age_seconds", "Age in seconds of oldest unacknowledged sink write", {}, 0.0);
-        metrics_.gauge("evml_head_block", "Highest block number in the WS head ring", {}, 0.0);
-        metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "safe"}}, 0.0);
-        metrics_.gauge("evml_gate_block", "Latest finality gate block number", {{"class", "finalized"}}, 0.0);
-        metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}}, 0.0);
-        metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}}, 0.0);
+        set_leader_gauges(nullptr, nullptr, std::nullopt);
     }
 }
 
@@ -789,8 +771,10 @@ void Host::on_tag(const std::string& provider, provider::Tag tag, std::uint64_t 
 
 void Host::bump_head_epoch() {
     ++head_epoch_;
-    walking_ = false;
-    deferred_head_.reset();
+    if (rt_) {
+        rt_->walking = false;
+        rt_->deferred_head.reset();
+    }
 }
 
 void Host::on_ws_log(const rpc::Log& log, const std::string& provider) {
@@ -855,8 +839,8 @@ void Host::on_sweep_page(core::Finality kind, const pipeline::BlockRange& range,
 void Host::on_head(const rpc::Head& h, const std::string& provider) {
     if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
     HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
-    if (walking_) {
-        deferred_head_ = std::move(e);  // only the newest matters: the next walk or extension starts from it
+    if (rt_->walking) {
+        rt_->deferred_head = std::move(e);  // only the newest matters: the next walk or extension starts from it
         return;
     }
     handle_head(e);
@@ -877,7 +861,7 @@ void Host::handle_head(const HeadEvent& e) {
         return;
     }
     if (ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
-    walking_ = true;
+    rt_->walking = true;
     net::co_spawn(ioc_, walk_fork(head_epoch_, e), net::detached);
 }
 
@@ -942,7 +926,7 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
         }
         if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
 
-        walking_ = false;
+        rt_->walking = false;
         if (info) {
             const auto c_s = rt_->driver->status().c_s;
             log::info("host", "head chain resolved",
@@ -969,15 +953,15 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
         } else {
             resync_ring(e.ref, why);
         }
-        if (deferred_head_) {
-            HeadEvent next = std::move(*deferred_head_);
-            deferred_head_.reset();
+        if (rt_->deferred_head) {
+            HeadEvent next = std::move(*rt_->deferred_head);
+            rt_->deferred_head.reset();
             handle_head(next);
         }
     } catch (const std::exception& ex) {
         if (!alive()) co_return;
-        walking_ = false;
-        deferred_head_.reset();
+        rt_->walking = false;
+        rt_->deferred_head.reset();
         log::error("host", "head walk threw", {{"error", ex.what()}});
         resync_ring(e.ref, std::string("head walk threw: ") + ex.what());
     }
@@ -1016,64 +1000,69 @@ void Host::publish_heartbeat(const pipeline::DriverStatus& st) {
     rt_->sink->set_heartbeat(boost::json::serialize(o));
 }
 
+ops::SnapshotInputs Host::build_snapshot_inputs(std::chrono::steady_clock::time_point now, bool leader) {
+    ops::SnapshotInputs in;
+    in.now = now;
+    in.wall_ms = wall_ms();
+    in.leader = leader;
+    in.chain = cfg_.chain.name;
+    in.redis_misconfigured = redis_misconfig_;
+
+    // Redis unreachable: the startup/standby wait, or (as leader) a sink that lost its connection and is spilling.
+    std::chrono::seconds down{0};
+    if (const auto ns = redis_wait_since_ns_.load(); ns != 0) {
+        const std::chrono::steady_clock::time_point since{
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(ns))};
+        down = std::chrono::duration_cast<std::chrono::seconds>(now - since);
+    }
+    if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Degraded) {
+        if (!sink_degraded_since_) sink_degraded_since_ = now;
+        down = std::max(down, std::chrono::duration_cast<std::chrono::seconds>(now - *sink_degraded_since_));
+    } else {
+        sink_degraded_since_.reset();
+    }
+    if (down.count() > 0) {
+        in.redis_unreachable_s = static_cast<std::uint32_t>(down.count());
+        std::lock_guard lk(redis_wait_mu_);
+        in.addr_family = redis_wait_family_;
+    }
+
+    if (leader) {
+        in.head = rt_->ring.top();
+        in.driver = rt_->driver->status();
+        in.sink = rt_->sink->status();
+        in.sink_saturated = rt_->sink->saturated();
+        in.spill_max_bytes = cfg_.sink.spill_max_bytes;
+        in.retention_s = cfg_.sink.retention_ms / 1000;
+        in.safe_late_total = rt_->sweeper->stats().late;
+        in.safe_late_last_block = rt_->sweeper->stats().last_late_block;
+        in.ws_missed_total = ws_missed_total_;
+        in.consumers = rt_->sink->consumer_lag();
+        in.providers = rt_->pool->health();
+        in.ms_since_head = rt_->pool->ms_since_head();
+        const auto safe_of = [&](const std::optional<std::string>& name) -> std::optional<std::uint64_t> {
+            if (!name) return std::nullopt;
+            const auto t = rt_->pool->cached_tag(*name, provider::Tag::Safe);
+            return t ? std::optional<std::uint64_t>(t->number) : std::nullopt;
+        };
+        const auto ws = rt_->pool->active_ws();
+        const auto getlogs = rt_->pool->current_getlogs();
+        in.ws_provider = ws.value_or(in.ms_since_head ? "none" : "");
+        in.getlogs_provider = getlogs.value_or("");
+        in.ws_safe = safe_of(ws);
+        in.getlogs_safe = safe_of(getlogs);
+        for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = rt_->pool->inconsistency_total(p.name);
+    }
+    return in;
+}
+
 void Host::ops_tick() {
     const auto now = std::chrono::steady_clock::now();
     const bool leader = rt_ && rt_->driver && !demoting_;
 
     if (now >= next_ops_) {
         next_ops_ = now + kOpsPeriod;
-        ops::SnapshotInputs in;
-        in.now = now;
-        in.wall_ms = wall_ms();
-        in.leader = leader;
-        in.chain = cfg_.chain.name;
-        in.redis_misconfigured = redis_misconfig_;
-
-        // Redis unreachable: the startup/standby wait, or (as leader) a sink that lost its connection and is spilling.
-        std::chrono::seconds down{0};
-        if (const auto ns = redis_wait_since_ns_.load(); ns != 0) {
-            const std::chrono::steady_clock::time_point since{
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(ns))};
-            down = std::chrono::duration_cast<std::chrono::seconds>(now - since);
-        }
-        if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Degraded) {
-            if (!sink_degraded_since_) sink_degraded_since_ = now;
-            down = std::max(down, std::chrono::duration_cast<std::chrono::seconds>(now - *sink_degraded_since_));
-        } else {
-            sink_degraded_since_.reset();
-        }
-        if (down.count() > 0) {
-            in.redis_unreachable_s = static_cast<std::uint32_t>(down.count());
-            std::lock_guard lk(redis_wait_mu_);
-            in.addr_family = redis_wait_family_;
-        }
-
-        if (leader) {
-            in.head = rt_->ring.top();
-            in.driver = rt_->driver->status();
-            in.sink = rt_->sink->status();
-            in.sink_saturated = rt_->sink->saturated();
-            in.spill_max_bytes = cfg_.sink.spill_max_bytes;
-            in.retention_s = cfg_.sink.retention_ms / 1000;
-            in.safe_late_total = rt_->sweeper->stats().late;
-            in.safe_late_last_block = rt_->sweeper->stats().last_late_block;
-            in.ws_missed_total = ws_missed_total_;
-            in.consumers = rt_->sink->consumer_lag();
-            in.providers = rt_->pool->health();
-            in.ms_since_head = rt_->pool->ms_since_head();
-            const auto safe_of = [&](const std::optional<std::string>& name) -> std::optional<std::uint64_t> {
-                if (!name) return std::nullopt;
-                const auto t = rt_->pool->cached_tag(*name, provider::Tag::Safe);
-                return t ? std::optional<std::uint64_t>(t->number) : std::nullopt;
-            };
-            const auto ws = rt_->pool->active_ws();
-            const auto getlogs = rt_->pool->current_getlogs();
-            in.ws_provider = ws.value_or(in.ms_since_head ? "none" : "");
-            in.getlogs_provider = getlogs.value_or("");
-            in.ws_safe = safe_of(ws);
-            in.getlogs_safe = safe_of(getlogs);
-            for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = rt_->pool->inconsistency_total(p.name);
-        }
+        const auto in = build_snapshot_inputs(now, leader);
         for (const auto& a : engine_.evaluate(snapshots_.build(in))) {
             if (!a.resolved) ++alerts_fired_total_[a.title];
             log::warn("alert", "alert raised",
