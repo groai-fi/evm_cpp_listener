@@ -44,15 +44,15 @@ Run on your workstation or staging build host before deploying to the staging se
 
 ## 2. Staging Server Setup (Choose Option A or Option B)
 
-### Option A: Railway `staging` Environment (`make staging-deploy`)
+### Option A: Railway `staging` Environment (`staging` Branch CI + Auto-Deploy)
 If deploying to a `staging` environment in Railway:
-- [ ] Create/select the `staging` environment in your Railway project (`railway environment staging`).
+- [ ] Create/select the `staging` environment in your Railway project (`railway environment staging`) and connect it to the **`staging` branch** on GitHub.
 - [ ] Provision a staging **Redis 8.4** service with `--appendonly yes --maxmemory-policy noeviction`.
-- [ ] Create services `evml-base-a` (`EVML_HOST_ID=staging-a`) and `evml-base-b` (`EVML_HOST_ID=staging-b`) with `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`, no volume, and no public domain.
-- [ ] Deploy via Makefile:
+- [ ] Create services `evml-base-a` (`EVML_HOST_ID=staging-a`) and `evml-base-b` (`EVML_HOST_ID=staging-b`) tracking the `staging` branch, with `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`, no volume, and no public domain.
+- [ ] Push to the `staging` branch to trigger GitHub Actions CI ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)) and Railway staging deployment:
   ```bash
-  make staging-deploy
-  # Runs: railway up -e staging
+  git push origin HEAD:staging
+  # (Or manual CLI deploy: make staging-deploy)
   ```
 
 ### Option B: Standalone Linux / Docker Staging Server
