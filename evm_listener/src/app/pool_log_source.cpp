@@ -1,5 +1,6 @@
 #include "app/pool_log_source.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "core/error.hpp"
@@ -23,6 +24,7 @@ std::optional<std::string> PoolLogSource::current_provider() const {
 void PoolLogSource::report_bad(const std::string& provider, const std::string& reason) {
     pool_->report_bad(provider, reason);
     avoid_.insert(provider);
+    clear_cache();
 }
 
 void PoolLogSource::cache_block(std::uint64_t number, const pipeline::BlockInfo& info) {
@@ -105,6 +107,7 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uin
             co_return it->second;
         }
         block_cache_.erase(it);
+        cache_order_.erase(std::remove(cache_order_.begin(), cache_order_.end(), number), cache_order_.end());
     }
 
     std::unordered_set<std::string> tried;

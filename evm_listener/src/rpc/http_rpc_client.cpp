@@ -93,7 +93,8 @@ struct PlainConn final : HttpConn {
 
 /// @brief TLS-encrypted connection implementation for production RPC endpoints.
 struct TlsConn final : HttpConn {
-    TlsConn(const net::any_io_executor& ex, ssl::context& ctx) : stream(ex, ctx) {}
+    explicit TlsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
+        : ctx(std::move(c)), stream(ex, *ctx) {}
     net::awaitable<http::response<http::string_body>> roundtrip(http::request<http::string_body>& req,
                                                                 std::chrono::milliseconds timeout,
                                                                 const std::string& who) override {
@@ -105,6 +106,7 @@ struct TlsConn final : HttpConn {
         beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
         beast::get_lowest_layer(stream).close();
     }
+    std::shared_ptr<ssl::context> ctx;
     beast::ssl_stream<beast::tcp_stream> stream;
 };
 
@@ -194,6 +196,9 @@ net::awaitable<std::shared_ptr<detail::HttpConn>> HttpRpcClient::open() {
         OpeningGuard og(*this, c.get());
         c->stream.expires_after(cfg_.timeout);
         co_await phase(cfg_.name + " " + redacted_, "connect", c->stream.async_connect(endpoints, net::use_awaitable));
+        if (cancelled_) {
+            throw TransportError(cfg_.name + ": client cancelled");
+        }
         co_return c;
     }
 
@@ -202,7 +207,7 @@ net::awaitable<std::shared_ptr<detail::HttpConn>> HttpRpcClient::open() {
     auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
     ctx->set_default_verify_paths();
     ctx->set_verify_mode(ssl::verify_peer);
-    auto c = std::make_shared<detail::TlsConn>(exec_, *ctx);
+    auto c = std::make_shared<detail::TlsConn>(exec_, std::move(ctx));
     OpeningGuard og(*this, c.get());
     // Configure SNI extension for cloud proxy / CDN routing
     if (!SSL_set_tlsext_host_name(c->stream.native_handle(), url_.host.c_str())) {
@@ -220,6 +225,9 @@ net::awaitable<std::shared_ptr<detail::HttpConn>> HttpRpcClient::open() {
     // Complete TLS handshake with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);
     co_await phase(who, "TLS handshake", c->stream.async_handshake(ssl::stream_base::client, net::use_awaitable));
+    if (cancelled_) {
+        throw TransportError(cfg_.name + ": client cancelled");
+    }
     co_return c;
 }
 

@@ -303,6 +303,7 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
 // Emits reverts for logs that disappeared in the reorg and emits new logs on the winning branch.
 // Watch out: Pulls C_s back to the lowest fork point, ensuring no gaps in subsequent sweeps (Invariant I1).
 boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released() {
+    source_.clear_cache();
     const std::uint64_t ceiling = c_s_;  // snapshot: the sweeps are serialised, so C_s cannot move under us
     std::uint64_t cursor = c_f_;
     // Tracks lowest block number that deviated from canonical chain

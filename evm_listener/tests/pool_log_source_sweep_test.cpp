@@ -109,3 +109,48 @@ TEST_CASE("pool log source under the sweeper: one block() RPC per distinct block
     CHECK(c3.blocks == 0);                // the first independent provider answered both
     CHECK(sweeper.c_s() == 110);
 }
+
+TEST_CASE("pool log source under the sweeper: G2 hash mismatch on attempt 0 clears block_cache so retry succeeds",
+          "[integration][pool_log_source]") {
+    const auto cfg = evml::test::load_base_config();
+    const auto& contract = cfg.contracts.at(0);
+    const std::string logs = "[" + log_json(contract, 105, 'a', 0) + "]";
+
+    net::io_context ioc;
+    REQUIRE(cfg.getlogs_chain.size() >= 2);
+    const std::string p1 = cfg.getlogs_chain[0].name, p2 = cfg.getlogs_chain[1].name;
+    Counter c1, c2;
+    const std::map<std::uint64_t, char> chain_good{{105, 'a'}};
+    const std::map<std::uint64_t, char> chain_poisoned{{105, 'f'}};  // poisoned hex hash on attempt 0
+
+    evml::test::MockHttpServer s1(ioc, serve(c1, logs, chain_good));
+    evml::test::MockHttpServer s2(ioc, serve(c2, logs, chain_poisoned));
+
+    evml::provider::PoolConfig pc;
+    pc.providers = {{p1, kDeadWs, s1.url()}, {p2, kDeadWs, s2.url()}};
+    pc.ws_order = {p1};
+    pc.getlogs_order = {p1, p2};
+    pc.chain_id = 8453;
+    pc.user_agent = "evm-listener/test";
+    pc.logs = cfg.filter();
+    pc.http_timeout = 2000ms;
+    pc.reconcile_rps = 1000;
+    pc.reconcile_burst = 1000;
+    auto pool = evml::provider::ProviderPool::create(ioc.get_executor(), std::move(pc), {});
+
+    evml::app::PoolLogSource source(pool, nullptr);
+    evml::test::MemorySink sink;
+    evml::pipeline::Sweeper sweeper(cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, source, sink,
+                                    [] { return std::uint64_t{1000}; });
+    sweeper.set_cursors(100, 100);
+
+    // Attempt 0: P1 returns log (hash 'a'), P2 returns block 105 with poisoned hash 'f' -> G2 report_bad clears cache.
+    // Attempt 1: steered to P2 for get_logs (hash 'a'), P1 answers block 105 with hash 'a' -> succeeds!
+    const auto res = evml::test::run_sync(ioc, sweeper.safe_step(110));
+    REQUIRE(res.status == evml::pipeline::StepStatus::Advanced);
+    CHECK(sink.emitted.size() == 1);
+    CHECK(c1.logs == 1);
+    CHECK(c2.blocks == 1);
+    CHECK(c2.logs == 1);
+    CHECK(c1.blocks == 1);  // block(105) was re-fetched from P1 instead of serving poisoned 'f' from block_cache_
+}

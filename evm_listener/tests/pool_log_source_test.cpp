@@ -322,4 +322,11 @@ TEST_CASE("pool log source: block() caches verified blocks and invalidates on cl
     REQUIRE(b4.has_value());
     CHECK(b4->hash == hash_of('e'));
     CHECK(f.n2.block_calls == 3);
+
+    // report_bad() also invalidates block_cache_ and forces the next lookup to re-fetch.
+    src.report_bad("P1", "mismatch");
+    const auto b5 = run_sync(f.ioc, src.block(kBlock));
+    REQUIRE(b5.has_value());
+    CHECK(b5->hash == hash_of('e'));
+    CHECK(f.n2.block_calls == 4);
 }

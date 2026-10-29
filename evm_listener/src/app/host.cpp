@@ -760,6 +760,7 @@ void Host::on_tag(const std::string& provider, provider::Tag tag, std::uint64_t 
         case chain::GateSignal::SafeRegression:
         case chain::GateSignal::SafeHashMismatch:
             log::warn("gate", "safe gate signal", {{"signal", chain::to_string(sig)}, {"provider", provider}});
+            if (rt_->source) rt_->source->clear_cache();
             rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + provider);
             break;
         case chain::GateSignal::FinalizedAnomaly:

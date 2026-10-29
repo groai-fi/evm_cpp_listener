@@ -50,6 +50,9 @@ public:
     // Reports that `provider` returned data failing validation or blockHash checks (rev 5, G2).
     // Penalizes provider health score and steers subsequent queries to failover fallback.
     virtual void report_bad(const std::string& provider, const std::string& reason) = 0;
+
+    // Clears any cached verified block headers (called on reorg signals or safe-window re-verification).
+    virtual void clear_cache() {}
 };
 
 }  // namespace evml::pipeline

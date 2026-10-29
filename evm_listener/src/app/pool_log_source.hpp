@@ -34,7 +34,7 @@ public:
     boost::asio::awaitable<std::optional<pipeline::BlockInfo>> block(std::uint64_t number) override;
     std::optional<std::string> current_provider() const override;
     void report_bad(const std::string& provider, const std::string& reason) override;
-    void clear_cache();
+    void clear_cache() override;
 
     static constexpr std::size_t kMaxBlockCache = 4096;
 
