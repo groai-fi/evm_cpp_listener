@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "chain/reorg_detector.hpp"
 #include "pipeline/log_source.hpp"
@@ -47,6 +48,8 @@ private:
     std::unordered_set<std::string> avoid_;          // providers reported bad since the last get_logs
     std::unordered_set<std::string> logs_providers_; // every provider that answered get_logs for the current page
     std::optional<pipeline::BlockRange> last_logs_range_;
+    std::vector<core::Address20> seen_split_addresses_;
+    bool page_sealed_{false};
     std::unordered_map<std::uint64_t, pipeline::BlockInfo> block_cache_;
     std::deque<std::uint64_t> cache_order_;
 };

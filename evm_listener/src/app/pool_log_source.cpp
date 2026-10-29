@@ -24,6 +24,7 @@ std::optional<std::string> PoolLogSource::current_provider() const {
 void PoolLogSource::report_bad(const std::string& provider, const std::string& reason) {
     pool_->report_bad(provider, reason);
     avoid_.insert(provider);
+    page_sealed_ = true;
     clear_cache();
 }
 
@@ -45,10 +46,19 @@ void PoolLogSource::clear_cache() {
 
 net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range,
                                                             const core::LogFilter& filter) {
-    if (!last_logs_range_ || last_logs_range_->from != range.from || last_logs_range_->to != range.to ||
-        filter.addresses.size() > 1) {
+    const bool same_split_page =
+        last_logs_range_ && last_logs_range_->from == range.from && last_logs_range_->to == range.to &&
+        !page_sealed_ && filter.addresses.size() == 1 &&
+        std::find(seen_split_addresses_.begin(), seen_split_addresses_.end(), filter.addresses.front()) ==
+            seen_split_addresses_.end();
+    if (!same_split_page) {
         logs_providers_.clear();
+        seen_split_addresses_.clear();
+        page_sealed_ = false;
         last_logs_range_ = range;
+    }
+    if (filter.addresses.size() == 1) {
+        seen_split_addresses_.push_back(filter.addresses.front());
     }
     std::unordered_set<std::string> tried = std::move(avoid_);  // steer this call away from providers reported bad
     avoid_.clear();
@@ -95,6 +105,7 @@ net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange
 }
 
 net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uint64_t number) {
+    page_sealed_ = true;
     std::optional<core::Hash32> ring_hash;
     if (ring_) {
         if (const auto ref = ring_->ref_at(number)) {
