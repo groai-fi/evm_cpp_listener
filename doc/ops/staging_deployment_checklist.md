@@ -42,70 +42,75 @@ Run on your workstation or staging build host before deploying to the staging se
 
 ---
 
-## 2. Staging Server Setup (Choose Option A or Option B)
+## 2. Staging Server Setup (Railway `staging` + Local Docker Pre-Test)
 
 ### Option A: Railway `staging` Environment (`staging` Branch CI + Auto-Deploy)
-If deploying to a `staging` environment in Railway:
-- [ ] Create/select the `staging` environment in your Railway project (`railway environment staging`) and connect it to the **`staging` branch** on GitHub.
-- [ ] Provision a staging **Redis 8.4** service with `--appendonly yes --maxmemory-policy noeviction`.
-- [ ] Create services `evml-base-a` (`EVML_HOST_ID=staging-a`) and `evml-base-b` (`EVML_HOST_ID=staging-b`) tracking the `staging` branch, with `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`, no volume, and no public domain.
-- [ ] Push to the `staging` branch to trigger GitHub Actions CI ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)) and Railway staging deployment:
+> [!IMPORTANT]
+> **One `staging` GitHub branch serves all staging instances.** You do **not** need two separate GitHub branches for `staging-a` and `staging-b`. Both Railway services in the `staging` environment connect to the **same `staging` branch** on GitHub; the only difference between the two services is the `EVML_HOST_ID` environment variable (`EVML_HOST_ID=staging-a` vs `EVML_HOST_ID=staging-b`). Pushing to `staging` triggers GitHub Actions CI and automatically deploys all connected services in the `staging` environment.
+
+- [x] **1. Railway Environment & GitHub Branch:**
+  - Project: `Strategy` (`5147b56c-266b-4104-a971-1232813c4d48`), Environment: `staging` (`9d4d1159-658a-4ae9-9d64-cc0416a54c8d`).
+  - Connected to GitHub repo `GroAI-fi/evm_cpp_listener`, branch **`staging`** (enable **"Wait for CI"** so Railway only deploys after `.github/workflows/ci.yml` passes).
+- [x] **2. Staging `Redis` (8.4.0) Service Configuration:**
+  - Use a volume-safe start command (works whether or not a Railway volume is attached) with AOF and `noeviction` enforced:
+    ```bash
+    /bin/sh -c "rm -rf ${RAILWAY_VOLUME_MOUNT_PATH:-/data}/lost+found/ && exec docker-entrypoint.sh redis-server --requirepass $REDIS_PASSWORD --save 60 1 --appendonly yes --maxmemory-policy noeviction --dir ${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
+    ```
+- [x] **3. Listener Service (`evm_cpp_listener` -> `staging-a`, and optional `staging-b`):**
+  - Paste variables from gitignored `evm_listener/.env.staging` (`REDIS_URL=${{Redis.REDIS_URL}}`, `EVML_HOST_ID=staging-a`, `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`).
+  - For single-node live stream & price verification, only **1 listener service (`staging-a`)** is needed.
+  - To test 2-host active-passive failover on Railway (Drills 3–5), add a second service (`evm_cpp_listener_b`) in the same `staging` environment pointing to the **same `staging` GitHub branch**, copy the variables from `evm_cpp_listener`, and change only `EVML_HOST_ID=staging-b`.
+- [ ] **4. Push to `staging` Branch to Deploy:**
   ```bash
   git push origin HEAD:staging
-  # (Or manual CLI deploy: make staging-deploy)
   ```
 
-### Option B: Standalone Linux / Docker Staging Server
-If deploying to a standalone Linux VM or Docker host:
-- [ ] Copy `evm_listener/.env` (or set environment variables) on the staging server.
-- [ ] Start a dedicated staging Redis 8.4 container and network:
+### Option B: Local Docker Pre-Verification (Recommended Before Pushing to Railway)
+> [!TIP]
+> **Test in local Docker first, then push to Railway `staging`.** Rebuilding inside the local devcontainer (`make build`) takes ~3 seconds vs ~4 minutes for a full Conan/C++ image build on Railway, and running both local Docker and Railway `staging` simultaneously on the same Infura/QuickNode keys doubles RPC consumption. Pause/remove the Railway `staging` deployment while iterating locally, then push to `staging` once local verification passes.
+
+- [ ] Run unit + integration tests against local Docker Redis (`evm_cpp_listener_redis`):
   ```bash
-  docker network create evml-staging-net || true
-
-  docker run -d \
-    --name evml-staging-redis \
-    --network evml-staging-net \
-    --restart always \
-    redis:8.4 \
-    redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+  make build
+  docker exec evm_cpp_listener_dev bash -lc 'REDIS_URL=redis://redis:6379 ctest --test-dir build/Debug --output-on-failure'
   ```
-- [ ] Build or pull `evm-listener:staging` on the staging server (`make staging-image`), and start `evml-staging-a` first (Step 3 below).
+- [ ] Or run the listener binary directly inside `evm_cpp_listener_dev` against local Docker Redis (`redis://redis:6379/0`):
+  ```bash
+  docker exec evm_cpp_listener_dev bash -lc '
+    set -a && source evm_listener/.env && set +a
+    REDIS_URL=redis://redis:6379/0 EVML_HOST_ID=local-dev ./build/Debug/evm_listener/evm_listener --config evm_listener/config/base.toml
+  '
+  ```
 
 ---
 
 ## 3. Staging Verification Drills (Step-by-Step)
 
 ### Drill 1: Config & Redis Pre-Flight Checks (`--check-config` & `--check-redis`)
-Run one-off checks against the staging environment before starting the daemon:
+Run one-off checks inside the local container or against Railway staging Redis:
 ```bash
-# On Railway staging:
-railway ssh --environment staging --service evml-base-a -- \
-  /usr/local/bin/evm_listener --config /app/config/base.toml --check-config
-
-railway ssh --environment staging --service evml-base-a -- \
-  /usr/local/bin/evm_listener --config /app/config/base.toml --check-redis
-
-# Or on a standalone Docker staging server:
-docker run --rm --network evml-staging-net \
-  --env-file evm_listener/.env \
-  -e REDIS_URL="redis://evml-staging-redis:6379/0" \
-  evm-listener:staging --config /app/config/base.toml --check-config
-
-docker run --rm --network evml-staging-net \
-  --env-file evm_listener/.env \
-  -e REDIS_URL="redis://evml-staging-redis:6379/0" \
-  evm-listener:staging --config /app/config/base.toml --check-redis
+# Local dev container against local Redis:
+docker exec evm_cpp_listener_dev bash -lc '
+  set -a && source evm_listener/.env && set +a
+  REDIS_URL=redis://redis:6379/0 ./build/Debug/evm_listener/evm_listener --config evm_listener/config/base.toml --check-config
+  REDIS_URL=redis://redis:6379/0 ./build/Debug/evm_listener/evm_listener --config evm_listener/config/base.toml --check-redis
+'
 ```
-- [ ] **`--check-config` Accept:** Exits `0`; lists `ws providers: quicknode, infura` and `getlogs providers: infura, ..., ankr, base_public, quicknode`; verifies `chain_id = 8453` and contract bytecode on Base.
-- [ ] **`--check-redis` Accept:** Exits `0`; prints `redis_version="8.4..."`, `maxmemory_policy="noeviction"`, `appendonly="yes"`.
+- [x] **`--check-config` Accept:** Exits `0`; lists `ws providers: quicknode, infura` and `getlogs providers: infura, ..., ankr, base_public, quicknode`; verifies `chain_id = 8453` and contract bytecode on Base.
+- [x] **`--check-redis` Accept:** Exits `0`; prints `redis_version="8.4..."`, `maxmemory_policy="noeviction"`, `appendonly="yes"`.
 
 ---
 
 ### Drill 2: Fast Staging Catch-Up Seed & Leader Startup (`staging-a`)
 > [!TIP]
-> **Optional Fast Seed for Staging:** If you want staging to reach `state="live"` in ~30 seconds instead of waiting ~60–95 minutes to backfill 1.18M blocks from `52060000`, you can either:
-> 1. Let `staging-a` run from `52060000` if you specifically want to test the full 1.18M-block catch-up duration, **or**
-> 2. Mount an override `base.staging.toml` with `start_block` set ~1,500 blocks behind current Base tip (e.g. `tip - 1500`) so `staging-a` exercises both `safe` and `finalized` catch-up sweeps and transitions to `Live` in ~30 seconds.
+> **Fast-Forwarding `ckpt` in Staging Redis (Do NOT edit `start_block` in `base.toml`):**
+> `start_block = 52060000` in [`evm_listener/config/base.toml`](../../evm_listener/config/base.toml) is asserted by 48 unit/integration tests. To start staging near the current Base head (`tip - 200`) without waiting ~60–95 minutes to backfill 1.18M blocks and without breaking unit tests, let `staging-a` initialize `evml:{base_eurc_usdc}:ckpt` once, then fast-forward `safe` and `finalized` in staging Redis:
+> ```bash
+> URL=$(railway variable list --service Redis --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["REDIS_PUBLIC_URL"])')
+> docker exec evm_cpp_listener_redis redis-cli -u "$URL" HSET "evml:{base_eurc_usdc}:ckpt" safe <TIP_MINUS_200> finalized <TIP_MINUS_200>
+> docker exec evm_cpp_listener_redis redis-cli -u "$URL" DEL "evml:{base_eurc_usdc}:leader"
+> ```
+> `staging-a` will re-acquire the lease on its next tick, sweep the last 200 blocks in ~15 seconds, and transition to `"state":"live"`.
 
 Start `staging-a`:
 ```bash
