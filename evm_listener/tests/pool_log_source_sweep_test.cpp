@@ -154,3 +154,67 @@ TEST_CASE("pool log source under the sweeper: G2 hash mismatch on attempt 0 clea
     CHECK(c2.logs == 1);
     CHECK(c1.blocks == 1);  // block(105) was re-fetched from P1 instead of serving poisoned 'f' from block_cache_
 }
+
+TEST_CASE("pool log source: address-split sub-queries across multiple providers exclude all of them on block()",
+          "[integration][pool_log_source]") {
+    const auto cfg = evml::test::load_base_config();
+    REQUIRE(cfg.contracts.size() >= 2);
+    REQUIRE(cfg.getlogs_chain.size() >= 3);
+    const std::string p1 = cfg.getlogs_chain[0].name, p2 = cfg.getlogs_chain[1].name, p3 = cfg.getlogs_chain[2].name;
+    const auto& contract0 = cfg.contracts.at(0);
+    const auto& contract1 = cfg.contracts.at(1);
+    const std::map<std::uint64_t, char> chain{{105, 'a'}};
+    const std::string logs0 = "[" + log_json(contract0, 105, 'a', 0) + "]";
+    const std::string logs1 = "[" + log_json(contract1, 105, 'a', 1) + "]";
+    const std::string no_logs = "[]";
+
+    net::io_context ioc;
+    Counter c1, c2, c3;
+    bool p1_fail_next = false;
+    // P1 answers the first single-address get_logs sub-query and then fails on the second so PoolLogSource fails over to P2.
+    evml::test::MockHttpServer s1(ioc, [&](const evml::test::MockRequest& r) {
+        const auto v = json::parse(r.body).as_object();
+        const auto method = std::string(v.at("method").as_string());
+        if (method == "eth_getLogs") {
+            ++c1.logs;
+            if (p1_fail_next) return evml::test::MockReply{.status = 500, .body = "p1 down"};
+            p1_fail_next = true;
+            const auto id = static_cast<std::uint64_t>(v.at("id").as_int64());
+            return evml::test::MockReply{.body = rpc_ok(id, logs0)};
+        }
+        return serve(c1, no_logs, chain)(r);
+    });
+    evml::test::MockHttpServer s2(ioc, serve(c2, logs1, chain));
+    evml::test::MockHttpServer s3(ioc, serve(c3, no_logs, chain));
+
+    evml::provider::PoolConfig pc;
+    pc.providers = {{p1, kDeadWs, s1.url()}, {p2, kDeadWs, s2.url()}, {p3, kDeadWs, s3.url()}};
+    pc.ws_order = {p1};
+    pc.getlogs_order = {p1, p2, p3};
+    pc.chain_id = 8453;
+    pc.user_agent = "evm-listener/test";
+    pc.logs = cfg.filter();
+    pc.http_timeout = 2000ms;
+    pc.reconcile_rps = 1000;
+    pc.reconcile_burst = 1000;
+    auto pool = evml::provider::ProviderPool::create(ioc.get_executor(), std::move(pc), {});
+
+    evml::app::PoolLogSource source(pool, nullptr);
+    evml::core::LogFilter f0{std::vector<evml::core::Address20>{contract0.address}, contract0.topics};
+    evml::core::LogFilter f1{std::vector<evml::core::Address20>{contract1.address}, contract1.topics};
+
+    const auto r0 = evml::test::run_sync(ioc, source.get_logs({105, 105}, f0));
+    REQUIRE(r0.ok);
+    CHECK(r0.provider == p1);
+
+    const auto r1 = evml::test::run_sync(ioc, source.get_logs({105, 105}, f1));
+    REQUIRE(r1.ok);
+    CHECK(r1.provider == p2);
+
+    // Both P1 and P2 supplied logs for range [105, 105], so block(105) must exclude both and ask P3.
+    const auto b = evml::test::run_sync(ioc, source.block(105));
+    REQUIRE(b.has_value());
+    CHECK(c1.blocks == 0);
+    CHECK(c2.blocks == 0);
+    CHECK(c3.blocks == 1);
+}

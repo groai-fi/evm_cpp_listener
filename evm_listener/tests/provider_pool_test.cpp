@@ -529,10 +529,11 @@ TEST_CASE("pool: tags are cached per answering provider and never mixed after a 
     shutdown(ioc, pool);
 }
 
-TEST_CASE("pool: on_tag fires with provider/tag/number only while the pool is running", "[integration]") {
+TEST_CASE("pool: on_tag fires with provider/tag/number on cold start and only while the pool is running", "[integration]") {
     net::io_context ioc;
     Chain chain;
     chain.safe = 150;
+    chain.finalized = 120;
     MockHttpServer ha(ioc, healthy(chain));
     struct Seen {
         std::string provider;
@@ -547,17 +548,23 @@ TEST_CASE("pool: on_tag fires with provider/tag/number only while the pool is ru
     auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", kDeadWs, ha.url()}}, {"A"}, {"A"}), h);
     pool->start();
 
-    REQUIRE(run_sync(ioc, pool->read_tag("A", Tag::Safe)).has_value());
-    REQUIRE(seen.size() == 1);
+    // start() primes both safe and finalized tags immediately on cold start without waiting for safe_poll.
+    REQUIRE(run_until(ioc, [&] { return seen.size() >= 2; }, 2s));
+    REQUIRE(seen.size() == 2);
     CHECK(seen[0].provider == "A");
     CHECK(seen[0].tag == Tag::Safe);
     CHECK(seen[0].number == 150);
+    CHECK(seen[1].provider == "A");
+    CHECK(seen[1].tag == Tag::Finalized);
+    CHECK(seen[1].number == 120);
 
     pool->stop();
     run_until(ioc, [] { return false; }, 150ms);
     ioc.restart();
     (void)run_sync(ioc, pool->read_tag("A", Tag::Safe));
-    CHECK(seen.size() == 1);  // stopped pool does not call handlers
+    CHECK(seen.size() == 2);  // stopped pool does not call handlers
+    CHECK_FALSE(pool->current_getlogs().has_value());
+    CHECK_FALSE(pool->pick_getlogs_excluding({}).has_value());
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -746,4 +753,40 @@ TEST_CASE("pool: stop() cancels in-flight HTTP call and token-bucket sleep immed
     // Cancellation on stop must not mutate breaker state or fail over to H2
     CHECK(pool->state("H1") == State::Up);
     CHECK(h2.requests() == 1);
+    CHECK(pool->rpc_requests_total("H1").at("eth_getLogs") == 1);
+    CHECK(pool->rpc_requests_total("H2").at("eth_getLogs") == 1);
+}
+
+TEST_CASE("pool: start_http_only() probes Down providers back to Up without opening WS sessions or tag polls",
+          "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    bool h1_down = true;
+    int ws_upgrades = 0;
+    MockWsServer ws1(ioc, [&](MockWsConn& c) -> net::awaitable<void> {
+        ++ws_upgrades;
+        co_await serve_setup(c);
+    });
+    auto serve_ok = healthy(chain);
+    MockHttpServer h1(ioc, [&](const MockRequest& r) {
+        if (h1_down) return MockReply{.status = 500, .body = "down"};
+        return serve_ok(r);
+    });
+
+    auto cfg = base_cfg({{"H1", ws1.url(), h1.url()}}, {"H1"}, {"H1"});
+    cfg.policy.failover_after = 1;
+    cfg.policy.probe_interval = 0s;
+    cfg.tick = 20ms;
+    auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), {});
+    pool->start_http_only();
+
+    const auto bad = run_sync(ioc, pool->call(get_logs_request()));
+    CHECK_FALSE(bad.ok);
+    CHECK(pool->state("H1") == State::Down);
+
+    h1_down = false;
+    REQUIRE(run_until(ioc, [&] { return pool->state("H1") == State::Up; }, 2s));
+    CHECK(ws_upgrades == 0);
+    CHECK(pool->rpc_requests_total("H1").at("eth_blockNumber") >= 1);
+    shutdown(ioc, pool);
 }

@@ -49,6 +49,9 @@ public:
     /// @return true if a ping was started
     bool tick(const DeadmanFacts& facts);
 
+    /// @brief Cancels any in-flight dead-man ping on shutdown.
+    void stop();
+
     bool enabled() const;
     /// @brief "enabled" or "disabled", for the /readyz JSON.
     const char* status() const;

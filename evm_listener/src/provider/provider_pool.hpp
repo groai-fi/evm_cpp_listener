@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -145,6 +146,8 @@ public:
 
     /// @brief Starts background tick timer, initiates WebSocket session, and schedules periodic probes.
     void start();  // throws std::logic_error if called twice
+    /// @brief Starts background HTTP probe/cooldown maintenance timer without opening WS sessions or tag polling.
+    void start_http_only();  // throws std::logic_error if called twice
     /// @brief Stops timers, terminates active WebSocket session, and suppresses pending callbacks.
     void stop();   // idempotent; no handler is called afterwards
 
@@ -164,6 +167,7 @@ public:
     // Next usable getLogs provider that is not in `exclude`, in failover order. nullopt = none left.
     /// @brief Picks the best usable getLogs provider outside the exclude set.
     std::optional<std::string> pick_getlogs_excluding(const std::unordered_set<std::string>& exclude) const {
+        if (stopped_) return std::nullopt;
         return book_.pick_getlogs(Clock::now(), exclude);
     }
 
@@ -177,6 +181,10 @@ public:
     std::uint64_t inconsistency_total(const std::string& provider) const { return nodes_.at(provider).inconsistent; }
     /// @brief Number of call_to() calls that had to wait for a token (getlogs_throttled_total).
     std::uint64_t throttled_total(const std::string& provider) const { return nodes_.at(provider).throttled; }
+    /// @brief Total HTTP JSON-RPC requests sent to the provider, keyed by method name.
+    const std::map<std::string, std::uint64_t>& rpc_requests_total(const std::string& provider) const {
+        return nodes_.at(provider).rpc_requests;
+    }
 
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
     // provider; a null block counts as a failure too).
@@ -189,7 +197,10 @@ public:
     /// @brief Returns name of currently active WebSocket provider.
     const std::optional<std::string>& active_ws() const { return book_.active_ws(); }
     /// @brief Returns name of primary getLogs provider currently selected.
-    std::optional<std::string> current_getlogs() const { return book_.pick_getlogs(Clock::now()); }
+    std::optional<std::string> current_getlogs() const {
+        if (stopped_) return std::nullopt;
+        return book_.pick_getlogs(Clock::now());
+    }
     /// @brief Returns current health state of named provider.
     State state(const std::string& provider) const { return book_.state(provider).state; }
     /// @brief newHeads silence, in ms, since the last head (or pool start before the first one). Never reset on WS
@@ -222,6 +233,8 @@ private:
         TokenBucket bucket;
         std::uint64_t inconsistent{0};
         std::uint64_t throttled{0};
+        std::map<std::string, std::uint64_t> rpc_requests{
+            {"eth_getLogs", 0}, {"eth_getBlockByNumber", 0}, {"eth_blockNumber", 0}, {"eth_chainId", 0}};
         std::vector<boost::asio::steady_timer*> wait_timers;
         // The last Quota / Auth / Config failure, kept so health() can say why a provider is in Cooldown / Disabled.
         struct Fault {
@@ -268,6 +281,7 @@ private:
 
     bool started_{false};
     bool running_{false};
+    bool http_only_{false};
     bool stopped_{false};
     std::uint64_t next_id_{1};
 

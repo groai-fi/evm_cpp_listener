@@ -29,6 +29,7 @@ struct Deadman::State {
 
     const DeadmanOptions opts;
     HttpClient client;
+    bool stopped{false};
     std::atomic<bool> in_flight{false};
     std::atomic<std::uint64_t> pings{0};
     std::atomic<std::uint64_t> failures{0};
@@ -49,8 +50,10 @@ net::awaitable<void> ping(std::shared_ptr<Deadman::State> st) {
     } catch (const std::exception& e) {
         error = e.what();  // TransportError text carries the redacted URL only
     }
-    ++st->failures;
-    st->write(spdlog::level::warn, "dead-man ping failed", {{"error", error}});
+    if (!st->stopped) {
+        ++st->failures;
+        st->write(spdlog::level::warn, "dead-man ping failed", {{"error", error}});
+    }
     st->in_flight = false;
 }
 
@@ -95,10 +98,15 @@ bool Deadman::healthy(const DeadmanFacts& f) {
 
 bool Deadman::tick(const DeadmanFacts& facts) {
     const bool ok = healthy(facts);
-    if (!enabled() || !ok) return false;
+    if (!enabled() || !ok || state_->stopped) return false;
     if (state_->in_flight.exchange(true)) return false;  // previous ping still running (10 s timeout bounds it)
     net::co_spawn(exec_, ping(state_), net::detached);
     return true;
+}
+
+void Deadman::stop() {
+    state_->stopped = true;
+    state_->client.cancel();
 }
 
 std::uint64_t Deadman::pings_total() const { return state_->pings.load(); }

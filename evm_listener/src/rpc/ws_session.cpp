@@ -328,10 +328,13 @@ net::awaitable<void> session_main(std::shared_ptr<WsSession> self) {
     // Resolve hostname to IP endpoints
     tcp::resolver resolver(ex);
     tcp::resolver::results_type endpoints;
-    try {
-        endpoints = co_await resolver.async_resolve(url.host, url.port, net::use_awaitable);
-    } catch (const boost::system::system_error& e) {
-        throw SessionFail(FailKind::Retry, "resolve failed for " + who + ": " + e.code().message());
+    {
+        CloserGuard resolve_guard(s, [&resolver] { resolver.cancel(); });
+        try {
+            endpoints = co_await resolver.async_resolve(url.host, url.port, net::use_awaitable);
+        } catch (const boost::system::system_error& e) {
+            throw SessionFail(FailKind::Retry, "resolve failed for " + who + ": " + e.code().message());
+        }
     }
 
     // Branch 1: Plain unencrypted WebSocket stream (for mock test servers)
@@ -348,14 +351,22 @@ net::awaitable<void> session_main(std::shared_ptr<WsSession> self) {
         co_return;
     }
 
-    // Branch 2: TLS encrypted WebSocket stream (wss:// for production providers)
-    ssl::context ctx(ssl::context::tls_client);
-    ctx.set_default_verify_paths();
-    ctx.set_verify_mode(ssl::verify_peer);
-    websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws(ex, ctx);
-    CloserGuard guard(s, [&ws] {
+    // Branch 2: TLS encrypted WebSocket stream (wss:// for production providers).
+    // Hold ssl::context before ssl_stream inside a heap-allocated struct so ctx always outlives the stream.
+    struct TlsWsConn {
+        std::shared_ptr<ssl::context> ctx;
+        websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws;
+        TlsWsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
+            : ctx(std::move(c)), ws(ex, *ctx) {}
+    };
+    auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
+    ctx->set_default_verify_paths();
+    ctx->set_verify_mode(ssl::verify_peer);
+    auto conn = std::make_shared<TlsWsConn>(ex, std::move(ctx));
+    auto& ws = conn->ws;
+    CloserGuard guard(s, [conn] {
         boost::system::error_code ec;
-        beast::get_lowest_layer(ws).socket().close(ec);
+        beast::get_lowest_layer(conn->ws).socket().close(ec);
     });
     // Configure TLS Server Name Indication
     if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), url.host.c_str())) {

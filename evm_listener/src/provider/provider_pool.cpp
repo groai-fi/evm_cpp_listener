@@ -108,12 +108,22 @@ void ProviderPool::start() {
     if (started_) throw std::logic_error("ProviderPool::start called twice");
     started_ = true;
     running_ = true;
+    http_only_ = false;
     const auto now = Clock::now();
-    next_poll_ = now + cfg_.safe_poll;
-    next_finalized_ = now + cfg_.finalized_poll;
+    next_poll_ = now;
+    next_finalized_ = now;
     next_crosscheck_ = now + cfg_.crosscheck_period;
     for (auto& [_, n] : nodes_) n.next_standby_probe = now + cfg_.standby_probe_period;
-    reconcile();
+    tick();
+}
+
+void ProviderPool::start_http_only() {
+    if (started_) throw std::logic_error("ProviderPool::start_http_only called twice");
+    started_ = true;
+    running_ = true;
+    http_only_ = true;
+    const auto now = Clock::now();
+    for (auto& [_, n] : nodes_) n.next_standby_probe = now + cfg_.standby_probe_period;
     schedule_tick();
 }
 
@@ -137,7 +147,7 @@ void ProviderPool::stop() {
 // ---------------------------------------------------------------------------------------------------------------
 
 void ProviderPool::reconcile() {
-    if (!running_) return;
+    if (!running_ || http_only_) return;
     const auto now = Clock::now();
     // Query book for best usable WebSocket provider (handles sticky retention & switchback).
     const auto d = book_.select_ws(now);
@@ -303,30 +313,32 @@ void ProviderPool::tick() {
     if (!running_) return;
     const auto self = shared_from_this();
     const auto now = Clock::now();
-    reconcile();
+    if (!http_only_) {
+        reconcile();
 
-    // A session that stayed Ready long enough counts as a success (a connect-then-die flap never does).
-    // Mark provider healthy only if session survived backoff_min_live (anti-flap protection).
-    if (session_ && ws_ready_ && !ws_credited_ && now - ws_ready_at_ >= cfg_.backoff_min_live) {
-        ws_credited_ = true;
-        if (const auto t = book_.on_success(session_name_, now)) emit_transition(*t, "ws session live");
-    }
+        // A session that stayed Ready long enough counts as a success (a connect-then-die flap never does).
+        // Mark provider healthy only if session survived backoff_min_live (anti-flap protection).
+        if (session_ && ws_ready_ && !ws_credited_ && now - ws_ready_at_ >= cfg_.backoff_min_live) {
+            ws_credited_ = true;
+            if (const auto t = book_.on_success(session_name_, now)) emit_transition(*t, "ws session live");
+        }
 
-    // Detect silent stalls where WebSocket connection is open but no newHeads arrive.
-    if (session_ && ws_ready_ && cfg_.subscribe_heads && detector_.ws_head_stalled(now)) {
-        rpc::WsClosed c;
-        c.kind = rpc::FailKind::Retry;
-        c.reason = "no newHeads received (stalled stream)";
-        end_session(std::move(c));
-    } else if (const auto active = book_.active_ws(); active && detector_.ws_stale(now)) {
-        // Demote only when another WS provider can take over: a lagging stream beats no stream.
-        const bool alternative = std::any_of(cfg_.ws_order.begin(), cfg_.ws_order.end(), [&](const std::string& n) {
-            return n != *active && book_.usable(n, now);
-        });
-        if (alternative) {
-            if (const auto t = book_.demote_voluntary(*active, now)) {
-                emit_transition(*t, "ws head lagging the getLogs provider");
-                reconcile();
+        // Detect silent stalls where WebSocket connection is open but no newHeads arrive.
+        if (session_ && ws_ready_ && cfg_.subscribe_heads && detector_.ws_head_stalled(now)) {
+            rpc::WsClosed c;
+            c.kind = rpc::FailKind::Retry;
+            c.reason = "no newHeads received (stalled stream)";
+            end_session(std::move(c));
+        } else if (const auto active = book_.active_ws(); active && detector_.ws_stale(now)) {
+            // Demote only when another WS provider can take over: a lagging stream beats no stream.
+            const bool alternative = std::any_of(cfg_.ws_order.begin(), cfg_.ws_order.end(), [&](const std::string& n) {
+                return n != *active && book_.usable(n, now);
+            });
+            if (alternative) {
+                if (const auto t = book_.demote_voluntary(*active, now)) {
+                    emit_transition(*t, "ws head lagging the getLogs provider");
+                    reconcile();
+                }
             }
         }
     }
@@ -334,15 +346,17 @@ void ProviderPool::tick() {
     // The getLogs provider may change whenever the WS provider or any health state changes.
     const auto active = book_.active_ws();
     const auto cur = book_.pick_getlogs(now);
-    if (cur != last_getlogs_) {
-        detector_.reset_http(now);
-        last_getlogs_ = cur;
-    }
-    // Demote getLogs provider voluntarily if its safe block tag is lagging active WS head.
-    if (cur && detector_.getlogs_stale(now) && book_.pick_getlogs(now, {*cur})) {
-        if (const auto t = book_.demote_voluntary(*cur, now)) {
-            emit_transition(*t, "getLogs provider's safe tag lagging the WS provider");
+    if (!http_only_) {
+        if (cur != last_getlogs_) {
             detector_.reset_http(now);
+            last_getlogs_ = cur;
+        }
+        // Demote getLogs provider voluntarily if its safe block tag is lagging active WS head.
+        if (cur && detector_.getlogs_stale(now) && book_.pick_getlogs(now, {*cur})) {
+            if (const auto t = book_.demote_voluntary(*cur, now)) {
+                emit_transition(*t, "getLogs provider's safe tag lagging the WS provider");
+                detector_.reset_http(now);
+            }
         }
     }
 
@@ -353,7 +367,7 @@ void ProviderPool::tick() {
         Node& n = nodes_.at(name);
         bool due;
         if (st == State::Up) {
-            if (active == name || cur == name) continue;  // carries real traffic: that is its health signal
+            if (http_only_ || active == name || cur == name) continue;  // carries real traffic: that is its health signal
             due = now >= n.next_standby_probe;
         } else {
             due = book_.probe_due(name, now);
@@ -364,15 +378,17 @@ void ProviderPool::tick() {
         net::co_spawn(exec_, probe(self, name), net::detached);
     }
 
-    if (cur && !polling_ && now >= next_poll_) {
-        polling_ = true;
-        next_poll_ = now + cfg_.safe_poll;
-        net::co_spawn(exec_, poll(self, *cur), net::detached);
-    }
-    if (active && cur && *active != *cur && !crosschecking_ && now >= next_crosscheck_) {
-        crosschecking_ = true;
-        next_crosscheck_ = now + cfg_.crosscheck_period;
-        net::co_spawn(exec_, crosscheck(self, *active), net::detached);
+    if (!http_only_) {
+        if (cur && !polling_ && now >= next_poll_) {
+            polling_ = true;
+            next_poll_ = now + cfg_.safe_poll;
+            net::co_spawn(exec_, poll(self, *cur), net::detached);
+        }
+        if (active && cur && *active != *cur && !crosschecking_ && now >= next_crosscheck_) {
+            crosschecking_ = true;
+            next_crosscheck_ = now + cfg_.crosscheck_period;
+            net::co_spawn(exec_, crosscheck(self, *active), net::detached);
+        }
     }
 
     schedule_tick();
@@ -407,6 +423,12 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
     o.provider = provider;
     Node& n = nodes_.at(provider);
     if (!n.http) throw std::logic_error("ProviderPool: provider '" + provider + "' has no http_url");
+    for (const char* m : {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber", "eth_chainId"}) {
+        if (body.find(m) != std::string::npos) {
+            ++n.rpc_requests[m];
+            break;
+        }
+    }
 
     rpc::HttpResult r;
     try {

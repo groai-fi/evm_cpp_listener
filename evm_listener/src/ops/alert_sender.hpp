@@ -47,6 +47,9 @@ public:
     /// @brief Fire and forget. Call on the executor's thread (the host's io thread).
     void send(const Alert& alert);
 
+    /// @brief Cancels in-flight webhook requests and retry timers on shutdown.
+    void stop();
+
     /// @brief Alerts delivered with a 2xx answer.
     std::uint64_t sent_total() const;
     /// @brief Alerts given up on after all attempts (evml_alert_send_failures_total).

@@ -462,6 +462,7 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
 
     net::io_context ioc;
     auto pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
+    pool->start_http_only();
     PoolLogSource source(pool, nullptr);
 
     pipeline::SweeperOptions sw_opt;
@@ -479,6 +480,7 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
             if (!ck || !ck->safe || !ck->finalized || !ck->contracts || *ck->finalized > *ck->safe) {
                 std::cerr << "FAIL  checkpoint is missing or incomplete in Redis\n";
                 rc = kExitFailure;
+                pool->stop();
                 ioc.stop();
                 co_return;
             }
@@ -525,6 +527,7 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
                     sw.set_cursors(c_f, start_cursor);
                     if (!(co_await drive([&] { return sw.final_step(c_f); }))) {
                         rc = kExitFailure;
+                        pool->stop();
                         ioc.stop();
                         co_return;
                     }
@@ -537,12 +540,14 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
                         sw.set_cursors(safe_cursor, c_f);
                         if (!(co_await drive([&] { return sw.safe_step(c_s); }))) {
                             rc = kExitFailure;
+                            pool->stop();
                             ioc.stop();
                             co_return;
                         }
                     }
                 }
             }
+            pool->stop();
             ioc.stop();
         },
         net::detached);

@@ -89,11 +89,30 @@ net::awaitable<HttpResponse> HttpClient::get(const std::string& url, const Heade
     co_return co_await request(Method::Get, url, {}, headers);
 }
 
+void HttpClient::cancel() {
+    cancelled_ = true;
+    auto active = closers_;
+    for (auto& [_, fn] : active) {
+        if (fn) fn();
+    }
+}
+
 net::awaitable<HttpResponse> HttpClient::request(Method method, const std::string& url, std::string body,
                                                  const Headers& headers) {
     validate_headers(headers);
     const std::string who = core::env::redact(url);
+    if (cancelled_) throw rpc::TransportError("request cancelled for " + who);
     const rpc::ParsedUrl u = rpc::parse_url(url, rpc::UrlKind::Http);  // throws TransportError with the redacted URL
+
+    struct CloserGuard {
+        std::unordered_map<std::uint64_t, std::function<void()>>& map;
+        std::uint64_t id;
+        CloserGuard(std::unordered_map<std::uint64_t, std::function<void()>>& m, std::uint64_t i, std::function<void()> fn)
+            : map(m), id(i) {
+            map[id] = std::move(fn);
+        }
+        ~CloserGuard() { map.erase(id); }
+    };
 
     http::request<http::string_body> req{method == Method::Post ? http::verb::post : http::verb::get, u.target, 11};
     req.set(http::field::host, u.host_header());
@@ -110,27 +129,47 @@ net::awaitable<HttpResponse> HttpClient::request(Method method, const std::strin
 
     tcp::resolver resolver(exec_);
     tcp::resolver::results_type endpoints;
-    try {
-        endpoints = co_await resolver.async_resolve(u.host, u.port, net::use_awaitable);
-    } catch (const boost::system::system_error& e) {
-        throw rpc::TransportError("resolve failed for " + who + ": " + e.code().message());
+    {
+        CloserGuard rg(closers_, next_closer_id_++, [&resolver] { resolver.cancel(); });
+        try {
+            endpoints = co_await resolver.async_resolve(u.host, u.port, net::use_awaitable);
+        } catch (const boost::system::system_error& e) {
+            throw rpc::TransportError("resolve failed for " + who + ": " + e.code().message());
+        }
     }
+    if (cancelled_) throw rpc::TransportError("request cancelled for " + who);
 
     http::response<http::string_body> res;
     if (!u.tls) {
-        beast::tcp_stream stream(exec_);
-        stream.expires_after(opts_.timeout);
-        co_await phase(who, "connect", stream.async_connect(endpoints, net::use_awaitable));
-        res = co_await exchange(stream, req, opts_.timeout, opts_.max_response_bytes, who);
+        auto stream = std::make_shared<beast::tcp_stream>(exec_);
+        CloserGuard sg(closers_, next_closer_id_++, [stream] {
+            beast::error_code ec;
+            stream->socket().close(ec);
+        });
+        stream->expires_after(opts_.timeout);
+        co_await phase(who, "connect", stream->async_connect(endpoints, net::use_awaitable));
+        res = co_await exchange(*stream, req, opts_.timeout, opts_.max_response_bytes, who);
         beast::error_code ec;
-        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-        stream.close();
+        stream->socket().shutdown(tcp::socket::shutdown_both, ec);
+        stream->close();
     } else {
-        // TLS with the system trust store, peer verification and a hostname check. The context must outlive the stream.
-        ssl::context ctx(ssl::context::tls_client);
-        ctx.set_default_verify_paths();
-        ctx.set_verify_mode(ssl::verify_peer);
-        beast::ssl_stream<beast::tcp_stream> stream(exec_, ctx);
+        // TLS with the system trust store, peer verification and a hostname check. Hold ctx before stream in a
+        // heap-allocated struct so ssl::context is guaranteed to outlive beast::ssl_stream across cancellation/teardown.
+        struct TlsHttpConn {
+            std::shared_ptr<ssl::context> ctx;
+            beast::ssl_stream<beast::tcp_stream> stream;
+            TlsHttpConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
+                : ctx(std::move(c)), stream(ex, *ctx) {}
+        };
+        auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
+        ctx->set_default_verify_paths();
+        ctx->set_verify_mode(ssl::verify_peer);
+        auto conn = std::make_shared<TlsHttpConn>(exec_, std::move(ctx));
+        auto& stream = conn->stream;
+        CloserGuard sg(closers_, next_closer_id_++, [conn] {
+            beast::error_code ec;
+            beast::get_lowest_layer(conn->stream).socket().close(ec);
+        });
         if (!SSL_set_tlsext_host_name(stream.native_handle(), u.host.c_str()))
             throw rpc::TransportError("cannot set TLS SNI for " + who);
         stream.set_verify_callback(ssl::host_name_verification(u.host));

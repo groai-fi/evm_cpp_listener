@@ -273,11 +273,19 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "finality    = \"safe\"", "finality    = \"soon\""), env),
                           ContainsSubstring("must be one of safe|finalized|depth"));
     }
-    SECTION("finality=depth needs chain depth > 0") {
+    SECTION("finality=depth is rejected in v1") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "finality    = \"safe\"", "finality    = \"depth\""), env),
-                          ContainsSubstring("requires [chain].depth > 0"));
+                          ContainsSubstring("finality=depth is not supported in v1"));
         CHECK_THROWS_WITH(parse_with(mutate(base, "default_finality   = \"finalized\"", "default_finality   = \"depth\""), env),
-                          ContainsSubstring("finality=depth requires depth > 0"));
+                          ContainsSubstring("finality=depth is not supported in v1"));
+    }
+    SECTION("redundancy.mode=hedged is rejected in v1") {
+        CHECK_THROWS_WITH(parse_with(mutate(base, "mode                   = \"failover\"", "mode                   = \"hedged\""), env),
+                          ContainsSubstring("mode=hedged is not supported in v1"));
+    }
+    SECTION("start_block < 1 is rejected") {
+        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000", "start_block = 0"), env),
+                          ContainsSubstring("start_block: must be >= 1"));
     }
     SECTION("events stream requires an explicit start_block") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it\n", ""), env),

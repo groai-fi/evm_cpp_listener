@@ -143,7 +143,7 @@ std::vector<const toml::table*> array_tables_of(const toml::table& root, const s
 Finality parse_finality(const Section& s, std::string_view key, const std::string& value) {
     if (value == "safe") return Finality::Safe;
     if (value == "finalized") return Finality::Finalized;
-    if (value == "depth") return Finality::Depth;
+    if (value == "depth") s.fail(std::string(key), "finality=depth is not supported in v1");
     s.fail(std::string(key), "must be one of safe|finalized|depth, got \"" + value + "\"");
 }
 
@@ -329,8 +329,9 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                          "quota_cooldown_s", "reconcile_rps", "reconcile_burst"});
         auto& r = cfg.redundancy;
         r.mode = s.str("mode");
-        // Supported redundancy modes: sequential failover or simultaneous hedged dispatch.
-        if (r.mode != "failover" && r.mode != "hedged") s.fail("mode", "must be failover|hedged, got \"" + r.mode + "\"");
+        // Supported redundancy modes: sequential failover in v1; hedged is reserved.
+        if (r.mode == "hedged") s.fail("mode", "mode=hedged is not supported in v1");
+        if (r.mode != "failover") s.fail("mode", "must be failover|hedged, got \"" + r.mode + "\"");
         r.ws_order = s.strings("ws_order");
         r.getlogs_order = s.strings("getlogs_order");
         r.failover_after = s.uint<std::uint32_t>("failover_after", 1);
@@ -470,7 +471,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
 
             if (const toml::node* n = s.node("start_block")) {
                 if (auto v = n->value<std::int64_t>()) {
-                    if (*v < 0) s.fail("start_block", "must be >= 0");
+                    if (*v < 1) s.fail("start_block", "must be >= 1");
                     c.start_block = static_cast<std::uint64_t>(*v);
                 } else if (auto g = n->value<std::string>(); g && *g == "gate") {
                     // "gate" defers sweep start until finality gate has processed the current head.

@@ -44,8 +44,9 @@ private:
     std::shared_ptr<provider::ProviderPool> pool_;
     const chain::ReorgDetector* ring_;
     rpc::Decoder dec_;                      // used only synchronously (never across a co_await)
-    std::unordered_set<std::string> avoid_; // providers reported bad since the last get_logs
-    std::string logs_provider_;             // who answered the last successful get_logs
+    std::unordered_set<std::string> avoid_;          // providers reported bad since the last get_logs
+    std::unordered_set<std::string> logs_providers_; // every provider that answered get_logs for the current page
+    std::optional<pipeline::BlockRange> last_logs_range_;
     std::unordered_map<std::uint64_t, pipeline::BlockInfo> block_cache_;
     std::deque<std::uint64_t> cache_order_;
 };

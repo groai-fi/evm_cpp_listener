@@ -45,6 +45,11 @@ void PoolLogSource::clear_cache() {
 
 net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range,
                                                             const core::LogFilter& filter) {
+    if (!last_logs_range_ || last_logs_range_->from != range.from || last_logs_range_->to != range.to ||
+        filter.addresses.size() > 1) {
+        logs_providers_.clear();
+        last_logs_range_ = range;
+    }
     std::unordered_set<std::string> tried = std::move(avoid_);  // steer this call away from providers reported bad
     avoid_.clear();
     const bool steered = !tried.empty();
@@ -84,7 +89,7 @@ net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange
             continue;
         }
         r.ok = true;
-        logs_provider_ = o.provider;
+        logs_providers_.insert(o.provider);
         co_return r;
     }
 }
@@ -110,8 +115,7 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uin
         cache_order_.erase(std::remove(cache_order_.begin(), cache_order_.end(), number), cache_order_.end());
     }
 
-    std::unordered_set<std::string> tried;
-    if (!logs_provider_.empty()) tried.insert(logs_provider_);  // independence: never the provider that gave the logs
+    std::unordered_set<std::string> tried = logs_providers_;  // independence: never any provider that gave the logs
     for (;;) {
         const auto p = pool_->pick_getlogs_excluding(tried);
         if (!p) co_return std::nullopt;  // no independent provider left: no quorum

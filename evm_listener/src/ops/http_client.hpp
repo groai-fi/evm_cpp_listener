@@ -7,7 +7,10 @@
 // (core::env::redact), never header values, and request bodies are never echoed.
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,6 +44,9 @@ public:
     /// @brief GET. Same contract as post_json.
     boost::asio::awaitable<HttpResponse> get(const std::string& url, const Headers& headers = {});
 
+    /// @brief Cancels any in-flight resolve or socket operations on this client.
+    void cancel();
+
 private:
     enum class Method { Get, Post };
     boost::asio::awaitable<HttpResponse> request(Method method, const std::string& url, std::string body,
@@ -48,6 +54,9 @@ private:
 
     boost::asio::any_io_executor exec_;
     HttpClientOptions opts_;
+    bool cancelled_{false};
+    std::uint64_t next_closer_id_{1};
+    std::unordered_map<std::uint64_t, std::function<void()>> closers_;
 };
 
 }  // namespace evml::ops
