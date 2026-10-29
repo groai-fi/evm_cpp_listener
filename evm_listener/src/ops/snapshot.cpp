@@ -85,6 +85,7 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         f.trimmed_unread = c.trimmed_unread;
         f.last_delivered_id = c.last_delivered_id;
         f.max_deleted_id = c.max_deleted_id;
+        f.first_entry_id = c.first_entry_id;
         s.consumers.push_back(std::move(f));
     }
 

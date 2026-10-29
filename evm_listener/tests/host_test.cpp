@@ -1247,6 +1247,7 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
         "evml_provider_failovers_total",
         "evml_alerts_fired_total",
         "evml_provider_inconsistency_total",
+        "evml_rpc_requests_total",
         "evml_safe_missed_total",
         "evml_reverify_total",
         "evml_getlogs_throttled_total",
@@ -1301,7 +1302,7 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
     evml::core::log::init("info");
     const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
 
-    // 1. Leader-live with lease-disabled, plus D6 gate-age check (safe_gate_stuck_s = 1).
+    // 1. Leader-live with lease-disabled, plus D6 gate-age check (safe_gate_stuck_s = 3).
     {
         const std::string shard = "host_ready_live_" + random_tag();
         const fs::path spill = fs::temp_directory_path() / ("evml-host-ready-live-" + random_tag());
@@ -1313,7 +1314,7 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
         ns.finalized = c0 + 250;
         evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
         auto toml = host_toml(shard, spill, node.url(), 30000);
-        replace_once(toml, "safe_gate_stuck_s    = 600", "safe_gate_stuck_s    = 1");
+        replace_once(toml, "safe_gate_stuck_s    = 600", "safe_gate_stuck_s    = 3");
         auto cfg = evml::core::Config::parse(toml, "ready_live.toml", provider_env(node.url()));
 
         RunningHost h(std::move(cfg));
@@ -1339,9 +1340,9 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
         CHECK(body.at("cursors").as_object().at("safe").to_number<std::uint64_t>() == c0 + 300);
         CHECK(body.at("cursors").as_object().at("finalized").to_number<std::uint64_t>() == c0 + 250);
 
-        // Let 1.2 s pass without G_s advancing -> D6 gate age expires -> 503.
-        const auto until = std::chrono::steady_clock::now() + 1200ms;
-        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= until; }, 2s);
+        // Let 3.2 s pass without G_s advancing -> D6 gate age expires -> 503.
+        const auto until = std::chrono::steady_clock::now() + 3200ms;
+        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= until; }, 4s);
         CHECK(ops_get(h.ops_port.load(), "/readyz").status == 503);
 
         // Advance G_s -> gate age resets -> 200 again.
@@ -1834,4 +1835,141 @@ TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free s
         CHECK(std::stoull(entries[i].second.at("block_number")) == log_blocks[i]);
         CHECK(entries[i].second.at("type") == "log");
     }
+}
+
+// ---- Stage 4a: WS failover ring continuity & safe-reorg re-sweep cross-check watermarks ----
+
+TEST_CASE("host: WS failover preserves the head ring so a forked head from the backup provider walks and re-verifies",
+          "[integration][host]") {
+    evml::core::log::init("info");
+    const std::string shard = "host_ws_failover_fork_" + random_tag();
+    const fs::path spill = fs::temp_directory_path() / ("evml-ws-failover-fork-" + random_tag());
+    Cleanup cleanup{shard, spill};
+
+    const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
+    net::io_context mock_ioc;
+    NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
+    evml::test::MockHttpServer http(mock_ioc, tunable_node(ns));
+
+    HeadFeed primary_feed, backup_feed;
+    std::atomic<bool> drop_primary{false};
+    evml::test::MockWsServer ws_primary(mock_ioc, [&](evml::test::MockWsConn& c) -> net::awaitable<void> {
+        if (drop_primary.load()) {
+            co_await c.close();
+            co_return;
+        }
+        auto r1 = co_await c.read_req();
+        co_await c.send(rpc_reply(r1.id, "\"0x2105\""));
+        auto r2 = co_await c.read_req();
+        co_await c.send(rpc_reply(r2.id, std::string("\"") + kHeadsSub + "\""));
+        auto r3 = co_await c.read_req();
+        co_await c.send(rpc_reply(r3.id, std::string("\"") + kLogsSub + "\""));
+        while (!drop_primary.load()) {
+            if (primary_feed.out.empty()) {
+                co_await c.sleep(10ms);
+                continue;
+            }
+            const std::string frame = std::move(primary_feed.out.front());
+            primary_feed.out.pop_front();
+            co_await c.send(frame);
+        }
+        co_await c.close();
+    });
+    evml::test::MockWsServer ws_backup(mock_ioc, head_script(backup_feed));
+
+    const auto env_lookup = [&](const std::string& k) -> std::string {
+        if (k.rfind("BASE_RPC_URL", 0) == 0) return http.url();
+        if (k == "BASE_WSS_URL_QUICKNODE") return ws_primary.url();
+        if (k == "BASE_WSS_URL") return ws_backup.url();
+        if (k.rfind("BASE_WSS_URL", 0) == 0) return "ws://127.0.0.1:9/";
+        if (k == "EVML_HOST_ID") return "test-host";
+        return "";
+    };
+    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, http.url(), 30000), "ws_failover_fork.toml", env_lookup));
+    h.start();
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE_FALSE(h.threw.load());
+
+    // Seed the ring on quicknode (ws_primary) with canonical branch 'a' across c0 + 297 .. c0 + 305.
+    for (auto n = c0 + 297; n <= c0 + 305; ++n) {
+        primary_feed.out.push_back(head_msg(n, hx('a', n), hx('a', n - 1)));
+    }
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return primary_feed.out.empty(); }, 10s));
+    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    const int before = ns.getlogs_calls;
+
+    // Prepare branch 'b' forking off 'a' at c0 + 298 (below C_s = c0 + 300) for blocks c0 + 299 .. c0 + 305,
+    // and queue head c0 + 306 on branch 'b' on the backup WS server (infura).
+    for (auto n = c0 + 299; n <= c0 + 305; ++n) {
+        ns.blocks[n] = head_json(n, hx('b', n), n == c0 + 299 ? hx('a', c0 + 298) : hx('b', n - 1));
+    }
+    backup_feed.out.push_back(head_msg(c0 + 306, hx('b', c0 + 306), hx('b', c0 + 305)));
+
+    // Drop quicknode WS so the pool fails over to infura (ws_backup), which immediately delivers head c0 + 306 on 'b'.
+    drop_primary = true;
+    const bool reverified =
+        evml::test::run_until(mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 30s);
+    REQUIRE_FALSE(h.threw.load());
+    REQUIRE(reverified);
+
+    std::vector<std::uint64_t> expect;
+    for (auto n = c0 + 305; n >= c0 + 299; --n) expect.push_back(n);
+    CHECK(ns.block_requests == expect);
+
+    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !h.status().reverify_pending && h.live(); }, 15s));
+    h.finish();
+    CHECK(h.exit_code.load() == 0);
+}
+
+TEST_CASE("host: a safe reorg rewinding C_s and re-sweeping previously reconciled blocks does not increment ws_missed",
+          "[integration][host]") {
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+    r.quiet();
+
+    // Deliver a log at c0 + 310 over both WS and HTTP getLogs, and advance G_s to c0 + 320 so [c0 + 301, c0 + 320] is
+    // swept and reconciled once cleanly (ws_missed == 0).
+    const std::uint64_t n_fork = r.c0 + 305;
+    const std::uint64_t n_kept = r.c0 + 310;
+    const std::string h_fork_a = hx('a', n_fork);
+    const std::string h_fork_b = hx('b', n_fork);
+    const std::string h_kept = hx('a', n_kept);
+    const std::string log_fork_a = cfg_log_json(r.host.cfg, n_fork, h_fork_a, 0);
+    const std::string log_fork_b = cfg_log_json(r.host.cfg, n_fork, h_fork_b, 1);
+    const std::string log_kept = cfg_log_json(r.host.cfg, n_kept, h_kept, 0);
+
+    r.ns.blocks[n_fork] = head_json(n_fork, h_fork_a, hx('a', n_fork - 1));
+    r.ns.blocks[n_kept] = head_json(n_kept, h_kept, hx('a', n_kept - 1));
+    r.ns.logs.emplace_back(n_fork, log_fork_a);
+    r.ns.logs.emplace_back(n_kept, log_kept);
+    r.feed.out.push_back(logs_msg(log_fork_a));
+    r.feed.out.push_back(logs_msg(log_kept));
+    REQUIRE(r.until([&] { return r.feed.out.empty(); }, 10s));
+    r.wait(300ms);
+
+    r.ns.safe = r.c0 + 320;
+    REQUIRE(r.until([&] { return r.host.status().c_s >= r.c0 + 320 || r.host.threw.load(); }, 30s));
+    REQUIRE_FALSE(r.host.threw.load());
+    r.quiet();
+    CHECK(r.host.ws_missed.load() == 0);
+    CHECK(r.host.ws_extra.load() == 0);
+
+    // Trigger a safe reorg at n_fork = c0 + 305 (replacing log_fork_a with log_fork_b) while log_kept at c0 + 310
+    // remains in getLogs. reverify_released() rewinds C_s to c0 + 304 and the next safe_step re-sweeps [c0 + 305, c0 + 319].
+    r.ns.blocks[n_fork] = head_json(n_fork, h_fork_b, hx('a', n_fork - 1));
+    r.ns.logs.clear();
+    r.ns.logs.emplace_back(n_fork, log_fork_b);
+    r.ns.logs.emplace_back(n_kept, log_kept);
+    r.ns.safe = r.c0 + 319;  // safe regression triggers on_safe_reorg_signal -> reverify_released -> rewind_safe(c0 + 304)
+
+    REQUIRE(r.until([&] { return r.host.status().safe_reorgs >= 1 && r.host.status().c_s >= r.c0 + 319; }, 30s));
+    REQUIRE_FALSE(r.host.threw.load());
+    r.quiet();
+    CHECK(r.host.ws_missed.load() == 0);
+    CHECK(r.host.ws_extra.load() == 0);
+
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
 }

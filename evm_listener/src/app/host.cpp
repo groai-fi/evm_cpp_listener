@@ -87,6 +87,9 @@ struct Runtime {
     std::optional<std::uint64_t> last_g_s;
     std::optional<std::chrono::steady_clock::time_point> last_g_s_advance;
     std::optional<std::uint64_t> ws_live_from_block;
+    bool ws_reseed_live_watermark{false};
+    std::uint64_t ws_reconciled_safe_to{0};
+    std::uint64_t ws_reconciled_final_to{0};
 };
 
 /// A WS head and the provider that delivered it.
@@ -252,20 +255,19 @@ void Host::init_metrics() {
     metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "safe"}}, 0.0);
     metrics_.gauge("evml_checkpoint_block", "Latest sweep cursor block number", {{"class", "finalized"}}, 0.0);
 
-    for (const auto& p : cfg_.getlogs_chain) {
-        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", p.name}}, 0.0);
+    const auto init_provider_metrics = [this](const std::string& name) {
+        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", name}}, 0.0);
         metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                               {{"provider", p.name}}, 0);
+                               {{"provider", name}}, 0);
         metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
-                               {{"provider", p.name}}, 0);
-    }
-    for (const auto& p : cfg_.ws_chain) {
-        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", p.name}}, 0.0);
-        metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                               {{"provider", p.name}}, 0);
-        metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
-                               {{"provider", p.name}}, 0);
-    }
+                               {{"provider", name}}, 0);
+        for (const char* m : {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber", "eth_chainId"}) {
+            metrics_.counter_total("evml_rpc_requests_total", "Total HTTP JSON-RPC requests sent to provider",
+                                   {{"provider", name}, {"method", m}}, 0);
+        }
+    };
+    for (const auto& p : cfg_.getlogs_chain) init_provider_metrics(p.name);
+    for (const auto& p : cfg_.ws_chain) init_provider_metrics(p.name);
     if (cfg_.sink.consumer_groups.empty()) {
         metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry",
                        {{"stream", "events"}, {"group", "none"}}, 0.0);
@@ -335,9 +337,13 @@ void Host::update_metrics() {
 
         for (const auto& p : rt_->pool->health()) {
             metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                                   {{"provider", p.name}}, rt_->pool->inconsistency_total(p.name));
+                                    {{"provider", p.name}}, rt_->pool->inconsistency_total(p.name));
             metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
                                    {{"provider", p.name}}, rt_->pool->throttled_total(p.name));
+            for (const auto& [method, count] : rt_->pool->rpc_requests_total(p.name)) {
+                metrics_.counter_total("evml_rpc_requests_total", "Total HTTP JSON-RPC requests sent to provider",
+                                       {{"provider", p.name}, {"method", method}}, count);
+            }
         }
 
         if (leader) {
@@ -670,7 +676,8 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
         h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to,
                                         std::string_view reason) {
-            // A new WS provider re-seeds the ring (plan 3.6); any walk on the old provider is abandoned.
+            // Keep the head ring across WS switches so the first head from the new provider checks continuity at the
+            // join (plan 3.6); any in-flight walk on the old provider is abandoned via bump_head_epoch().
             if (!rt_) return;
             log::info("pool", "ws active provider changed",
                       {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
@@ -680,7 +687,15 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
                 if (reason == "failover") ++provider_failovers_total_;
                 snapshots_.push_event(ops::provider_failover_event(from, *to, reason));
             }
-            rt_->ring.reset();
+            if (!to) {
+                rt_->ws_live_from_block.reset();
+                rt_->ws_reseed_live_watermark = true;
+            } else if (rt_->ws_live_from_block) {
+                if (rt_->driver) {
+                    rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, rt_->driver->status().c_s + 1);
+                }
+                rt_->ws_reseed_live_watermark = true;
+            }
             if (rt_->source) rt_->source->clear_cache();
             bump_head_epoch();
         };
@@ -716,7 +731,8 @@ net::awaitable<void> Host::pipeline_loop() {
     try {
         for (;;) {
             const auto r = co_await driver.tick();
-            if (!rt_->ws_live_from_block && driver.status().state == pipeline::PipelineState::Live) {
+            if (!rt_->ws_live_from_block && driver.status().state == pipeline::PipelineState::Live &&
+                rt_->pool && rt_->pool->active_ws()) {
                 rt_->ws_live_from_block = driver.status().c_s + 1;
             }
             if (r.done || stopping_ || demoting_) break;
@@ -795,21 +811,29 @@ void Host::on_sweep_page(core::Finality kind, const pipeline::BlockRange& range,
         const auto* route = cfg_.route(l.address, l.topics.at(0));  // stage() only admits routed logs
         return route != nullptr && (route->finality == core::Finality::Safe) == want_safe;
     };
-    // Historical catch-up pages below ws_live_from_block cannot be delivered by eth_subscribe("logs"), which only
-    // streams new blocks from subscription time onwards. Evict any staged entries in that range without counting misses.
-    if (!rt_->ws_live_from_block || range.to < *rt_->ws_live_from_block) {
+    std::uint64_t& reconciled_to = want_safe ? rt_->ws_reconciled_safe_to : rt_->ws_reconciled_final_to;
+    // Historical catch-up pages below ws_live_from_block, or blocks already reconciled before a safe reorg rewound the
+    // cursor, cannot be cross-checked against PendingBuffer again. Evict any staged entries in that range without counting misses.
+    if (!rt_->ws_live_from_block) {
+        reconciled_to = std::max(reconciled_to, range.to);
+        (void)rt_->pending.reconcile(range.from, range.to, logs, in_scope);
+        return;
+    }
+    const std::uint64_t check_from = std::max(*rt_->ws_live_from_block, reconciled_to + 1);
+    reconciled_to = std::max(reconciled_to, range.to);
+    if (range.to < check_from) {
         (void)rt_->pending.reconcile(range.from, range.to, logs, in_scope);
         return;
     }
     pipeline::BlockRange check_range = range;
     const std::vector<rpc::Log>* check_logs = &logs;
     std::vector<rpc::Log> filtered_logs;
-    if (range.from < *rt_->ws_live_from_block) {
-        (void)rt_->pending.reconcile(range.from, *rt_->ws_live_from_block - 1, {}, in_scope);
-        check_range.from = *rt_->ws_live_from_block;
+    if (range.from < check_from) {
+        (void)rt_->pending.reconcile(range.from, check_from - 1, {}, in_scope);
+        check_range.from = check_from;
         filtered_logs.reserve(logs.size());
         for (const auto& l : logs) {
-            if (l.block_number >= *rt_->ws_live_from_block) filtered_logs.push_back(l);
+            if (l.block_number >= check_from) filtered_logs.push_back(l);
         }
         check_logs = &filtered_logs;
     }
@@ -838,6 +862,14 @@ void Host::on_head(const rpc::Head& h, const std::string& provider) {
 }
 
 void Host::handle_head(const HeadEvent& e) {
+    if (rt_->ws_reseed_live_watermark) {
+        rt_->ws_reseed_live_watermark = false;
+        if (rt_->ws_live_from_block) {
+            rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number);
+        } else if (rt_->driver && rt_->driver->status().state == pipeline::PipelineState::Live) {
+            rt_->ws_live_from_block = std::max(rt_->driver->status().c_s + 1, e.ref.number);
+        }
+    }
     auto& ring = rt_->ring;
     if (const auto top = ring.top(); top && e.ref.number > *top + kMaxWalkBlocks) {
         resync_ring(e.ref, "head gap of " + std::to_string(e.ref.number - *top) + " blocks");
@@ -857,7 +889,7 @@ void Host::resync_ring(const chain::BlockRef& head, const std::string& why) {
     if (rt_->source) rt_->source->clear_cache();
     rt_->pending.purge_from(0);  // the old branch is unknown: staged logs cannot be trusted
     if (rt_->ws_live_from_block) {
-        rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, head.number);
+        rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, head.number + 1);
     }
     rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
 }
@@ -917,10 +949,15 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                        {"depth", std::to_string(info->depth)},
                        {"old_top", std::to_string(info->old_top)},
                        {"c_s", std::to_string(c_s)}});
-            // depth 0 = a gap that was only filled: nothing was replaced.
+            // depth 0 = a gap that was only filled: nothing was replaced, but WS missed the gap blocks.
             if (info->depth > 0) {
                 rt_->pending.purge_from(info->fork_point + 1);  // orphaned branch's WS logs
                 if (rt_->source) rt_->source->clear_cache();
+                if (rt_->ws_live_from_block) {
+                    rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number + 1);
+                }
+            } else if (e.ref.number > info->old_top && rt_->ws_live_from_block) {
+                rt_->ws_live_from_block = std::max(*rt_->ws_live_from_block, e.ref.number + 1);
             }
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
                 log::warn("host", "head fork below C_s",
@@ -1158,6 +1195,8 @@ void Host::finish() {
     freeze_timer_.cancel();
     sleep_timer_.cancel();
     if (ops_) ops_->stop();
+    if (alerts_) alerts_->stop();
+    if (deadman_) deadman_->stop();
     if (rt_ && rt_->pool) rt_->pool->stop();
     grace_timer_.expires_after(kShutdownGrace);
     grace_timer_.async_wait([this](const boost::system::error_code&) { ioc_.stop(); });

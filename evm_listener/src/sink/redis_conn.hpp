@@ -16,9 +16,6 @@ namespace evml::sink {
 // The transport failed (connect refused, timeout, closed, or the server is temporarily unable to serve: OOM, LOADING,
 // BUSY). Whatever was in flight has an UNKNOWN outcome: it may or may not have landed. The sink re-sends it (dedup in
 // emit.lua makes that safe) once the connection is back (plan 4.4, P1).
-// The transport failed (connect refused, timeout, closed, or the server is temporarily unable to serve: OOM, LOADING,
-// BUSY). Whatever was in flight has an UNKNOWN outcome: it may or may not have landed. The sink re-sends it (dedup in
-// emit.lua makes that safe) once the connection is back (plan 4.4, P1).
 /// @brief Transport-level failure exception (timeout, disconnect, connection refused, or server busy).
 struct ConnError : std::runtime_error {
     using std::runtime_error::runtime_error;

@@ -11,9 +11,6 @@ namespace evml::sink {
 // Consumer-group lag probe (plan 4.10). MINID retention trims entries whether or not a consumer read them, so the
 // listener watches the groups the downstream bots created.
 
-// Consumer-group lag probe (plan 4.10). MINID retention trims entries whether or not a consumer read them, so the
-// listener watches the groups the downstream bots created.
-
 // "<ms>-<seq>", the id of a stream entry. Redis assigns ids from its own clock, so `ms` is Redis arrival time.
 /// @brief Parses and compares Redis stream entry identifiers format "<millisecond_timestamp>-<sequence>".
 struct StreamId {
@@ -57,6 +54,7 @@ struct ConsumerLag {
     bool trimmed_unread{false};             // entries were trimmed before this group read or acked them: data loss happened
     std::string last_delivered_id;          // XINFO GROUPS last-delivered-id
     std::string max_deleted_id;             // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
+    std::string first_entry_id;             // XINFO STREAM first-entry id (empty on an empty stream)
     std::uint64_t probed_at_ms{0};          // listener wall clock when the probe ran (set by the sink): age of this snapshot
 };
 

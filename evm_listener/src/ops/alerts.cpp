@@ -73,6 +73,7 @@ void AlertEngine::reset_leader_state() {
     for (auto it = firing_.begin(); it != firing_.end();) it = it->second.leader_only ? firing_.erase(it) : std::next(it);
     unchanged_.clear();
     sustained_since_.clear();
+    suppressed_inconsistent_.clear();
     late_samples_.clear();
     trimmed_seen_.clear();
 }
@@ -249,13 +250,32 @@ void AlertEngine::emit_event(const OpsSnapshot& s, const AlertEvent& e, std::vec
     const auto info = event_info(e.kind);
     if (!info.host_local && !s.leader) return;  // D7
     std::string key = info.title;
+    json::object details = e.details;
+    std::uint64_t inc_delta = 0;
+    if (e.kind == AlertEvent::Kind::ProviderInconsistent) {
+        if (const auto* p = details.if_contains("new_inconsistent")) {
+            if (p->is_uint64()) inc_delta = p->as_uint64();
+            else if (p->is_int64() && p->as_int64() > 0) inc_delta = static_cast<std::uint64_t>(p->as_int64());
+        }
+    }
     if (!e.subject.empty()) {
         key += ":" + e.subject;
         const auto it = event_last_.find(key);
-        if (it != event_last_.end() && s.now - it->second < std::chrono::seconds(t_.event_rate_limit_s)) return;
+        if (it != event_last_.end() && s.now - it->second < std::chrono::seconds(t_.event_rate_limit_s)) {
+            if (e.kind == AlertEvent::Kind::ProviderInconsistent && inc_delta > 0) {
+                suppressed_inconsistent_[key] += inc_delta;
+            }
+            return;
+        }
         event_last_[key] = s.now;
+        if (e.kind == AlertEvent::Kind::ProviderInconsistent) {
+            if (auto sit = suppressed_inconsistent_.find(key); sit != suppressed_inconsistent_.end()) {
+                if (sit->second > 0) details["new_inconsistent"] = inc_delta + sit->second;
+                suppressed_inconsistent_.erase(sit);
+            }
+        }
     }
-    out.push_back(Alert{info.severity, info.title, e.message, e.details, std::move(key), false});
+    out.push_back(Alert{info.severity, info.title, e.message, std::move(details), std::move(key), false});
 }
 
 std::vector<Alert> AlertEngine::evaluate(const OpsSnapshot& s) {
@@ -296,9 +316,16 @@ std::vector<Alert> AlertEngine::evaluate(const OpsSnapshot& s) {
             if (!f.trimmed_unread) {
                 trimmed_seen_.erase(id);
             } else if (trimmed_seen_.insert(id).second) {
+                const std::string& effective_max_deleted =
+                    (f.max_deleted_id.empty() || f.max_deleted_id == "0-0") && !f.first_entry_id.empty()
+                        ? f.first_entry_id
+                        : f.max_deleted_id;
                 AlertEvent ev;
                 ev.message = "entries were trimmed before group " + f.group + " read them";
-                ev.details = {{"stream", f.stream}, {"group", f.group}, {"last_delivered_id", f.last_delivered_id}, {"max_deleted_id", f.max_deleted_id}};
+                ev.details = {{"stream", f.stream},
+                              {"group", f.group},
+                              {"last_delivered_id", f.last_delivered_id},
+                              {"max_deleted_id", effective_max_deleted}};
                 const std::string key = "Consumer Entries Trimmed:" + id;
                 const auto it = event_last_.find(key);
                 if (it != event_last_.end() && s.now - it->second < std::chrono::seconds(t_.event_rate_limit_s)) continue;

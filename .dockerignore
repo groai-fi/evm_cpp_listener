@@ -1,7 +1,14 @@
 .git
-build
+.github
 .devcontainer
+.agent
+.agents
+.claude
+build
 doc
+openspec
+*.md
+.luacheckrc
 **/.env
 **/.env.*
 !**/.env.example

@@ -398,11 +398,19 @@ TEST_CASE("alerts: consumer rows: lagging, near trim, missing group, unknown sna
     CHECK(out[0].title == "Consumer Entries Trimmed");
     CHECK(out[0].severity == Severity::Critical);
     CHECK(out[0].details.at("last_delivered_id").as_string() == "1-1");
+    CHECK(out[0].details.at("max_deleted_id").as_string() == "2-2");
     CHECK(e3.evaluate(trimmed(10, true)).empty());
     CHECK(e3.evaluate(trimmed(20, false)).empty());
     CHECK(e3.evaluate(trimmed(30, true)).empty());  // a new occurrence inside the 15 min limit is dropped
     CHECK(titles(e3.evaluate(trimmed(1000, false))).empty());
-    CHECK(titles(e3.evaluate(trimmed(1010, true))) == std::vector<std::string>{"Consumer Entries Trimmed"});
+    // When MINID trim leaves max_deleted_id as "0-0", Consumer Entries Trimmed falls back to first_entry_id.
+    auto trimmed_minid = trimmed(1010, true);
+    trimmed_minid.consumers[0].max_deleted_id = "0-0";
+    trimmed_minid.consumers[0].first_entry_id = "9-9";
+    out = e3.evaluate(trimmed_minid);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].title == "Consumer Entries Trimmed");
+    CHECK(out[0].details.at("max_deleted_id").as_string() == "9-9");
 }
 
 TEST_CASE("alerts: events fire once per occurrence; provider and group names are rate-limited per 15 min", "[unit][alerts]") {
@@ -423,20 +431,28 @@ TEST_CASE("alerts: events fire once per occurrence; provider and group names are
     CHECK(titles(out) == std::vector<std::string>{"Safe Reorg", "Safe Reorg"});
     CHECK(out[0].severity == Severity::Critical);
 
-    // Provider Inconsistent: one per provider per 15 min.
+    // Provider Inconsistent: one per provider per 15 min, preserving suppressed new_inconsistent deltas across the cooldown.
+    auto inc_event = [](const std::string& provider, std::uint64_t delta, std::uint64_t total) -> AlertEvent {
+        auto ev = event(AlertEvent::Kind::ProviderInconsistent, provider);
+        ev.details = {{"provider", provider}, {"new_inconsistent", delta}, {"total", total}};
+        return ev;
+    };
     s = snap(30s);
-    s.events = {event(AlertEvent::Kind::ProviderInconsistent, "infura"), event(AlertEvent::Kind::ProviderInconsistent, "infura"),
-                event(AlertEvent::Kind::ProviderInconsistent, "ankr")};
+    s.events = {inc_event("infura", 1, 1), inc_event("infura", 2, 3), inc_event("ankr", 1, 1)};
     out = e.evaluate(s);
     REQUIRE(out.size() == 2);
     CHECK(out[0].key == "Provider Inconsistent:infura");
+    CHECK(out[0].details.at("new_inconsistent").as_uint64() == 1);
     CHECK(out[1].key == "Provider Inconsistent:ankr");
     s = snap(100s);
-    s.events = {event(AlertEvent::Kind::ProviderInconsistent, "infura")};
-    CHECK(e.evaluate(s).empty());
+    s.events = {inc_event("infura", 3, 6)};
+    CHECK(e.evaluate(s).empty());  // suppressed during 15-min window (accumulated suppressed delta = 2 + 3 = 5)
     s = snap(931s);
-    s.events = {event(AlertEvent::Kind::ProviderInconsistent, "infura")};
-    CHECK(e.evaluate(s).size() == 1);
+    s.events = {inc_event("infura", 1, 7)};
+    out = e.evaluate(s);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].details.at("new_inconsistent").as_uint64() == 6);  // 5 suppressed + 1 new = full delta since last emitted alert
+    CHECK(out[0].details.at("total").as_uint64() == 7);
 
     // The remaining kinds and their severities.
     s = snap(940s);

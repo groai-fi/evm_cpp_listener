@@ -87,6 +87,7 @@ struct ConsumerFact {
     bool trimmed_unread{false};
     std::string last_delivered_id;
     std::string max_deleted_id;
+    std::string first_entry_id;
 };
 
 struct RedisMisconfig {
@@ -178,6 +179,7 @@ private:
     std::map<std::string, std::pair<std::uint64_t, AlertClock::time_point>> unchanged_;
     std::map<std::string, AlertClock::time_point> sustained_since_;
     std::map<std::string, AlertClock::time_point> event_last_;
+    std::map<std::string, std::uint64_t> suppressed_inconsistent_;
     std::deque<std::pair<AlertClock::time_point, std::uint64_t>> late_samples_;
     std::set<std::string> trimmed_seen_;
 };
