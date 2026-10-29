@@ -11,7 +11,6 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
-#include <openssl/ssl.h>
 #ifdef __linux__
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -21,6 +20,7 @@
 #include "core/env.hpp"
 #include "core/log.hpp"
 #include "rpc/blocking_http.hpp"
+#include "rpc/tls_client.hpp"
 
 namespace evml::rpc {
 
@@ -30,20 +30,6 @@ namespace http = beast::http;
 namespace websocket = beast::websocket;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
-
-// Friend of WsSession: the only door through which the cpp-local protocol code touches session state.
-/// @brief Friend accessor giving anonymous namespace coroutine helpers controlled access to WsSession internals.
-struct WsSessionAccess {
-    static const WsSessionConfig& cfg(const WsSession& s) { return s.cfg_; }
-    static const WsHandlers& handlers(const WsSession& s) { return s.handlers_; }
-    static const ParsedUrl& url(const WsSession& s) { return s.url_; }
-    static const std::string& redacted(const WsSession& s) { return s.redacted_; }
-    static const net::any_io_executor& exec(const WsSession& s) { return s.exec_; }
-    static void set_closer(WsSession& s, std::function<void()> f) { s.closer_ = std::move(f); }
-    static void close_socket(WsSession& s) { s.close_socket(); }
-    static void mark_ready(WsSession& s) { s.ready_at_ = std::chrono::steady_clock::now(); }
-    static void bump_unknown(WsSession& s) { ++s.unknown_msgs_; }
-};
 
 namespace {
 
@@ -67,21 +53,21 @@ std::string describe(const boost::system::error_code& ec) {
     return ec.message();
 }
 
-/// @brief Per-request deadline timer that forcefully aborts socket on timeout.
+/// @brief Per-request deadline timer that invokes on_timeout when the deadline expires.
 /// Threading & Safety:
 /// - Uses shared active_ flag to guard against stale timer cancellations firing after operation succeeded.
 class Deadline {
 public:
-    Deadline(const net::any_io_executor& ex, std::chrono::milliseconds d, std::weak_ptr<WsSession> w)
+    Deadline(const net::any_io_executor& ex, std::chrono::milliseconds d, std::function<void()> on_timeout)
         : timer_(ex), active_(std::make_shared<bool>(true)), hit_(std::make_shared<bool>(false)) {
         timer_.expires_after(d);
         // Asynchronously wait for deadline expiration
-        timer_.async_wait([active = active_, hit = hit_, w](const boost::system::error_code& ec) {
+        timer_.async_wait([active = active_, hit = hit_, on_timeout = std::move(on_timeout)](
+                              const boost::system::error_code& ec) {
             // Bail if canceled or operation completed in time
             if (ec || !*active) return;
             *hit = true;
-            // Forcefully close socket via session accessor
-            if (auto s = w.lock()) WsSessionAccess::close_socket(*s);
+            if (on_timeout) on_timeout();
         });
     }
     ~Deadline() {
@@ -99,11 +85,11 @@ private:
     std::shared_ptr<bool> hit_;
 };
 
-/// @brief RAII guard installing and tearing down socket closer closure on WsSession.
+/// @brief RAII guard installing and tearing down a socket closer closure on a target slot.
 struct CloserGuard {
-    CloserGuard(WsSession& s, std::function<void()> f) : s_(s) { WsSessionAccess::set_closer(s_, std::move(f)); }
-    ~CloserGuard() { WsSessionAccess::set_closer(s_, nullptr); }
-    WsSession& s_;
+    CloserGuard(std::function<void()>& slot, std::function<void()> f) : slot_(slot) { slot_ = std::move(f); }
+    ~CloserGuard() { slot_ = nullptr; }
+    std::function<void()>& slot_;
 };
 
 /// @brief Wraps asynchronous coroutine phase, translating system errors to SessionFail.
@@ -147,13 +133,16 @@ void tune_socket(tcp::socket& sock, const std::string& who) {
 
 /// @brief Ephemeral per-session protocol context tracking subscriptions and decoder state.
 struct Proto {
-    WsSession& s;
-    std::weak_ptr<WsSession> weak;
-    Decoder dec;
-    beast::flat_buffer buf;
+    const WsSessionConfig& cfg;
+    const WsHandlers& handlers;
+    const net::any_io_executor& exec;
+    std::function<void()> on_timeout;
+    std::uint64_t& unknown_msgs;
+    Decoder dec{};
+    beast::flat_buffer buf{};
     std::uint64_t next_id{1};
-    std::optional<std::string> heads_sub;
-    std::optional<std::string> logs_sub;
+    std::optional<std::string> heads_sub{};
+    std::optional<std::string> logs_sub{};
 };
 
 /// @brief Classifies JSON-RPC error payload and throws SessionFail with appropriate category.
@@ -187,18 +176,17 @@ std::string_view frame_view(const Proto& p) {
 
 /// @brief Routes decoded notification to on_head or on_log handler based on subscription ID.
 void dispatch(Proto& p, Notification&& n) {
-    const auto& h = WsSessionAccess::handlers(p.s);
     // Route 1: newHeads notification
     if (const auto* head = std::get_if<Head>(&n.payload); head && p.heads_sub && n.subscription == *p.heads_sub) {
-        h.on_head(*head);
+        p.handlers.on_head(*head);
     } else if (const auto* lg = std::get_if<Log>(&n.payload); lg && p.logs_sub && n.subscription == *p.logs_sub) {
         // Route 2: filtered logs notification
-        h.on_log(*lg);
+        p.handlers.on_log(*lg);
     } else {
         // Drop notifications for subscription IDs not recognized by this session (e.g. stale server frames)
-        WsSessionAccess::bump_unknown(p.s);
+        ++p.unknown_msgs;
         core::log::warn("ws", "notification for an unknown subscription dropped",
-                        {{"provider", p.s.name()}, {"subscription", n.subscription}});
+                        {{"provider", p.cfg.name}, {"subscription", n.subscription}});
     }
 }
 
@@ -219,7 +207,7 @@ net::awaitable<Response> request(Ws& ws, Proto& p, std::uint64_t id, const std::
     // Send request frame
     co_await send_text(ws, req);
     // Install request deadline timer
-    Deadline dl(WsSessionAccess::exec(p.s), timeout, p.weak);
+    Deadline dl(p.exec, timeout, p.on_timeout);
     for (;;) {
         co_await read_frame(ws, p, &dl, what);
         auto msg = p.dec.decode(frame_view(p));
@@ -238,32 +226,37 @@ net::awaitable<Response> request(Ws& ws, Proto& p, std::uint64_t id, const std::
 /// @brief Issues an eth_subscribe request and extracts subscription ID string.
 template <class Ws>
 net::awaitable<std::string> subscribe(Ws& ws, Proto& p, const std::string& req, std::uint64_t id, const std::string& what) {
-    const auto& cfg = WsSessionAccess::cfg(p.s);
-    auto r = co_await request(ws, p, id, req, cfg.subscribe_timeout, "subscribe ACK (" + what + ")");
+    auto r = co_await request(ws, p, id, req, p.cfg.subscribe_timeout, "subscribe ACK (" + what + ")");
     if (!r.ok) throw_rpc_error(r.error, "subscribe " + what);
     co_return p.dec.parse_string(r.result_raw);
 }
 
+}  // namespace
+
 /// @brief Drives WebSocket session lifecycle: upgrade, chain ID check, subscriptions, and stream loop.
 template <class Ws>
-net::awaitable<void> serve(WsSession& s, Ws& ws) {
-    const auto& cfg = WsSessionAccess::cfg(s);
-    const auto& url = WsSessionAccess::url(s);
-    Proto p{s, s.weak_from_this(), {}, {}, 1, std::nullopt, std::nullopt};
+net::awaitable<void> WsSession::serve(Ws& ws) {
+    auto weak = weak_from_this();
+    Proto p{cfg_, handlers_, exec_,
+            [weak] {
+                if (auto s = weak.lock()) s->close_socket();
+            },
+            unknown_msgs_};
 
     // Configure maximum frame size limit
     ws.read_message_max(kMaxMessageBytes);
     // Set custom User-Agent in HTTP upgrade handshake
     ws.set_option(websocket::stream_base::decorator(
-        [ua = cfg.user_agent](websocket::request_type& req) { req.set(http::field::user_agent, ua); }));
+        [ua = cfg_.user_agent](websocket::request_type& req) { req.set(http::field::user_agent, ua); }));
     beast::get_lowest_layer(ws).expires_never();  // WS-level timeouts take over from here
     // Enable automated keepalive ping frames and idle detection timeout
-    ws.set_option(websocket::stream_base::timeout{cfg.handshake_timeout, cfg.idle_timeout, /*keep_alive_pings=*/true});
+    ws.set_option(
+        websocket::stream_base::timeout{cfg_.handshake_timeout, cfg_.idle_timeout, /*keep_alive_pings=*/true});
 
     websocket::response_type res;
     try {
         // Perform WebSocket upgrade handshake
-        co_await ws.async_handshake(res, url.host_header(), url.target, net::use_awaitable);
+        co_await ws.async_handshake(res, url_.host_header(), url_.target, net::use_awaitable);
     } catch (const boost::system::system_error& e) {
         // Inspect HTTP upgrade rejection (401, 403, 429) and classify failure
         if (e.code() == websocket::error::upgrade_declined) {
@@ -285,27 +278,27 @@ net::awaitable<void> serve(WsSession& s, Ws& ws) {
     // Phase 1: Verify chain ID (FailKind::ConfigFatal if mismatched)
     {
         const auto id = p.next_id++;
-        auto r = co_await request(ws, p, id, build_chain_id(id), cfg.request_timeout, "eth_chainId response");
+        auto r = co_await request(ws, p, id, build_chain_id(id), cfg_.request_timeout, "eth_chainId response");
         if (!r.ok) throw_rpc_error(r.error, "eth_chainId");
         const auto got = p.dec.parse_quantity(r.result_raw);
-        if (got != cfg.expected_chain_id) {
+        if (got != cfg_.expected_chain_id) {
             throw SessionFail(FailKind::ConfigFatal, "chain id mismatch: provider reports " + std::to_string(got) +
-                                                         ", config expects " + std::to_string(cfg.expected_chain_id));
+                                                         ", config expects " + std::to_string(cfg_.expected_chain_id));
         }
     }
     // Phase 2: Establish subscriptions
-    if (cfg.subscribe_heads) {
+    if (cfg_.subscribe_heads) {
         const auto id = p.next_id++;
         p.heads_sub = co_await subscribe(ws, p, build_subscribe(id, "newHeads"), id, "newHeads");
     }
-    if (cfg.logs) {
+    if (cfg_.logs) {
         const auto id = p.next_id++;
-        p.logs_sub = co_await subscribe(ws, p, build_subscribe_logs(id, *cfg.logs), id, "logs");
+        p.logs_sub = co_await subscribe(ws, p, build_subscribe_logs(id, *cfg_.logs), id, "logs");
     }
 
     // Phase 3: Transition to Ready state and enter infinite event consumption loop
-    WsSessionAccess::mark_ready(s);
-    WsSessionAccess::handlers(s).on_ready();
+    ready_at_ = std::chrono::steady_clock::now();
+    handlers_.on_ready();
     for (;;) {
         co_await read_frame(ws, p, nullptr, "stream data");
         auto msg = p.dec.decode(frame_view(p));
@@ -318,36 +311,32 @@ net::awaitable<void> serve(WsSession& s, Ws& ws) {
 }
 
 /// @brief Establishes underlying TCP/TLS connection, socket tuning, and hands off to serve().
-net::awaitable<void> session_main(std::shared_ptr<WsSession> self) {
-    WsSession& s = *self;
-    const auto& cfg = WsSessionAccess::cfg(s);
-    const auto& url = WsSessionAccess::url(s);
-    const auto& ex = WsSessionAccess::exec(s);
-    const std::string who = cfg.name + " " + WsSessionAccess::redacted(s);
+net::awaitable<void> WsSession::session_main() {
+    const std::string who = cfg_.name + " " + redacted_;
 
     // Resolve hostname to IP endpoints
-    tcp::resolver resolver(ex);
+    tcp::resolver resolver(exec_);
     tcp::resolver::results_type endpoints;
     {
-        CloserGuard resolve_guard(s, [&resolver] { resolver.cancel(); });
+        CloserGuard resolve_guard(closer_, [&resolver] { resolver.cancel(); });
         try {
-            endpoints = co_await resolver.async_resolve(url.host, url.port, net::use_awaitable);
+            endpoints = co_await resolver.async_resolve(url_.host, url_.port, net::use_awaitable);
         } catch (const boost::system::system_error& e) {
             throw SessionFail(FailKind::Retry, "resolve failed for " + who + ": " + e.code().message());
         }
     }
 
     // Branch 1: Plain unencrypted WebSocket stream (for mock test servers)
-    if (!url.tls) {
-        websocket::stream<beast::tcp_stream> ws(ex);
-        CloserGuard guard(s, [&ws] {
+    if (!url_.tls) {
+        websocket::stream<beast::tcp_stream> ws(exec_);
+        CloserGuard guard(closer_, [&ws] {
             boost::system::error_code ec;
             beast::get_lowest_layer(ws).socket().close(ec);
         });
-        beast::get_lowest_layer(ws).expires_after(cfg.connect_timeout);
+        beast::get_lowest_layer(ws).expires_after(cfg_.connect_timeout);
         co_await phase(who, "connect", beast::get_lowest_layer(ws).async_connect(endpoints, net::use_awaitable));
         tune_socket(beast::get_lowest_layer(ws).socket(), who);
-        co_await serve(s, ws);
+        co_await serve(ws);
         co_return;
     }
 
@@ -359,30 +348,22 @@ net::awaitable<void> session_main(std::shared_ptr<WsSession> self) {
         TlsWsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
             : ctx(std::move(c)), ws(ex, *ctx) {}
     };
-    auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
-    ctx->set_default_verify_paths();
-    ctx->set_verify_mode(ssl::verify_peer);
-    auto conn = std::make_shared<TlsWsConn>(ex, std::move(ctx));
+    auto conn = std::make_shared<TlsWsConn>(exec_, make_tls_client_context());
     auto& ws = conn->ws;
-    CloserGuard guard(s, [conn] {
+    CloserGuard guard(closer_, [conn] {
         boost::system::error_code ec;
         beast::get_lowest_layer(conn->ws).socket().close(ec);
     });
-    // Configure TLS Server Name Indication
-    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), url.host.c_str())) {
+    if (!configure_tls_sni_and_hostname(ws.next_layer(), url_.host)) {
         throw SessionFail(FailKind::Retry, "cannot set TLS SNI for " + who);
     }
-    // Verify peer certificate against hostname
-    ws.next_layer().set_verify_callback(ssl::host_name_verification(url.host));
-    beast::get_lowest_layer(ws).expires_after(cfg.connect_timeout);
+    beast::get_lowest_layer(ws).expires_after(cfg_.connect_timeout);
     co_await phase(who, "connect", beast::get_lowest_layer(ws).async_connect(endpoints, net::use_awaitable));
     tune_socket(beast::get_lowest_layer(ws).socket(), who);
-    beast::get_lowest_layer(ws).expires_after(cfg.connect_timeout);
+    beast::get_lowest_layer(ws).expires_after(cfg_.connect_timeout);
     co_await phase(who, "TLS handshake", ws.next_layer().async_handshake(ssl::stream_base::client, net::use_awaitable));
-    co_await serve(s, ws);
+    co_await serve(ws);
 }
-
-}  // namespace
 
 /// @brief Private constructor called by factory method create().
 WsSession::WsSession(Private, net::any_io_executor executor, WsSessionConfig cfg, WsHandlers handlers)
@@ -440,7 +421,7 @@ net::awaitable<void> WsSession::run() {
     auto self = shared_from_this();  // keeps the session alive for the whole coroutine
     WsClosed out;
     try {
-        co_await session_main(self);
+        co_await session_main();
         out = {FailKind::Retry, "session ended unexpectedly", std::nullopt, 0, std::nullopt};
     } catch (const SessionFail& f) {
         out = {f.kind, f.what(), f.retry_after, f.http_status, f.rpc_code};

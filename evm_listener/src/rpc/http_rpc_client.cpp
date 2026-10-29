@@ -6,10 +6,9 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
-#include <openssl/ssl.h>
-
 #include "core/env.hpp"
 #include "rpc/blocking_http.hpp"
+#include "rpc/tls_client.hpp"
 
 namespace evml::rpc {
 
@@ -204,17 +203,11 @@ net::awaitable<std::shared_ptr<detail::HttpConn>> HttpRpcClient::open() {
 
     // TLS 1.2/1.3 client context with system trust store and peer verification
     // One context per connection: cheap relative to the handshake, and keeps this class free of shared state.
-    auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
-    ctx->set_default_verify_paths();
-    ctx->set_verify_mode(ssl::verify_peer);
-    auto c = std::make_shared<detail::TlsConn>(exec_, std::move(ctx));
+    auto c = std::make_shared<detail::TlsConn>(exec_, make_tls_client_context());
     OpeningGuard og(*this, c.get());
-    // Configure SNI extension for cloud proxy / CDN routing
-    if (!SSL_set_tlsext_host_name(c->stream.native_handle(), url_.host.c_str())) {
+    if (!configure_tls_sni_and_hostname(c->stream, url_.host)) {
         throw TransportError(cfg_.name + ": cannot set TLS SNI for " + redacted_);
     }
-    // Verify TLS certificate matches hostname
-    c->stream.set_verify_callback(ssl::host_name_verification(url_.host));
     const std::string who = cfg_.name + " " + redacted_;
     // Connect TCP socket with timeout deadline
     beast::get_lowest_layer(c->stream).expires_after(cfg_.timeout);

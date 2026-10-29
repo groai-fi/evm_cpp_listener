@@ -10,10 +10,9 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
-#include <openssl/ssl.h>
-
 #include "core/env.hpp"
 #include "rpc/blocking_http.hpp"
+#include "rpc/tls_client.hpp"
 #include "rpc/url.hpp"
 
 namespace evml::ops {
@@ -161,18 +160,14 @@ net::awaitable<HttpResponse> HttpClient::request(Method method, const std::strin
             TlsHttpConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
                 : ctx(std::move(c)), stream(ex, *ctx) {}
         };
-        auto ctx = std::make_shared<ssl::context>(ssl::context::tls_client);
-        ctx->set_default_verify_paths();
-        ctx->set_verify_mode(ssl::verify_peer);
-        auto conn = std::make_shared<TlsHttpConn>(exec_, std::move(ctx));
+        auto conn = std::make_shared<TlsHttpConn>(exec_, rpc::make_tls_client_context());
         auto& stream = conn->stream;
         CloserGuard sg(closers_, next_closer_id_++, [conn] {
             beast::error_code ec;
             beast::get_lowest_layer(conn->stream).socket().close(ec);
         });
-        if (!SSL_set_tlsext_host_name(stream.native_handle(), u.host.c_str()))
+        if (!rpc::configure_tls_sni_and_hostname(stream, u.host))
             throw rpc::TransportError("cannot set TLS SNI for " + who);
-        stream.set_verify_callback(ssl::host_name_verification(u.host));
         beast::get_lowest_layer(stream).expires_after(opts_.timeout);
         co_await phase(who, "connect", beast::get_lowest_layer(stream).async_connect(endpoints, net::use_awaitable));
         beast::get_lowest_layer(stream).expires_after(opts_.timeout);

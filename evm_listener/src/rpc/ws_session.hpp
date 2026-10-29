@@ -90,9 +90,10 @@ public:
     WsSession(Private, boost::asio::any_io_executor executor, WsSessionConfig cfg, WsHandlers handlers);
 
 private:
-    friend struct WsSessionAccess;  // cpp-local protocol code
-
     boost::asio::awaitable<void> run();
+    boost::asio::awaitable<void> session_main();
+    template <class Ws>
+    boost::asio::awaitable<void> serve(Ws& ws);
     void finish(WsClosed c);
     void close_socket();
 
