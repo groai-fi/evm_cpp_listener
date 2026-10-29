@@ -198,8 +198,10 @@ private:
         g_f_ = std::max(kStart, head_ > kFinalLag ? head_ - kFinalLag : 0);
         if (mode_.reorgs && roll(12)) reorg();
         if (dirty_) sync_source();
-        if (roll(10)) src_.overrides.push_back(retry_failure());
-        if (roll(5) && src_.overrides.empty()) src_.overrides.push_back(corrupt_failure(cfg_));
+        if (src_.overrides.empty()) {
+            if (roll(10)) src_.overrides.push_back(retry_failure());
+            else if (roll(5)) src_.overrides.push_back(corrupt_failure(cfg_));
+        }
         if (roll(8)) src_.corrupt_next_log_hash = true;
         sink_->saturated_flag = roll(10);
         if (roll(5)) {

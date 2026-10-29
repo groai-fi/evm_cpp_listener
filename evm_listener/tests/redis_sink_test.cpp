@@ -1667,6 +1667,10 @@ TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and
 
 TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and barriers converge with zero loss",
           "[unit][sink][property]") {
+    std::size_t re_emitted_logs = 0;
+    std::size_t dup_attempts = 0;
+    std::size_t barrier_reads_succeeded = 0;
+
     for (std::uint64_t seed = 5000; seed < 5015; ++seed) {
         std::mt19937_64 rng(seed);
         RigCfg cfg;
@@ -1681,6 +1685,7 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
         std::map<std::string, EventType> expected_events;
         std::map<std::string, EventType> expected_registry;
         std::map<std::string, std::uint64_t> active_safe;
+        std::map<std::string, std::uint64_t> reverted_safe;
         std::uint64_t next_id = 0;
 
         for (std::size_t step = 0; step < 150; ++step) {
@@ -1689,15 +1694,38 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
             if (act < 65) {
                 const std::size_t count = 1 + (rng() % 6);
                 for (std::size_t k = 0; k < count; ++k) {
-                    if (!active_safe.empty() && (rng() % 100) < 25) {
+                    const auto roll = rng() % 100;
+                    if (!active_safe.empty() && roll < 25) {
                         auto it = active_safe.begin();
                         std::advance(it, static_cast<std::ptrdiff_t>(rng() % active_safe.size()));
                         const std::string id = it->first;
                         const std::uint64_t blk = it->second;
                         r.sink->emit(mk(id, EventType::Revert, std::nullopt, blk, StreamKind::Events));
                         expected_events[id] = EventType::Revert;
+                        if (blk > final_ckpt) reverted_safe[id] = blk;
                         active_safe.erase(it);
-                    } else if ((rng() % 100) < 20) {
+                    } else if (!reverted_safe.empty() && roll < 45) {
+                        auto it = reverted_safe.begin();
+                        std::advance(it, static_cast<std::ptrdiff_t>(rng() % reverted_safe.size()));
+                        const std::string id = it->first;
+                        const std::uint64_t blk = it->second;
+                        r.sink->emit(mk(id, EventType::Log, blk, blk, StreamKind::Events));
+                        expected_events[id] = EventType::Log;
+                        active_safe[id] = blk;
+                        reverted_safe.erase(it);
+                        ++re_emitted_logs;
+                    } else if ((!active_safe.empty() || !reverted_safe.empty()) && roll < 60) {
+                        if (!active_safe.empty() && (reverted_safe.empty() || (rng() % 2) == 0)) {
+                            auto it = active_safe.begin();
+                            std::advance(it, static_cast<std::ptrdiff_t>(rng() % active_safe.size()));
+                            r.sink->emit(mk(it->first, EventType::Log, it->second, it->second, StreamKind::Events));
+                        } else {
+                            auto it = reverted_safe.begin();
+                            std::advance(it, static_cast<std::ptrdiff_t>(rng() % reverted_safe.size()));
+                            r.sink->emit(mk(it->first, EventType::Revert, std::nullopt, it->second, StreamKind::Events));
+                        }
+                        ++dup_attempts;
+                    } else if (roll < 75) {
                         const std::string id = "reg" + std::to_string(++next_id);
                         const std::uint64_t blk = safe_ckpt + 1 + (rng() % 4);
                         r.sink->emit(mk(id, EventType::Log, std::nullopt, blk, StreamKind::Registry));
@@ -1722,12 +1750,27 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
                         if (it->second <= final_ckpt) it = active_safe.erase(it);
                         else ++it;
                     }
+                    for (auto it = reverted_safe.begin(); it != reverted_safe.end();) {
+                        if (it->second <= final_ckpt) it = reverted_safe.erase(it);
+                        else ++it;
+                    }
                 }
             } else {
                 if ((rng() % 2) == 0) {
-                    (void)await_with_pump(*r.sink, r.sink->load_checkpoint());
+                    const auto ckpt = *await_with_pump(*r.sink, r.sink->load_checkpoint());
+                    if (ckpt.has_value()) {
+                        ++barrier_reads_succeeded;
+                        CHECK(ckpt->safe == safe_ckpt);
+                        CHECK(ckpt->finalized == final_ckpt);
+                    }
                 } else {
-                    (void)await_with_pump(*r.sink, r.sink->released_range(final_ckpt, safe_ckpt + 10));
+                    const auto rel = *await_with_pump(*r.sink, r.sink->released_range(final_ckpt + 1, safe_ckpt + 10));
+                    if (rel.has_value()) {
+                        ++barrier_reads_succeeded;
+                        std::map<std::string, std::uint64_t> got;
+                        for (const auto& entry : *rel) got[entry.event_id] = entry.block_number;
+                        CHECK(got == active_safe);
+                    }
                 }
             }
 
@@ -1782,9 +1825,28 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
             REQUIRE(types.size() == 1);
             CHECK(types.back() == evml::pipeline::to_string(want_type));
         }
-        for (const auto& [id, entry] : r.server.released) {
-            CHECK(entry.first > final_ckpt);
+
+        REQUIRE(r.server.released.size() == active_safe.size());
+        for (const auto& [id, blk] : active_safe) {
+            const auto it = r.server.released.find(id);
+            REQUIRE(it != r.server.released.end());
+            CHECK(it->second.first == blk);
+            CHECK(blk > final_ckpt);
         }
-        CHECK(r.server.released.size() == active_safe.size());
+
+        const auto final_ckpt_read = *await_with_pump(*r.sink, r.sink->load_checkpoint());
+        REQUIRE(final_ckpt_read.has_value());
+        CHECK(final_ckpt_read->safe == safe_ckpt);
+        CHECK(final_ckpt_read->finalized == final_ckpt);
+
+        const auto final_rel_read = *await_with_pump(*r.sink, r.sink->released_range(0, safe_ckpt + 10));
+        REQUIRE(final_rel_read.has_value());
+        std::map<std::string, std::uint64_t> rel_map;
+        for (const auto& e : *final_rel_read) rel_map[e.event_id] = e.block_number;
+        CHECK(rel_map == active_safe);
     }
+
+    CHECK(re_emitted_logs > 0);
+    CHECK(dup_attempts > 0);
+    CHECK(barrier_reads_succeeded > 0);
 }
