@@ -127,10 +127,14 @@ build/
 # Environment
 .env
 .env.local
+.env.local.dev
+.env.production
+.env.production.*
+.env.staging
+.env.staging.*
 !.env.example
 
 # Conan-generated, WAL data, and other env variants the loader reads
 CMakeUserPresets.json
 *.wal
 **/wal/
-.env.local.dev
