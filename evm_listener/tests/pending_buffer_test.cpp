@@ -2,7 +2,9 @@
 
 #include <stdexcept>
 
+#include "app/ws_reconciler.hpp"
 #include "base_config.hpp"
+#include "core/log.hpp"
 #include "pipeline/pending_buffer.hpp"
 
 using namespace evml::pipeline;
@@ -142,4 +144,32 @@ TEST_CASE("pending: purge_from drops buckets at and above the fork block", "[uni
 
 TEST_CASE("pending: zero cap is rejected", "[unit][pending]") {
     CHECK_THROWS_AS(PendingBuffer(0), std::invalid_argument);
+}
+
+TEST_CASE("ws reconciler: disconnect during catch-up waits for first live head before cross-checking", "[unit][pipeline]") {
+    evml::core::log::init("info");
+    const auto cfg = evml::test::load_base_config();
+    evml::app::WsReconciler rec(cfg, 100);
+
+    // WS disconnects during catch-up; pipeline then transitions to Live at c_s = 200 while a WS reconnect is in flight.
+    rec.on_ws_provider_changed(false, std::nullopt);
+    rec.on_live_tick(200, true);
+    CHECK_FALSE(rec.live_from_block().has_value());
+    CHECK(rec.reseed_pending());
+
+    // First head on the reconnected WS arrives at block 250 while Live c_s = 200.
+    rec.on_head(250, 200);
+    REQUIRE(rec.live_from_block().has_value());
+    CHECK(*rec.live_from_block() == 250);
+    CHECK_FALSE(rec.reseed_pending());
+
+    // Sweeping blocks [201, 249] below live_from_block must not count missed WS logs.
+    const auto cc_pre = rec.on_sweep_page(evml::core::Finality::Safe, BlockRange{201, 249}, {mk(220, 1, 0)});
+    CHECK(cc_pre.ws_missed == 0);
+    CHECK(cc_pre.ws_extra == 0);
+
+    // A log at block 250 (>= live_from_block) missed by WS is counted.
+    const auto cc_live = rec.on_sweep_page(evml::core::Finality::Safe, BlockRange{250, 250}, {mk(250, 2, 0)});
+    CHECK(cc_live.ws_missed == 1);
+    CHECK(cc_live.ws_extra == 0);
 }
