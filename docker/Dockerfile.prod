@@ -42,14 +42,18 @@ COPY evm_listener/CMakeLists.txt ./evm_listener/
 COPY evm_listener/src/ ./evm_listener/src/
 
 # Build and strip Release executable
+# RAILWAY_GIT_COMMIT_SHA is auto-injected by Railway on every GitHub build, busting the C++ compile cache
+# and stamping the exact 7-char commit SHA into --version, logs, and Redis heartbeats.
 ARG VERSION
+ARG RAILWAY_GIT_COMMIT_SHA
 ARG EVML_TEST_HOOKS=OFF
-RUN ln -sf build/Release/generators/CMakePresets.json CMakeUserPresets.json \
+RUN COMMIT_SUFFIX="${RAILWAY_GIT_COMMIT_SHA:+-$(printf '%.7s' "$RAILWAY_GIT_COMMIT_SHA")}" \
+    && ln -sf build/Release/generators/CMakePresets.json CMakeUserPresets.json \
     && cmake --preset conan-release \
         -DEVML_BUILD_TESTS=OFF \
         -DEVML_SANITIZE=OFF \
         -DEVML_TEST_HOOKS=${EVML_TEST_HOOKS} \
-        -DEVML_GIT_DESCRIBE="${VERSION:-v$(cat VERSION)}" \
+        -DEVML_GIT_DESCRIBE="${VERSION:-v$(cat VERSION)${COMMIT_SUFFIX}}" \
     && cmake --build --preset conan-release --parallel 4 \
     && strip --strip-unneeded build/Release/evm_listener/evm_listener
 
