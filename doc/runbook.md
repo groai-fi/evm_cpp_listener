@@ -388,3 +388,18 @@ Because `base.toml` already declares `quicknode`, `infura`, `alchemy`, `ankr`, a
    - **Routing:** Format `severity`, `shard`, `host`, `title`, `message`, `ts`, and `details` into a Slack message posted to `#strategy-production`.
 2. Set `N8N_ALERT_WEBHOOK_URL` and `N8N_ALERT_WEBHOOK_TOKEN` on both `evml-base-a` and `evml-base-b`.
 
+---
+
+### 8. Dual-Plane Hot Signal Stream (`evml:{<shard>}:fast`)
+
+For contracts configured with `fast_stream = true` (e.g., `eurc_usdc_cl1_pool` and `eurc_usdc_cl50_pool` in `base.toml`), the active leader emits non-removed WebSocket `eth_subscribe("logs")` notifications directly to `evml:{<shard>}:fast` (`finality = "latest"`, schema `v=1`) via `emit_fast.lua` in parallel with feeding `WsLogReconciler`:
+
+- **Operational semantics:**
+  - **Best-effort, non-authoritative hot signal plane:** Designed for sub-second strategy pre-computation and tick-drift estimation (`Page-Hinkley` / `EWMA`); never emits `type = "revert"` contra-entries.
+  - **Zero interference with cold accounting (`evml:{<shard>}:events`):** `emit_fast.lua` fences on `evml:{<shard>}:leader` and executes `XADD KEYS[1] MINID ~ <minid_ms> * ...` (retention controlled by `[sink] fast_retention_ms = 3600000`, default 1 hour). It **never** touches `dedup:*`, `released`, `released_data`, or `ckpt`, so the subsequent `safe`/`finalized` HTTP `getLogs` sweep emits the authoritative event to `evml:{<shard>}:events` normally.
+  - **Never spilled to disk:** If `RedisSink` is not `Connected`, is `saturated()`, or transitions to `Degraded`/`Fenced`, fast items (`FastEmitItem`) are dropped immediately rather than written to `/tmp/evml-spill`.
+- **Prometheus telemetry (`/metrics`):**
+  - `evml_fast_emitted_total`: Total fast-stream events acknowledged by `XADD` on `evml:{<shard>}:fast`.
+  - `evml_fast_dropped_total`: Total fast-stream events dropped due to sink saturation, degraded/fenced mode, or pipeline error.
+
+
