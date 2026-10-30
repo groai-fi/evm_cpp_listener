@@ -9,5 +9,6 @@ inline constexpr const char* kEmitLua = R"lua(@EVML_LUA_EMIT@)lua";
 inline constexpr const char* kCkptLua = R"lua(@EVML_LUA_CKPT@)lua";
 inline constexpr const char* kFinalTrimLua = R"lua(@EVML_LUA_FINAL_TRIM@)lua";
 inline constexpr const char* kLeaseLua = R"lua(@EVML_LUA_LEASE@)lua";
+inline constexpr const char* kEmitFastLua = R"lua(@EVML_LUA_EMIT_FAST@)lua";
 
 }  // namespace evml::sink

@@ -17,8 +17,8 @@ namespace evml::sink {
 /// - Invariant I3 (Monotonic Ckpt): Ckpt script guarantees stored checkpoint only increases.
 /// - Invariant I4 (Deduplication): Emit script checks dedup key, writes stream with XADD MINID, then sets dedup key.
 /// - Invariant I6 (Revert Fidelity): Releases store before-image for revert emission matching original log stream and fields.
-enum class Script { Emit, Ckpt, FinalTrim, Lease };
-inline constexpr std::size_t kScriptCount = 4;
+enum class Script { Emit, Ckpt, FinalTrim, Lease, EmitFast };
+inline constexpr std::size_t kScriptCount = 5;
 
 const char* script_name(Script s);
 const char* script_source(Script s);
@@ -44,6 +44,12 @@ struct EmitParams {
 // emit.lua replies: a stream id (written), "DUP", "FENCED" or "BELOW_FINALIZED".
 /// @brief Builds ScriptCall for emit.lua (atomic dedup, stream append, before-image caching, and fencing check).
 ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParams& p);
+
+// emit_fast.lua replies: a stream id (written) or "FENCED". Writes zero dedup/released keys.
+/// @brief Builds ScriptCall for emit_fast.lua (fenced XADD MINID ~ on evml:{shard}:fast with zero dedup keys).
+ScriptCall emit_fast_call(const Keys& k, const std::vector<pipeline::Field>& fields, std::uint64_t minid_ms,
+                          const std::string& token);
+ScriptCall emit_fast_call(const Keys& k, const pipeline::Event& e, std::uint64_t minid_ms, const std::string& token);
 
 // ckpt.lua replies: "OK", "NOOP" (advance that would move backwards), "EXISTS" (init), "FENCED".
 // An advance that would make finalized > safe is an error reply (I2: a bug, never retried silently).

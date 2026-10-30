@@ -31,7 +31,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.hpp.in
 
 # Redis Lua scripts: src/sink/lua/<name>.lua are embedded into generated/sink/lua_sources.hpp (no runtime loading).
 # Editing a .lua re-runs configure (CMAKE_CONFIGURE_DEPENDS), which regenerates the header and rebuilds the binary.
-foreach(evml_lua emit ckpt final_trim lease)
+foreach(evml_lua emit ckpt final_trim lease emit_fast)
     set(evml_lua_path ${CMAKE_CURRENT_SOURCE_DIR}/src/sink/lua/${evml_lua}.lua)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${evml_lua_path})
     file(READ ${evml_lua_path} evml_lua_src)

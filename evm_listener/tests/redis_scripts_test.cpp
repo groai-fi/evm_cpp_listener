@@ -426,11 +426,14 @@ TEST_CASE("redis scripts: field and manifest codecs reject malformed input", "[u
     CHECK_THROWS_WITH(unpack_manifest("nope"), ContainsSubstring("invalid JSON"));
 }
 
-TEST_CASE("redis scripts: call builders reject malformed emissions", "[unit][redis]") {
+TEST_CASE("redis scripts: call builders reject malformed emissions", "[unit][redis][lua]") {
     const Keys keys("t_x");
     Emission no_fields = mk("a", EventType::Log);
     no_fields.fields.clear();
     CHECK_THROWS_WITH(emit_call(keys, no_fields, params()), ContainsSubstring("has no fields"));
+
+    std::vector<Field> empty_fields;
+    CHECK_THROWS_WITH(emit_fast_call(keys, empty_fields, 0, kNoFence), ContainsSubstring("has no fields"));
 
     Emission bad_dedup = mk("a", EventType::Log);
     bad_dedup.dedup_key = "a";
@@ -440,10 +443,41 @@ TEST_CASE("redis scripts: call builders reject malformed emissions", "[unit][red
     CHECK_THROWS_WITH(Keys(""), ContainsSubstring("non-empty"));
 }
 
-TEST_CASE("redis scripts: every embedded script starts with the #!lua shebang", "[unit][redis]") {
+TEST_CASE("redis scripts: every embedded script starts with the #!lua shebang", "[unit][redis][lua]") {
     for (std::size_t i = 0; i < kScriptCount; ++i) {
         const std::string src = script_source(static_cast<Script>(i));
         INFO(script_name(static_cast<Script>(i)));
         CHECK(src.rfind("#!lua\n", 0) == 0);
     }
+}
+
+TEST_CASE("redis scripts: emit_fast writes to evml:{shard}:fast with zero dedup/released keys and respects leader fencing",
+          "[integration][redis][lua]") {
+    Rig r;
+    const std::vector<Field> fields = {
+        {"v", "1"}, {"type", "log"}, {"finality", "latest"}, {"event_id", "8453:0xabc:0"}, {"block_number", "105"}};
+
+    // Unfenced write appends to fast stream and touches zero dedup/released/events keys.
+    const std::string id1 = r.run(emit_fast_call(r.keys, fields, 0, kNoFence));
+    CHECK(id1 != "FENCED");
+    CHECK(r.xlen(r.keys.fast()) == 1);
+    CHECK(r.xlen(r.keys.events()) == 0);
+    CHECK(r.exists(r.keys.dedup("dedup:8453:0xabc:0")) == 0);
+    CHECK(r.zcard(r.keys.released()) == 0);
+    CHECK(r.hlen(r.keys.released_data()) == 0);
+
+    // Because emit_fast sets no dedup key, the subsequent authoritative safe sweep still emits to events.
+    CHECK(r.run(emit_call(r.keys, mk("8453:0xabc:0", EventType::Log, 105), params())) != "DUP");
+    CHECK(r.xlen(r.keys.events()) == 1);
+    CHECK(r.exists(r.keys.dedup("dedup:8453:0xabc:0")) == 1);
+
+    // Leader fencing: acquire lease for hostA; stale token is rejected with FENCED, active token succeeds.
+    const auto reply = r.runner.run(lease_acquire_call(r.keys, "hostA", "n1", 15000));
+    REQUIRE(reply.has_value());
+    const std::string token = "1|hostA|n1";
+    CHECK(r.run(emit_fast_call(r.keys, fields, 0, "9|stale|token")) == "FENCED");
+    CHECK(r.xlen(r.keys.fast()) == 1);
+
+    CHECK(r.run(emit_fast_call(r.keys, fields, 0, token)) != "FENCED");
+    CHECK(r.xlen(r.keys.fast()) == 2);
 }

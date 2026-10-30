@@ -45,6 +45,7 @@ bool looks_like_stream_id(const std::string& s) {
 
 std::string describe(const WriteItem& item) {
     return std::visit(overloaded{[](const EmitItem& i) { return "emit " + i.e.event_id; },
+                                 [](const FastEmitItem& i) { return "emit_fast " + i.e.event_id; },
                                  [](const CkptItem& i) {
                                      return std::string("ckpt ") +
                                             (i.kind == pipeline::CheckpointKind::Safe ? "safe " : "finalized ") +
@@ -71,6 +72,9 @@ std::pair<std::uint8_t, std::string> encode(const WriteItem& item) {
                               o["dedup"] = i.e.dedup_key;
                               o["fields"] = pack_fields(i.e.fields);
                               if (i.e.released_block) o["released"] = *i.e.released_block;
+                          },
+                          [&](const FastEmitItem&) {
+                              throw std::logic_error("RedisSink: FastEmitItem must never be written to spill");
                           },
                           [&](const CkptItem& i) {
                               kind = kCkpt;
@@ -170,6 +174,7 @@ RedisSinkOptions validated(RedisSinkOptions o) {
     if (o.queue_capacity == 0) bad("queue_capacity must be > 0");
     if (o.max_batch == 0) bad("max_batch must be > 0");
     if (o.retention_ms == 0) bad("retention_ms must be > 0");
+    if (o.fast_retention_ms == 0) bad("fast_retention_ms must be > 0");
     if (o.dedup_ttl_s == 0) bad("dedup_ttl_s must be > 0");
     if (o.token.empty()) bad("token must not be empty (use kNoFence to disable fencing)");
     if (o.token != kNoFence) {
@@ -212,6 +217,7 @@ RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const 
     RedisSinkOptions o;
     o.token = std::move(token);
     o.retention_ms = sink.retention_ms;
+    o.fast_retention_ms = sink.fast_retention_ms;
     o.dedup_ttl_s = sink.dedup_ttl_s;
     o.queue_capacity = sink.queue_capacity;
     o.spill_dir = sink.spill_dir;
@@ -269,6 +275,23 @@ void RedisSink::enqueue(WriteItem item) {
 }
 
 void RedisSink::emit(pipeline::Emission e) { enqueue(EmitItem{std::move(e)}); }
+void RedisSink::emit_fast(pipeline::Event e) {
+    if (mode_.load() != SinkMode::Connected || saturated()) {
+        ++fast_dropped_total_;
+        return;
+    }
+    {
+        std::lock_guard lk(mu_);
+        if (mode_.load() != SinkMode::Connected || saturated() || stop_.load()) {
+            ++fast_dropped_total_;
+            return;
+        }
+        queue_.emplace_back(StampedWrite{FastEmitItem{std::move(e)}, now()});
+        ++queue_depth_;
+        ++pending_;
+    }
+    cv_.notify_one();
+}
 void RedisSink::checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) { enqueue(CkptItem{kind, block}); }
 void RedisSink::init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) {
     enqueue(CkptInitItem{c0, std::move(manifest)});
@@ -467,6 +490,8 @@ SinkStatus RedisSink::status() const {
     s.reconnects_total = reconnects_total_.load();
     s.heartbeat_failures_total = heartbeat_failures_total_.load();
     s.consumer_lag_failures_total = consumer_lag_failures_total_.load();
+    s.fast_emitted_total = fast_emitted_total_.load();
+    s.fast_dropped_total = fast_dropped_total_.load();
     return s;
 }
 
@@ -533,13 +558,21 @@ std::uint64_t RedisSink::discard_queue() {
         taken.swap(queue_);
     }
     std::uint64_t writes = 0;
+    std::uint64_t fast_dropped = 0;
     for (auto& qi : taken) {
         if (auto* r = std::get_if<ReadItem>(&qi)) {
             r->abandon();
+        } else if (std::holds_alternative<FastEmitItem>(std::get<StampedWrite>(qi).item)) {
+            ++fast_dropped;
+            --queue_depth_;
         } else {
             ++writes;
             --queue_depth_;
         }
+    }
+    if (fast_dropped > 0) {
+        fast_dropped_total_ += fast_dropped;
+        pending_ -= fast_dropped;
     }
     return writes;
 }
@@ -547,16 +580,28 @@ std::uint64_t RedisSink::discard_queue() {
 /// @brief Spills pending in-memory write queue to disk WAL during Redis outage or replaying mode.
 bool RedisSink::queue_to_spill() {
     std::deque<QueueItem> taken;
+    std::uint64_t fast_dropped = 0;
     {
         std::lock_guard lk(mu_);
         taken.swap(queue_);
-        for (const auto& qi : taken) {
-            if (const auto* w = std::get_if<StampedWrite>(&qi)) {
+        for (auto it = taken.begin(); it != taken.end();) {
+            if (const auto* w = std::get_if<StampedWrite>(&*it)) {
+                if (std::holds_alternative<FastEmitItem>(w->item)) {
+                    it = taken.erase(it);
+                    ++fast_dropped;
+                    continue;
+                }
                 spill_stamps_.push_back(w->enqueued_at);
             }
+            ++it;
         }
     }
-    if (taken.empty()) return false;
+    if (fast_dropped > 0) {
+        queue_depth_ -= fast_dropped;
+        pending_ -= fast_dropped;
+        fast_dropped_total_ += fast_dropped;
+    }
+    if (taken.empty()) return fast_dropped > 0;
 
     std::size_t done = 0;
     try {
@@ -610,7 +655,8 @@ bool RedisSink::refill_from_queue() {
         auto* w = std::get_if<StampedWrite>(&queue_.front());
         if (!w) break;  // a read ends the batch: it is a barrier
         // Non-emit items (checkpoints, manifest, trims) are barriers: they break batching and run alone.
-        const bool barrier = !std::holds_alternative<EmitItem>(w->item);
+        const bool barrier =
+            !std::holds_alternative<EmitItem>(w->item) && !std::holds_alternative<FastEmitItem>(w->item);
         if (barrier && !held_.empty()) break;  // a barrier is sent alone
         held_.push_back(std::move(*w));
         queue_.pop_front();
@@ -660,10 +706,12 @@ ScriptCall RedisSink::to_call(const WriteItem& item) const {
     const std::uint64_t wall = opts_.wall_ms();
     // Calculates sliding retention MINID timestamp to prune expired stream entries on XADD.
     const std::uint64_t minid = wall > opts_.retention_ms ? wall - opts_.retention_ms : 0;
+    const std::uint64_t fast_minid = wall > opts_.fast_retention_ms ? wall - opts_.fast_retention_ms : 0;
     return std::visit(
         overloaded{[&](const EmitItem& i) {
                        return emit_call(keys_, i.e, EmitParams{opts_.dedup_ttl_s, minid, opts_.token});
                    },
+                   [&](const FastEmitItem& i) { return emit_fast_call(keys_, i.e, fast_minid, opts_.token); },
                    [&](const CkptItem& i) { return ckpt_advance_call(keys_, opts_.token, i.kind, i.block); },
                    [&](const CkptInitItem& i) { return ckpt_init_call(keys_, opts_.token, i.c0, i.manifest); },
                    [&](const ContractsItem& i) { return ckpt_contracts_call(keys_, opts_.token, i.manifest); },
@@ -703,6 +751,13 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
                        } else if (!looks_like_stream_id(r)) {
                            return unexpected();
                        }
+                       return {};
+                   },
+                   [&](const FastEmitItem&) -> Verdict {
+                       if (!looks_like_stream_id(r)) {
+                           return unexpected();
+                       }
+                       ++fast_emitted_total_;
                        return {};
                    },
                    [&](const CkptItem&) -> Verdict { return r == "OK" || r == "NOOP" ? Verdict{} : unexpected(); },
@@ -750,12 +805,33 @@ bool RedisSink::send_held() {
             break;
         }
     }
-    // Erase acked prefix from held_ queue and decrement pending write counter.
+    // Erase acked prefix from held_ queue and retire any FastEmitItem in the remaining suffix
+    // (FastEmitItem has no dedup key and is strictly single-shot: never re-sent on retry).
+    std::uint64_t fast_emitted_suffix = 0;
+    std::uint64_t fast_dropped_suffix = 0;
     {
         std::lock_guard lk(mu_);
         held_.erase(held_.begin(), held_.begin() + static_cast<std::ptrdiff_t>(acked));
+        if (stop) {
+            std::size_t idx = acked;
+            for (auto it = held_.begin(); it != held_.end(); ++idx) {
+                if (std::holds_alternative<FastEmitItem>(it->item)) {
+                    const auto* ok = std::get_if<ScriptOk>(&outcomes[idx]);
+                    if (ok && ok->value && looks_like_stream_id(*ok->value)) {
+                        ++fast_emitted_suffix;
+                    } else {
+                        ++fast_dropped_suffix;
+                    }
+                    it = held_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
     }
-    pending_ -= acked;
+    if (fast_emitted_suffix > 0) fast_emitted_total_ += fast_emitted_suffix;
+    if (fast_dropped_suffix > 0) fast_dropped_total_ += fast_dropped_suffix;
+    pending_ -= (acked + fast_emitted_suffix + fast_dropped_suffix);
     if (acked > 0) {
         reload_streak_ = 0;
         fence_streak_ = 0;
@@ -901,11 +977,19 @@ void RedisSink::handle_fenced() {
 void RedisSink::enter_fenced() {
     // Drop all held batches, local disk spill WAL, and unhandled queue items to prevent split-brain writes.
     std::uint64_t dropped = 0;
+    std::uint64_t fast_dropped = 0;
     {
         std::lock_guard lk(mu_);
-        dropped += held_.size();
+        for (const auto& sw : held_) {
+            if (std::holds_alternative<FastEmitItem>(sw.item)) ++fast_dropped;
+            else ++dropped;
+        }
         held_.clear();
         spill_stamps_.clear();
+    }
+    if (fast_dropped > 0) {
+        fast_dropped_total_ += fast_dropped;
+        pending_ -= fast_dropped;
     }
     dropped += spill_.discard_all();
     refresh_spill_atomics();
@@ -924,6 +1008,22 @@ void RedisSink::enter_fenced() {
 void RedisSink::go_degraded(const std::string& reason) {
     reload_streak_ = 0;
     fence_streak_ = 0;
+    std::uint64_t fast_dropped = 0;
+    {
+        std::lock_guard lk(mu_);
+        for (auto it = held_.begin(); it != held_.end();) {
+            if (std::holds_alternative<FastEmitItem>(it->item)) {
+                it = held_.erase(it);
+                ++fast_dropped;
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (fast_dropped > 0) {
+        fast_dropped_total_ += fast_dropped;
+        pending_ -= fast_dropped;
+    }
     if (mode_.load() == SinkMode::Degraded) {
         schedule_next_probe();  // a failed probe: back off further
         return;

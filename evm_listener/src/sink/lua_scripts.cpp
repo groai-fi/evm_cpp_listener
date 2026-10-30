@@ -48,6 +48,7 @@ const char* script_name(Script s) {
         case Script::Ckpt: return "ckpt";
         case Script::FinalTrim: return "final_trim";
         case Script::Lease: return "lease";
+        case Script::EmitFast: return "emit_fast";
     }
     throw std::logic_error("script_name: unknown script");
 }
@@ -58,6 +59,7 @@ const char* script_source(Script s) {
         case Script::Ckpt: return kCkptLua;
         case Script::FinalTrim: return kFinalTrimLua;
         case Script::Lease: return kLeaseLua;
+        case Script::EmitFast: return kEmitFastLua;
     }
     throw std::logic_error("script_source: unknown script");
 }
@@ -86,6 +88,25 @@ ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParam
         c.args.push_back(value);
     }
     return c;
+}
+
+ScriptCall emit_fast_call(const Keys& k, const std::vector<pipeline::Field>& fields, std::uint64_t minid_ms,
+                          const std::string& token) {
+    if (fields.empty()) throw std::invalid_argument("emit_fast_call: event has no fields");
+
+    ScriptCall c;
+    c.script = Script::EmitFast;
+    c.keys = {k.fast(), k.leader()};
+    c.args = {num(minid_ms), token};
+    for (const auto& [name, value] : fields) {
+        c.args.push_back(name);
+        c.args.push_back(value);
+    }
+    return c;
+}
+
+ScriptCall emit_fast_call(const Keys& k, const pipeline::Event& e, std::uint64_t minid_ms, const std::string& token) {
+    return emit_fast_call(k, pipeline::to_fields(e), minid_ms, token);
 }
 
 /// @brief Builds call to advance safe or finalized checkpoint hash field.

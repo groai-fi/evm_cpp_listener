@@ -52,6 +52,7 @@ struct FakeServer {
     std::string epoch;
     bool scripts_valid{true};           // false = SCRIPT FLUSH happened: every script call answers NOSCRIPT
     std::map<StreamKind, std::vector<std::vector<Field>>> streams;
+    std::vector<std::vector<Field>> fast_stream;
     std::map<std::string, std::string> dedup;                                // dedup key -> last type
     std::map<std::string, std::pair<std::uint64_t, std::string>> released;  // member -> (score, before image)
     std::optional<std::uint64_t> safe, finalized;
@@ -63,6 +64,7 @@ struct FakeServer {
     std::map<std::string, GroupFacts> group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
     std::uint64_t group_reads{0};
     std::vector<std::string> emit_minids;  // ARGV[2] (minid_ms) of every emit that passed the fence
+    std::vector<std::string> fast_minids;  // ARGV[1] (minid_ms) of every emit_fast that passed the fence
 
     explicit FakeServer(Keys k) : keys(std::move(k)) {}
 
@@ -157,6 +159,19 @@ struct FakeServer {
                     return ok("OK");
                 }
                 return ok("NOOP");
+            }
+            case Script::EmitFast: {
+                if (fenced(a[1])) return ok("FENCED");
+                fast_minids.push_back(a[0]);
+                std::vector<Field> fields;
+                std::string event_id;
+                for (std::size_t i = 2; i + 1 < a.size(); i += 2) {
+                    if (a[i] == "event_id") event_id = a[i + 1];
+                    fields.emplace_back(a[i], a[i + 1]);
+                }
+                fast_stream.push_back(std::move(fields));
+                applied.push_back("fast:" + event_id);
+                return ok(std::to_string(++next_id) + "-0");
             }
         }
         throw std::logic_error("FakeServer: unknown script");
@@ -297,6 +312,7 @@ struct RigCfg {
     std::uint32_t heartbeat_ms{0};
     std::vector<evml::core::ConsumerGroupCfg> groups{};
     std::uint64_t wall_ms{1700000000000};
+    std::uint64_t fast_retention_ms{3600000};
     std::atomic<std::uint64_t>* loop_beat{nullptr};
 };
 
@@ -331,6 +347,7 @@ struct Rig {
         o.heartbeat_ms = cfg.heartbeat_ms;
         o.consumer_groups = cfg.groups;
         o.retention_ms = 48ull * 3600 * 1000;
+        o.fast_retention_ms = cfg.fast_retention_ms;
         o.dedup_ttl_s = 604800;
         o.queue_capacity = cfg.queue_capacity;
         o.spill_dir = dir;
@@ -387,6 +404,23 @@ Emission mk(const std::string& id, EventType type = EventType::Log, std::optiona
     e.fields = {{"v", "1"}, {"type", evml::pipeline::to_string(type)}, {"event_id", id}, {"block_number", std::to_string(block)}};
     e.released_block = released;
     return e;
+}
+
+evml::pipeline::Event mk_fast(const std::string& id, std::uint64_t block = 105) {
+    evml::pipeline::Event ev;
+    ev.type = EventType::Log;
+    ev.event_id = id;
+    ev.chain_id = 8453;
+    ev.shard = "shard";
+    ev.block_number = block;
+    ev.finality = evml::core::Finality::Latest;
+    ev.event = "Swap";
+    ev.contract = "eurc_usdc_cl1_pool";
+    ev.stream = StreamKind::Events;
+    ev.host = "hostA";
+    ev.listener_version = "0.1.0";
+    ev.first_source = "p1";
+    return ev;
 }
 
 std::string id_of(int i) { return "e" + std::to_string(i); }
@@ -1080,6 +1114,7 @@ TEST_CASE("redis sink: options are validated", "[unit][sink]") {
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.queue_capacity = 0; }), ContainsSubstring("queue_capacity"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.max_batch = 0; }), ContainsSubstring("max_batch"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.retention_ms = 0; }), ContainsSubstring("retention_ms"));
+    CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.fast_retention_ms = 0; }), ContainsSubstring("fast_retention_ms"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.dedup_ttl_s = 0; }), ContainsSubstring("dedup_ttl_s"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.token.clear(); }), ContainsSubstring("token"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.renew_ms = o.lease_ttl_ms; }), ContainsSubstring("renew_ms"));
@@ -1105,6 +1140,7 @@ TEST_CASE("redis sink: options are validated", "[unit][sink]") {
 TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token that contradicts [lease] enabled", "[unit][sink]") {
     evml::core::SinkCfg sink;
     sink.retention_ms = 172800000;
+    sink.fast_retention_ms = 1800000;
     sink.dedup_ttl_s = 604800;
     sink.queue_capacity = 100000;
     sink.spill_dir = "/tmp/evml-spill";
@@ -1117,6 +1153,7 @@ TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token
     const auto o = RedisSinkOptions::from_config(sink, lease, "1|a|n");
     CHECK(o.token == "1|a|n");
     CHECK(o.retention_ms == 172800000);
+    CHECK(o.fast_retention_ms == 1800000);
     CHECK(o.dedup_ttl_s == 604800);
     CHECK(o.queue_capacity == 100000);
     CHECK(o.spill_dir == "/tmp/evml-spill");
@@ -1863,3 +1900,197 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
     CHECK(dup_attempts > 0);
     CHECK(barrier_reads_succeeded > 0);
 }
+
+TEST_CASE("redis sink: emit_fast batches with regular emits and uses fast_retention_ms", "[unit][sink]") {
+    RigCfg cfg;
+    cfg.wall_ms = 1700003600000ULL;
+    cfg.fast_retention_ms = 3600000ULL;
+    Rig r(cfg);
+
+    r.sink->emit(mk("cold-1", EventType::Log, 105));
+    r.sink->emit_fast(mk_fast("fast-1", 108));
+    r.sink->emit_fast(mk_fast("fast-2", 109));
+    r.sink->checkpoint(CheckpointKind::Safe, 105);
+
+    // First pump batches cold-1, fast-1, fast-2 in a single pipeline before the checkpoint barrier.
+    REQUIRE(r.sink->pump());
+    REQUIRE(r.data->pipelines.size() == 1);
+    CHECK(r.data->pipelines[0] == std::vector<Script>{Script::Emit, Script::EmitFast, Script::EmitFast});
+    REQUIRE(r.server.fast_stream.size() == 2);
+    REQUIRE(r.server.fast_minids == std::vector<std::string>{"1700000000000", "1700000000000"});
+    CHECK(r.server.dedup.size() == 1);  // only cold-1 created a dedup key
+    CHECK(r.server.dedup.count(r.keys.dedup("dedup:cold-1")) == 1);
+
+    // Second pump sends the checkpoint barrier alone.
+    REQUIRE(r.sink->pump());
+    const auto st = r.sink->status();
+    CHECK(st.fast_emitted_total == 2);
+    CHECK(st.fast_dropped_total == 0);
+    CHECK(st.pending_writes == 0);
+}
+
+TEST_CASE("redis sink: emit_fast drops on entry when not Connected or when saturated", "[unit][sink]") {
+    SECTION("drops when queue is at capacity (saturated)") {
+        RigCfg cfg;
+        cfg.queue_capacity = 2;
+        Rig r(cfg);
+
+        r.sink->emit(mk("c1"));
+        r.sink->emit(mk("c2"));
+        REQUIRE(r.sink->saturated());
+
+        r.sink->emit_fast(mk_fast("f-drop-sat"));
+        CHECK(r.sink->status().fast_dropped_total == 1);
+        CHECK(r.sink->status().queue_depth == 2);
+        CHECK(r.sink->status().pending_writes == 2);
+    }
+
+    SECTION("drops when Degraded or Replaying without touching spill") {
+        Rig r;
+        r.data->down = true;
+        r.sink->emit(mk("c1"));
+        r.sink->pump();  // transitions to Degraded
+        REQUIRE(r.sink->mode() == SinkMode::Degraded);
+
+        r.sink->emit_fast(mk_fast("f-drop-deg"));
+        CHECK(r.sink->status().fast_dropped_total == 1);
+        CHECK(r.sink->status().spill_records == 0);
+
+        // Enqueue another cold write so Degraded spills it, then reconnect into Replaying
+        r.sink->emit(mk("c2"));
+        r.sink->pump();  // queue_to_spill moves c2 to spill
+        REQUIRE(r.sink->status().spill_records == 1);
+
+        r.data->down = false;
+        r.data->faults.push_back(Fault{Fault::Kind::ThrowBefore});  // keep c1 in held_ so mode enters Replaying
+        r.sink->pump();  // try_reconnect -> Replaying, then send_held throws -> back to Degraded; let's reconnect cleanly
+        r.data->faults.clear();
+        r.sink->pump();  // try_reconnect -> Replaying (held_ has c1, spill_ has c2)
+
+        // Whether Replaying or Connected after flush, verify fast_dropped_total is preserved and fast_stream is empty.
+        REQUIRE(r.settle());
+        CHECK(r.server.fast_stream.empty());
+        CHECK(r.sink->status().fast_dropped_total == 1);
+    }
+}
+
+TEST_CASE("redis sink: FastEmitItem in held_ or queue_ is discarded on outage or fencing and never spilled",
+          "[unit][sink]") {
+    SECTION("in-flight FastEmitItem in held_ and queued FastEmitItem in queue_ are dropped on outage") {
+        RigCfg cfg;
+        cfg.max_batch = 2;
+        Rig r(cfg);
+
+        // Enqueue 1 cold + 1 fast (will enter held_ on first pump) + 1 cold + 1 fast (stay in queue_)
+        r.sink->emit(mk("c1"));
+        r.sink->emit_fast(mk_fast("f-held"));
+        r.sink->emit(mk("c2"));
+        r.sink->emit_fast(mk_fast("f-queued"));
+        CHECK(r.sink->status().pending_writes == 4);
+
+        r.data->down = true;
+        r.sink->pump();  // refills held_ with [c1, f-held], send_held fails -> go_degraded drops f-held from held_
+        REQUIRE(r.sink->mode() == SinkMode::Degraded);
+        CHECK(r.sink->status().fast_dropped_total == 1);
+        CHECK(r.sink->status().pending_writes == 3);
+
+        r.sink->pump();  // queue_to_spill drops f-queued and spills only c2
+        CHECK(r.sink->status().fast_dropped_total == 2);
+        CHECK(r.sink->status().spill_records == 1);
+        CHECK(r.sink->status().pending_writes == 2);
+
+        // Reconnect and replay: only c1 and c2 are written; fast_stream stays empty.
+        r.data->down = false;
+        REQUIRE(r.settle());
+        CHECK(r.sink->status().mode == SinkMode::Connected);
+        CHECK(r.sink->status().pending_writes == 0);
+        CHECK(r.sink->status().fast_emitted_total == 0);
+        CHECK(r.sink->status().fast_dropped_total == 2);
+        CHECK(r.server.fast_stream.empty());
+        CHECK(r.server.count_entries(StreamKind::Events, "c1") == 1);
+        CHECK(r.server.count_entries(StreamKind::Events, "c2") == 1);
+    }
+
+    SECTION("FastEmitItem in held_ and queue_ are counted in fast_dropped_total on Fenced") {
+        RigCfg cfg;
+        cfg.max_batch = 1;
+        Rig r(cfg);
+
+        r.sink->emit_fast(mk_fast("f1"));
+        r.sink->emit_fast(mk_fast("f2"));
+        r.server.leader = "99|other|n";  // usurp leadership
+
+        r.sink->pump();  // f1 in held_ gets FENCED -> renew_lease gets FENCED -> enter_fenced drops f1 & f2
+        CHECK(r.sink->mode() == SinkMode::Fenced);
+        const auto st = r.sink->status();
+        CHECK(st.fast_dropped_total == 2);
+        CHECK(st.discarded_total == 0);
+        CHECK(st.pending_writes == 0);
+    }
+}
+
+TEST_CASE("redis sink: FastEmitItem in suffix after failed prefix item is retired single-shot",
+          "[unit][sink]") {
+    SECTION("mixed pipeline [EmitItem, FastEmitItem] where prefix gets NoScript or Transient and suffix succeeds") {
+        {
+            Rig r;
+            r.sink->emit(mk("c1"));
+            r.sink->emit_fast(mk_fast("f1"));
+            r.data->faults.push_back(Fault{Fault::Kind::FailAt, 0, FailKind::NoScript, false});
+
+            r.sink->pump();  // c1 gets NoScript (scripts reloaded), f1 succeeded on server and is retired from held_
+            CHECK(r.server.fast_stream.size() == 1);
+            CHECK(r.sink->status().fast_emitted_total == 1);
+            CHECK(r.sink->status().fast_dropped_total == 0);
+            CHECK(r.sink->status().pending_writes == 1);
+
+            REQUIRE(r.settle());  // next pump retries only c1; f1 is NOT re-sent
+            CHECK(r.server.count_entries(StreamKind::Events, "c1") == 1);
+            CHECK(r.server.fast_stream.size() == 1);
+            CHECK(r.sink->status().fast_emitted_total == 1);
+            CHECK(r.sink->status().fast_dropped_total == 0);
+            CHECK(r.sink->status().pending_writes == 0);
+        }
+        {
+            Rig r;
+            r.sink->emit(mk("c1"));
+            r.sink->emit_fast(mk_fast("f1"));
+            r.data->faults.push_back(Fault{Fault::Kind::FailAt, 0, FailKind::Transient, false});
+
+            r.sink->pump();  // c1 gets Transient -> RetryOnce, f1 succeeded on server and is retired from held_
+            CHECK(r.server.fast_stream.size() == 1);
+            CHECK(r.sink->status().fast_emitted_total == 1);
+            CHECK(r.sink->status().fast_dropped_total == 0);
+            CHECK(r.sink->status().pending_writes == 1);
+
+            REQUIRE(r.settle());  // next pump retries only c1; f1 is NOT re-sent
+            CHECK(r.server.count_entries(StreamKind::Events, "c1") == 1);
+            CHECK(r.server.fast_stream.size() == 1);
+            CHECK(r.sink->status().fast_emitted_total == 1);
+            CHECK(r.sink->status().fast_dropped_total == 0);
+            CHECK(r.sink->status().pending_writes == 0);
+        }
+    }
+
+    SECTION("mixed pipeline [EmitItem, FastEmitItem] where both get NoScript drops FastEmitItem immediately") {
+        Rig r;
+        r.sink->emit(mk("c1"));
+        r.sink->emit_fast(mk_fast("f1"));
+        r.server.scripts_valid = false;
+
+        r.sink->pump();  // both c1 and f1 get NoScript; f1 is dropped, scripts are reloaded, c1 stays in held_
+        CHECK(r.server.fast_stream.empty());
+        CHECK(r.sink->status().fast_emitted_total == 0);
+        CHECK(r.sink->status().fast_dropped_total == 1);
+        CHECK(r.sink->status().pending_writes == 1);
+
+        REQUIRE(r.settle());  // c1 succeeds on retry
+        CHECK(r.server.count_entries(StreamKind::Events, "c1") == 1);
+        CHECK(r.server.fast_stream.empty());
+        CHECK(r.sink->status().fast_emitted_total == 0);
+        CHECK(r.sink->status().fast_dropped_total == 1);
+        CHECK(r.sink->status().pending_writes == 0);
+    }
+}
+
+

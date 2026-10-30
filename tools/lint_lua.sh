@@ -36,7 +36,7 @@ import sys
 
 LUACHECKRC = sys.argv[1]
 REDIS_LUA_DIR = pathlib.Path("evm_listener/src/sink/lua")
-EXPECTED_REDIS_SCRIPTS = {"emit.lua", "ckpt.lua", "final_trim.lua", "lease.lua"}
+EXPECTED_REDIS_SCRIPTS = {"emit.lua", "ckpt.lua", "final_trim.lua", "lease.lua", "emit_fast.lua"}
 SHEBANG_RE = re.compile(r"#!lua(?:[ \t]+([^\n]*))?\n")
 
 # (label, source, path for diagnostics, path line of Lua line 1, is_redis_script)

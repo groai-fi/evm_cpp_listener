@@ -65,6 +65,9 @@ public:
     // Enqueues an event emission to the stream; writes dedup key atomically via Lua.
     virtual void emit(Emission e) = 0;
 
+    // Best-effort, non-spilling hot-path emission to evml:{shard}:fast (dropped when not Connected or when saturated).
+    virtual void emit_fast(Event /*e*/) {}
+
     // Enqueues a checkpoint advance for safe or finalized cursor (applied strictly after preceding emits).
     virtual void checkpoint(CheckpointKind kind, std::uint64_t block) = 0;
 

@@ -48,6 +48,7 @@ struct RedisSinkOptions {
 
     std::string token;  // lease token every write script is fenced on, or kNoFence (lease disabled, local only)
     std::uint64_t retention_ms{};
+    std::uint64_t fast_retention_ms{3600000};
     std::uint32_t dedup_ttl_s{};
     std::uint32_t queue_capacity{};  // soft cap: above it saturated() is true (the queue still accepts, never drops)
     std::filesystem::path spill_dir;
@@ -96,6 +97,8 @@ struct SinkStatus {
     std::uint64_t heartbeat_failures_total{};
     std::uint64_t consumer_lag_failures_total{};
     std::uint64_t reconnects_total{};
+    std::uint64_t fast_emitted_total{};       // evml_fast_emitted_total: fast-stream events acknowledged by Redis
+    std::uint64_t fast_dropped_total{};       // evml_fast_dropped_total: fast-stream events dropped on backpressure/outage/fencing
     // Age of the oldest accepted write that is neither acked nor discarded (queue, current batch or spill); 0 when
     // nothing is pending. Measured on the injected steady clock. Plan 60 §5.3.3 `oldest_record_age_s`.
     std::uint64_t oldest_record_age_s{};
@@ -105,6 +108,9 @@ namespace detail {
 // What the pipeline hands to the sink, as the sink thread stores it (queue, current batch, spill).
 struct EmitItem {
     pipeline::Emission e;
+};
+struct FastEmitItem {
+    pipeline::Event e;
 };
 struct CkptItem {
     pipeline::CheckpointKind kind{};
@@ -120,7 +126,7 @@ struct ContractsItem {
 struct FinalTrimItem {
     std::uint64_t block{};
 };
-using WriteItem = std::variant<EmitItem, CkptItem, CkptInitItem, ContractsItem, FinalTrimItem>;
+using WriteItem = std::variant<EmitItem, FastEmitItem, CkptItem, CkptInitItem, ContractsItem, FinalTrimItem>;
 
 struct StampedWrite {
     WriteItem item;
@@ -171,6 +177,8 @@ public:
     bool readable() const override;
     /// @brief Enqueues an event emission to the sink queue; non-blocking for callers.
     void emit(pipeline::Emission e) override;
+    /// @brief Enqueues a best-effort fast signal emission when Connected and not saturated; drops otherwise.
+    void emit_fast(pipeline::Event e) override;
     /// @brief Enqueues a checkpoint update; acts as an execution barrier behind pending emits.
     void checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) override;
     /// @brief Enqueues initial checkpoint write if no checkpoint exists yet.
@@ -313,6 +321,8 @@ private:
     std::atomic<std::uint64_t> heartbeat_failures_total_{0};
     std::atomic<std::uint64_t> consumer_lag_failures_total_{0};
     std::atomic<std::uint64_t> reconnects_total_{0};
+    std::atomic<std::uint64_t> fast_emitted_total_{0};
+    std::atomic<std::uint64_t> fast_dropped_total_{0};
     std::atomic<std::uint64_t> heartbeat_ms_{0};
     mutable std::mutex fatal_mu_;
     std::string fatal_message_;
