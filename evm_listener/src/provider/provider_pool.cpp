@@ -52,9 +52,12 @@ void validate(const PoolConfig& c) {
         if (p.name.empty()) fail("provider with empty name");
         if (!by_name.emplace(p.name, &p).second) fail("duplicate provider name '" + p.name + "'");
         if (p.reconcile_rps && *p.reconcile_rps == 0) fail("provider '" + p.name + "' reconcile_rps must be >= 1");
+        if (p.reconcile_burst && *p.reconcile_burst == 0) fail("provider '" + p.name + "' reconcile_burst must be >= 1");
         const std::uint32_t eff_rps = p.reconcile_rps.value_or(c.reconcile_rps);
-        const std::uint32_t eff_burst = p.reconcile_burst.value_or(std::max(c.reconcile_burst, eff_rps));
-        if (eff_burst < eff_rps) fail("provider '" + p.name + "' reconcile_burst must be >= reconcile_rps");
+        const std::uint32_t eff_burst = p.reconcile_burst.value_or(c.reconcile_burst);
+        if (eff_burst < eff_rps) {
+            fail("provider '" + p.name + "' effective reconcile_burst must be >= effective reconcile_rps");
+        }
     }
     const auto find = [&](const std::string& n, const char* list) -> const ProviderEndpoint& {
         const auto it = by_name.find(n);
@@ -101,7 +104,7 @@ ProviderPool::ProviderPool(Private, net::any_io_executor executor, PoolConfig cf
             http = std::make_unique<rpc::HttpRpcClient>(exec_, std::move(hc));
         }
         const std::uint32_t rps = p.reconcile_rps.value_or(cfg_.reconcile_rps);
-        const std::uint32_t burst = p.reconcile_burst.value_or(std::max(cfg_.reconcile_burst, rps));
+        const std::uint32_t burst = p.reconcile_burst.value_or(cfg_.reconcile_burst);
         nodes_.emplace(p.name, Node(p, std::move(http),
                                     rpc::Backoff(cfg_.seed + i++, cfg_.backoff_base, cfg_.backoff_cap,
                                                  cfg_.backoff_min_live),

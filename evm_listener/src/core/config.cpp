@@ -351,12 +351,12 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         if (r.reconcile_burst < r.reconcile_rps) s.fail("reconcile_burst", "must be >= reconcile_rps");
         for (const auto& d : declared) {
             const std::uint32_t eff_rps = d.reconcile_rps.value_or(r.reconcile_rps);
-            const std::uint32_t eff_burst = d.reconcile_burst.value_or(std::max(r.reconcile_burst, eff_rps));
-            if (d.reconcile_burst && *d.reconcile_burst < eff_rps) {
+            const std::uint32_t eff_burst = d.reconcile_burst.value_or(r.reconcile_burst);
+            if (eff_burst < eff_rps) {
                 throw ConfigError(origin + ": [[providers]][" + std::to_string(d.index) +
-                                  "].reconcile_burst: must be >= reconcile_rps");
+                                  "].reconcile_burst: effective burst (" + std::to_string(eff_burst) +
+                                  ") must be >= effective reconcile_rps (" + std::to_string(eff_rps) + ")");
             }
-            (void)eff_burst;
         }
 
         // Helper to locate a declared provider by name in the redundancy order list.

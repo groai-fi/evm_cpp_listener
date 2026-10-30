@@ -617,6 +617,38 @@ TEST_CASE("pool: call_to waits for a token instead of exceeding reconcile_rps", 
     shutdown(ioc, pool);
 }
 
+TEST_CASE("pool: per-provider token buckets pace providers independently", "[integration]") {
+    net::io_context ioc;
+    Chain chain;
+    MockHttpServer h1(ioc, healthy(chain));
+    MockHttpServer h2(ioc, healthy(chain));
+    auto cfg = base_cfg(
+        {{"H1", kDeadWs, h1.url(), 50u, 50u}, {"H2", kDeadWs, h2.url(), std::nullopt, std::nullopt}},
+        {"H1"}, {"H1", "H2"});
+    cfg.reconcile_rps = 2;
+    cfg.reconcile_burst = 2;
+    auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), {});
+
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 5; ++i) {
+        CHECK(run_sync(ioc, pool->call_to("H1", get_logs_request())).ok);
+    }
+    const auto elapsed_h1 = std::chrono::steady_clock::now() - t1;
+    CHECK(pool->throttled_total("H1") == 0);
+    CHECK(elapsed_h1 < 100ms);
+    CHECK(h1.requests() == 5);
+
+    const auto t2 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) {
+        CHECK(run_sync(ioc, pool->call_to("H2", get_logs_request())).ok);
+    }
+    const auto elapsed_h2 = std::chrono::steady_clock::now() - t2;
+    CHECK(pool->throttled_total("H2") == 1);
+    CHECK(elapsed_h2 >= 300ms);
+    CHECK(h2.requests() == 3);
+    shutdown(ioc, pool);
+}
+
 TEST_CASE("pool: report_bad counts toward Down and pick_getlogs_excluding skips the excluded", "[integration]") {
     net::io_context ioc;
     Chain chain;
@@ -658,13 +690,22 @@ TEST_CASE("pool: create() rejects an invalid pacing config", "[unit]") {
     cfg.reconcile_burst = 5;
     CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
 
-    cfg.providers[0].reconcile_rps = 0;
-    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
-    cfg.providers[0].reconcile_rps = 10;
-    cfg.providers[0].reconcile_burst = 8;
-    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
-    cfg.providers[0].reconcile_burst = 15;
-    CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
+    SECTION("pool: per-provider rate-limit validation") {
+        cfg.reconcile_rps = 2;
+        cfg.reconcile_burst = 4;
+        cfg.providers[0].reconcile_rps = 0;
+        CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+        cfg.providers[0].reconcile_rps = 2;
+        cfg.providers[0].reconcile_burst = 0;
+        CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+        cfg.providers[0].reconcile_rps = 10;
+        cfg.providers[0].reconcile_burst = std::nullopt;
+        CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+        cfg.providers[0].reconcile_burst = 8;
+        CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+        cfg.providers[0].reconcile_burst = 15;
+        CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
+    }
 }
 
 TEST_CASE("pool: head silence keeps counting after every WS provider went Down, so a stall can still alert", "[integration]") {

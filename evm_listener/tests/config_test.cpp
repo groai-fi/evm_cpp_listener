@@ -413,7 +413,12 @@ TEST_CASE("reconcile and pending-buffer keys reject out-of-range values", "[unit
     CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_rps = 10", "reconcile_rps = 0"), env),
                       ContainsSubstring("[[providers]][0].reconcile_rps: out of range"));
     CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_burst = 15", "reconcile_burst = 5"), env),
-                      ContainsSubstring("[[providers]][0].reconcile_burst: must be >= reconcile_rps"));
+                      ContainsSubstring("[[providers]][0].reconcile_burst: effective burst (5) must be >= effective reconcile_rps (10)"));
+    SECTION("omitted per-provider reconcile_burst falls back to [redundancy].reconcile_burst and fails fast when < reconcile_rps") {
+        CHECK_THROWS_WITH(
+            parse_with(mutate(base, "reconcile_burst = 15\n", ""), env),
+            ContainsSubstring("[[providers]][0].reconcile_burst: effective burst (4) must be >= effective reconcile_rps (10)"));
+    }
     // burst below rps: 3 < 5
     const std::string low_burst = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 5 "),
                                          "reconcile_burst        = 4 ", "reconcile_burst        = 3 ");
