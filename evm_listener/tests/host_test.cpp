@@ -1654,6 +1654,8 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
     replace_once(toml, "failover_after         = 3", "failover_after         = 100");
     replace_once(toml, "reconcile_rps          = 2", "reconcile_rps          = 100");
     replace_once(toml, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    replace_once(toml, "reconcile_rps = 10", "reconcile_rps = 100");
+    replace_once(toml, "reconcile_burst = 15", "reconcile_burst = 100");
     auto cfg = evml::core::Config::parse(toml, "chaos.toml", provider_env(px_http.url(), "chaos-host"));
 
     RunningHost h(std::move(cfg));
@@ -1777,11 +1779,15 @@ TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free s
     replace_once(toml_a, "redis_url_env      = \"REDIS_URL\"", "redis_url_env      = \"EVML_TEST_TAKEOVER_REDIS_A\"");
     replace_once(toml_a, "reconcile_rps          = 2", "reconcile_rps          = 100");
     replace_once(toml_a, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    replace_once(toml_a, "reconcile_rps = 10", "reconcile_rps = 100");
+    replace_once(toml_a, "reconcile_burst = 15", "reconcile_burst = 100");
     auto cfg_a = evml::core::Config::parse(toml_a, "takeover_a.toml", provider_env(node.url(), "hostA"));
 
     auto toml_b = host_toml(shard, spill_b, node.url(), 30000, true, 3000, 500);
     replace_once(toml_b, "reconcile_rps          = 2", "reconcile_rps          = 100");
     replace_once(toml_b, "reconcile_burst        = 4", "reconcile_burst        = 100");
+    replace_once(toml_b, "reconcile_rps = 10", "reconcile_rps = 100");
+    replace_once(toml_b, "reconcile_burst = 15", "reconcile_burst = 100");
     auto cfg_b = evml::core::Config::parse(toml_b, "takeover_b.toml", provider_env(node.url(), "hostB"));
 
     RunningHost a(std::move(cfg_a));
@@ -2083,6 +2089,17 @@ TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with 
     CHECK(m.status == 200);
     CHECK_THAT(m.body, ContainsSubstring("evml_fast_emitted_total 2"));
     CHECK_THAT(m.body, ContainsSubstring("evml_fast_dropped_total 0"));
+
+    // 5. Freeze the pipeline via a finalized hash conflict and verify subsequent WS logs do not emit to evml:{shard}:fast.
+    r.ns.finalized_hash_char = 'c';
+    REQUIRE(r.until([&] { return r.host.status().frozen || r.host.threw.load(); }, 15s));
+    REQUIRE_FALSE(r.host.threw.load());
+    const std::uint64_t n_frozen = r.c0 + 307;
+    const std::string log_frozen = cfg_log_json(r.host.cfg, n_frozen, hx('a', n_frozen), 0);
+    r.feed.out.push_back(logs_msg(log_frozen));
+    REQUIRE(r.until([&] { return r.feed.out.empty(); }, 5s));
+    r.wait(250ms);
+    CHECK(admin.xlen(keys.fast()) == 2);
 
     r.host.finish();
     CHECK(r.host.exit_code.load() == 0);

@@ -160,6 +160,12 @@ private:
         if (log.removed || log.topics.empty()) return;
         const auto* route = cfg_.route(log.address, log.topics.front());
         if (!route || !route->fast_stream) return;
+        if (rt_->driver) {
+            const auto st = rt_->driver->status();
+            if (st.frozen || st.state == pipeline::PipelineState::Failed) {
+                return;
+            }
+        }
         const auto now_ms = wall_ms();
         const std::uint64_t ts = rt_->ring.timestamp_of(log.block_number, log.block_hash).value_or(0);
         const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
