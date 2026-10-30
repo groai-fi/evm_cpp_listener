@@ -23,6 +23,7 @@ const char* to_string(Finality f) {
         case Finality::Safe: return "safe";
         case Finality::Finalized: return "finalized";
         case Finality::Depth: return "depth";
+        case Finality::Latest: return "latest";
     }
     return "?";
 }
@@ -446,7 +447,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         std::set<std::string> addrs;
         for (std::size_t i = 0; i < tables.size(); ++i) {
             const Section s(*tables[i], origin, "[[contracts]][" + std::to_string(i) + "]",
-                            {"name", "address", "start_block", "finality", "stream", "events"});
+                            {"name", "address", "start_block", "finality", "stream", "fast_stream", "events"});
             ContractCfg c;
             c.name = s.str("name");
             // Disallow duplicate contract names for clear logging and Prometheus labelling.
@@ -468,6 +469,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             // Inherit default chain finality if contract does not specify its own override.
             c.finality = s.has("finality") ? parse_finality(s, "finality", s.str("finality")) : cfg.chain.default_finality;
             if (c.finality == Finality::Depth && cfg.chain.depth == 0) s.fail("finality", "finality=depth requires [chain].depth > 0");
+            c.fast_stream = s.opt<bool>("fast_stream", false, "boolean");
 
             if (const toml::node* n = s.node("start_block")) {
                 if (auto v = n->value<std::int64_t>()) {
@@ -499,7 +501,7 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             // Populate fast lookup route map from (contract_address, topic0) to EventRoute metadata.
             for (std::size_t e = 0; e < c.events.size(); ++e) {
                 cfg.routes.emplace(RouteKey{c.address, c.topics[e]},
-                                   EventRoute{c.name, event_name(c.events[e]), c.stream, c.finality});
+                                   EventRoute{c.name, event_name(c.events[e]), c.stream, c.finality, c.fast_stream});
             }
             cfg.contracts.push_back(std::move(c));
         }
@@ -529,11 +531,13 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
     // [sink]
     {
         const Section s(table_of(root, origin, "sink"), origin, "[sink]",
-                        {"redis_url_env", "retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir", "spill_max_bytes",
-                         "require_noeviction", "consumer_groups", "consumer_lag_warn_s", "consumer_lag_crit_s"});
+                        {"redis_url_env", "retention_ms", "fast_retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir",
+                         "spill_max_bytes", "require_noeviction", "consumer_groups", "consumer_lag_warn_s",
+                         "consumer_lag_crit_s"});
         auto& k = cfg.sink;
         k.redis_url_env = s.str("redis_url_env");
         k.retention_ms = s.uint<std::uint64_t>("retention_ms", 1);
+        k.fast_retention_ms = s.opt_uint<std::uint64_t>("fast_retention_ms", k.fast_retention_ms, 1000);
         k.dedup_ttl_s = s.uint<std::uint32_t>("dedup_ttl_s", 1);
         k.queue_capacity = s.uint<std::uint32_t>("queue_capacity", 1);
         k.spill_dir = s.str("spill_dir");

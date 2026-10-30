@@ -430,3 +430,63 @@ TEST_CASE("$PORT replaces the port of [ops].http_listen and keeps the host", "[u
     CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "\"[::]:9464\"", "\"localhost\""), env),
                       ContainsSubstring("[ops].http_listen: must be host:port to apply $PORT"));
 }
+
+TEST_CASE("base.toml: fast_stream opt-in on pools, default false on others, and fast_retention_ms validation",
+          "[unit][config][keys]") {
+    const EnvMap env = full_env();
+    const Config c = parse_with(base_toml(), env);
+
+    CHECK(to_string(Finality::Latest) == std::string("latest"));
+    CHECK(c.sink.fast_retention_ms == 3600000);
+
+    REQUIRE(c.contracts.size() == 5);
+    CHECK(c.contracts[0].name == "eurc_usdc_cl1_pool");
+    CHECK(c.contracts[0].fast_stream == true);
+    CHECK(c.contracts[1].name == "eurc_usdc_cl50_pool");
+    CHECK(c.contracts[1].fast_stream == true);
+    CHECK(c.contracts[2].name == "eurc_usdc_cl50_gauge");
+    CHECK(c.contracts[2].fast_stream == false);
+    CHECK(c.contracts[3].name == "aero_cl_factory");
+    CHECK(c.contracts[3].fast_stream == false);
+    CHECK(c.contracts[4].name == "aero_voter");
+    CHECK(c.contracts[4].fast_stream == false);
+
+    const auto pool1 = Address20::from_hex("0xc5E51044eB7318950B1aFb044FccFb25782C48c1");
+    const auto pool50 = Address20::from_hex("0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7");
+    const auto swap = Hash32::from_hex("0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67");
+    REQUIRE(c.route(pool1, swap) != nullptr);
+    CHECK(c.route(pool1, swap)->fast_stream == true);
+    REQUIRE(c.route(pool50, swap) != nullptr);
+    CHECK(c.route(pool50, swap)->fast_stream == true);
+
+    const auto factory = Address20::from_hex("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A");
+    const auto pool_created = Hash32::from_hex("0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2");
+    REQUIRE(c.route(factory, pool_created) != nullptr);
+    CHECK(c.route(factory, pool_created)->fast_stream == false);
+
+    // Omitting fast_stream and fast_retention_ms falls back to false and 3600000 ms.
+    std::string bare = mutate(base_toml(), "fast_stream = true\n", "");
+    bare = mutate(bare, "fast_stream = true\n", "");
+    bare = mutate(bare, "fast_retention_ms  = 3600000     # XADD MINID ~ now-1h on evml:{shard}:fast\n", "");
+    const Config d = parse_with(bare, env);
+    CHECK(d.contracts[0].fast_stream == false);
+    CHECK(d.contracts[1].fast_stream == false);
+    CHECK(d.route(pool1, swap)->fast_stream == false);
+    CHECK(d.sink.fast_retention_ms == 3600000);
+
+    // Invalid fast_retention_ms (< 1000, 0, or negative) fails fast.
+    CHECK_THROWS_WITH(
+        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 0"), env),
+        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 0)"));
+    CHECK_THROWS_WITH(
+        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = -5"), env),
+        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got -5)"));
+    CHECK_THROWS_WITH(
+        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 999"), env),
+        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 999)"));
+
+    // Finality::Latest is runtime-only and rejected in TOML finality settings.
+    CHECK_THROWS_WITH(
+        parse_with(mutate(base_toml(), "finality    = \"safe\"", "finality    = \"latest\""), env),
+        ContainsSubstring("must be one of safe|finalized|depth"));
+}

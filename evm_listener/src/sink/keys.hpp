@@ -24,6 +24,8 @@ public:
     std::string events() const { return prefix_ + "events"; }
     /// @brief Registry event stream key: evml:{shard}:registry.
     std::string registry() const { return prefix_ + "registry"; }
+    /// @brief Low-latency WebSocket tip signal stream key: evml:{shard}:fast.
+    std::string fast() const { return prefix_ + "fast"; }
     /// @brief Resolves stream key for given StreamKind enum.
     std::string stream(core::StreamKind k) const { return k == core::StreamKind::Events ? events() : registry(); }
     /// @brief Checkpoint hash key: evml:{shard}:ckpt.

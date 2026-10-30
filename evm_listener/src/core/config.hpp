@@ -17,7 +17,8 @@ namespace evml::core {
 enum class Finality {
     Safe,       // Subject to safe reorgs; emitted to safe stream and tracked in pending buffer
     Finalized,  // Irreversible canonical events; audited against safe emissions
-    Depth       // Block depth confirmation (N blocks behind chain head)
+    Depth,      // Block depth confirmation (N blocks behind chain head)
+    Latest      // Unconfirmed WebSocket tip signal; emitted only to the hot fast stream
 };
 
 /// @brief Destination Redis stream classification.
@@ -93,6 +94,7 @@ struct ContractCfg {
     std::optional<std::uint64_t> start_block;  // Starting block height (nullopt => start at gate)
     Finality finality{Finality::Finalized};    // Required finality classification
     StreamKind stream{StreamKind::Events};     // Destination stream category
+    bool fast_stream{false};                   // Emit unconfirmed WebSocket tip logs to evml:{shard}:fast
     std::vector<std::string> events;           // Canonical event signatures (e.g. "Transfer(address,address,uint256)")
     std::vector<Hash32> topics;                // Topic0 Keccak hashes corresponding to events
 };
@@ -123,6 +125,7 @@ struct ConsumerGroupCfg {
 struct SinkCfg {
     std::string redis_url_env;                               // Environment variable name holding Redis connection URL
     std::uint64_t retention_ms{};                            // Maximum message retention window in milliseconds
+    std::uint64_t fast_retention_ms{3600000};                // Fast signal stream retention window in milliseconds (>= 1000)
     std::uint32_t dedup_ttl_s{};                             // Redis deduplication key TTL in seconds
     std::uint32_t queue_capacity{};                          // Maximum in-flight buffer capacity
     std::string spill_dir;                                   // Local filesystem path for disk spill files
@@ -151,6 +154,7 @@ struct EventRoute {
     std::string event;                      // Event name (prefix before '(')
     StreamKind stream{StreamKind::Events};  // Destination stream
     Finality finality{Finality::Finalized}; // Event finality requirement
+    bool fast_stream{false};                // True if WebSocket tip logs also emit to evml:{shard}:fast
 };
 
 /// @brief Composite key lookup for fast event routing: (contract_address, topic0).

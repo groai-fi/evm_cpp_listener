@@ -8,6 +8,7 @@ add_executable(evml_tests
     hex_test.cpp
     keccak_test.cpp
     config_test.cpp
+    keys_test.cpp
     codec_test.cpp
     log_test.cpp
     backoff_test.cpp
