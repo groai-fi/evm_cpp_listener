@@ -34,6 +34,8 @@ struct ProviderEndpoint {
     std::string name;
     std::string ws_url;    // empty for providers that are only used for getLogs
     std::string http_url;  // required for every provider that appears in an order list
+    std::optional<std::uint32_t> reconcile_rps{};    // optional override of PoolConfig::reconcile_rps
+    std::optional<std::uint32_t> reconcile_burst{};  // optional override of PoolConfig::reconcile_burst
 };
 
 /// @brief Configuration settings controlling provider pool failover, timeouts, backoff, and poll intervals.

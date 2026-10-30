@@ -61,7 +61,11 @@ TEST_CASE("make_pool_config maps base.toml onto the pool", "[unit][pool_config]"
     };
     CHECK(find("quicknode").ws_url == "wss://qn.example/SECRETQN");
     CHECK(find("quicknode").http_url == "https://qn.example/SECRETQN");
+    CHECK(find("quicknode").reconcile_rps == 10u);
+    CHECK(find("quicknode").reconcile_burst == 15u);
     CHECK(find("ankr").ws_url.empty());
+    CHECK_FALSE(find("ankr").reconcile_rps.has_value());
+    CHECK_FALSE(find("ankr").reconcile_burst.has_value());
     CHECK(find("base_public").http_url == "https://mainnet.base.org");
 
     CHECK(p.chain_id == 8453);

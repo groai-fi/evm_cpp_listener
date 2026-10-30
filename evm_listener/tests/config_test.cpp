@@ -379,15 +379,26 @@ TEST_CASE("base.toml: reconcile and pending-buffer keys", "[unit][config]") {
     CHECK(c.chain.pending_max_logs == 200000);
     CHECK(c.redundancy.reconcile_rps == 2);
     CHECK(c.redundancy.reconcile_burst == 4);
+    REQUIRE(c.ws_chain.size() >= 2);
+    CHECK(c.ws_chain[0].name == "quicknode");
+    CHECK(c.ws_chain[0].reconcile_rps == 10u);
+    CHECK(c.ws_chain[0].reconcile_burst == 15u);
+    CHECK(c.ws_chain[1].name == "infura");
+    CHECK_FALSE(c.ws_chain[1].reconcile_rps.has_value());
+    CHECK_FALSE(c.ws_chain[1].reconcile_burst.has_value());
 
     // Every key is optional: a config that predates them gets the plan defaults.
     std::string bare = mutate(base_toml(), "pending_max_logs   = 200000           # staged WS logs kept for the cross-check; oldest evicted beyond this\n", "");
+    bare = mutate(bare, "reconcile_rps = 10           # Discover plan allows 15 RPS; 10 RPS * 5 blocks = 50 blocks/s catch-up\n", "");
+    bare = mutate(bare, "reconcile_burst = 15\n", "");
     bare = mutate(bare, "reconcile_rps          = 2      # per-provider token bucket for reconcile calls (getLogs retries, block lookups)\n", "");
     bare = mutate(bare, "reconcile_burst        = 4      # bucket capacity; must be >= reconcile_rps\n", "");
     const Config d = parse_with(bare, full_env());
     CHECK(d.chain.pending_max_logs == 200000);
     CHECK(d.redundancy.reconcile_rps == 2);
     CHECK(d.redundancy.reconcile_burst == 4);
+    CHECK_FALSE(d.ws_chain[0].reconcile_rps.has_value());
+    CHECK_FALSE(d.ws_chain[0].reconcile_burst.has_value());
 }
 
 TEST_CASE("reconcile and pending-buffer keys reject out-of-range values", "[unit][config]") {
@@ -399,6 +410,10 @@ TEST_CASE("reconcile and pending-buffer keys reject out-of-range values", "[unit
                       ContainsSubstring("[redundancy].reconcile_rps: out of range"));
     CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_burst        = 4 ", "reconcile_burst        = 0 "), env),
                       ContainsSubstring("[redundancy].reconcile_burst: out of range"));
+    CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_rps = 10", "reconcile_rps = 0"), env),
+                      ContainsSubstring("[[providers]][0].reconcile_rps: out of range"));
+    CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_burst = 15", "reconcile_burst = 5"), env),
+                      ContainsSubstring("[[providers]][0].reconcile_burst: must be >= reconcile_rps"));
     // burst below rps: 3 < 5
     const std::string low_burst = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 5 "),
                                          "reconcile_burst        = 4 ", "reconcile_burst        = 3 ");

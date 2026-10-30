@@ -24,6 +24,8 @@ name = "quicknode"
 ws_env = "BASE_WSS_URL_QUICKNODE"
 http_env = "BASE_RPC_URL_QUICKNODE"
 max_getlogs_range = 5        # measured: Discover plan, -32615
+reconcile_rps = 10           # Discover plan allows 15 RPS; 10 RPS * 5 blocks = 50 blocks/s catch-up
+reconcile_burst = 15
 
 [[providers]]
 name = "infura"

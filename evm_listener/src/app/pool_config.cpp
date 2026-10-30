@@ -25,12 +25,16 @@ provider::PoolConfig make_pool_config(const core::Config& cfg, const std::string
         auto& e = upsert(src.name);
         e.ws_url = src.ws_url;
         if (!src.http_url.empty()) e.http_url = src.http_url;
+        e.reconcile_rps = src.reconcile_rps;
+        e.reconcile_burst = src.reconcile_burst;
         p.ws_order.push_back(src.name);
     }
     // Populate HTTP endpoints and record operator-defined failover order.
     for (const auto& src : cfg.getlogs_chain) {
         auto& e = upsert(src.name);
         e.http_url = src.http_url;
+        e.reconcile_rps = src.reconcile_rps;
+        e.reconcile_burst = src.reconcile_burst;
         p.getlogs_order.push_back(src.name);
     }
 

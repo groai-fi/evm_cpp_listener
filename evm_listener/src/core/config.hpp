@@ -61,10 +61,12 @@ struct ChainCfg {
 /// @brief Active RPC provider credentials and capability configuration.
 /// Security Notice: URLs may contain authentication tokens; never log unredacted.
 struct Provider {
-    std::string name;                   // Provider identifier name (e.g. "alchemy", "infura", "ankr")
-    std::string ws_url;                 // Resolved WebSocket endpoint URL (empty if not enabled)
-    std::string http_url;               // Resolved HTTP endpoint URL (empty if not enabled)
-    std::uint32_t max_getlogs_range{};  // Provider-specific getLogs block window ceiling
+    std::string name;                                  // Provider identifier name (e.g. "alchemy", "infura", "ankr")
+    std::string ws_url;                                // Resolved WebSocket endpoint URL (empty if not enabled)
+    std::string http_url;                              // Resolved HTTP endpoint URL (empty if not enabled)
+    std::uint32_t max_getlogs_range{};                 // Provider-specific getLogs block window ceiling
+    std::optional<std::uint32_t> reconcile_rps{};      // Optional per-provider override for [redundancy].reconcile_rps
+    std::optional<std::uint32_t> reconcile_burst{};    // Optional per-provider override for [redundancy].reconcile_burst
 };
 
 /// @brief Multi-provider redundancy, prioritization, and failover policy parameters.

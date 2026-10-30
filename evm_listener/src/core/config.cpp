@@ -157,6 +157,9 @@ struct Declared {
     std::string http_env;
     std::string http_literal;
     std::uint32_t max_getlogs_range{};
+    std::optional<std::uint32_t> reconcile_rps{};
+    std::optional<std::uint32_t> reconcile_burst{};
+    std::size_t index{};
 };
 
 /// @brief Enforces zero hardcoded secrets policy: literal URLs must not contain query parameters, userinfo, or paths.
@@ -302,8 +305,9 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         std::set<std::string> names;
         for (std::size_t i = 0; i < tables.size(); ++i) {
             const Section s(*tables[i], origin, "[[providers]][" + std::to_string(i) + "]",
-                            {"name", "ws_env", "http_env", "http_url", "max_getlogs_range"});
+                            {"name", "ws_env", "http_env", "http_url", "max_getlogs_range", "reconcile_rps", "reconcile_burst"});
             Declared d;
+            d.index = i;
             d.name = s.str("name");
             // Reject duplicate provider names to ensure unambiguous priority ordering.
             if (!names.insert(d.name).second) s.fail("name", "duplicate provider \"" + d.name + "\"");
@@ -319,6 +323,8 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
                 s.fail("name", "provider \"" + d.name + "\" has no ws_env/http_env/http_url");
             }
             d.max_getlogs_range = s.uint<std::uint32_t>("max_getlogs_range", 1);
+            if (s.has("reconcile_rps")) d.reconcile_rps = s.uint<std::uint32_t>("reconcile_rps", 1);
+            if (s.has("reconcile_burst")) d.reconcile_burst = s.uint<std::uint32_t>("reconcile_burst", 1);
             declared.push_back(std::move(d));
         }
     }
@@ -343,6 +349,15 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
         r.reconcile_burst = s.opt_uint<std::uint32_t>("reconcile_burst", r.reconcile_burst, 1);
         // A bucket that holds fewer tokens than it refills per second can never reach its own rate.
         if (r.reconcile_burst < r.reconcile_rps) s.fail("reconcile_burst", "must be >= reconcile_rps");
+        for (const auto& d : declared) {
+            const std::uint32_t eff_rps = d.reconcile_rps.value_or(r.reconcile_rps);
+            const std::uint32_t eff_burst = d.reconcile_burst.value_or(std::max(r.reconcile_burst, eff_rps));
+            if (d.reconcile_burst && *d.reconcile_burst < eff_rps) {
+                throw ConfigError(origin + ": [[providers]][" + std::to_string(d.index) +
+                                  "].reconcile_burst: must be >= reconcile_rps");
+            }
+            (void)eff_burst;
+        }
 
         // Helper to locate a declared provider by name in the redundancy order list.
         const auto find = [&](const std::string& name, const char* list) -> const Declared& {
@@ -374,6 +389,8 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             p.name = name;
             p.ws_url = url;
             p.max_getlogs_range = d.max_getlogs_range;
+            p.reconcile_rps = d.reconcile_rps;
+            p.reconcile_burst = d.reconcile_burst;
             cfg.ws_chain.push_back(std::move(p));
         }
         // Resolve getLogs HTTP provider chain in operator-defined priority order.
@@ -396,6 +413,8 @@ Config Config::parse(std::string_view toml_text, const std::string& origin, cons
             p.name = name;
             p.http_url = url;
             p.max_getlogs_range = d.max_getlogs_range;
+            p.reconcile_rps = d.reconcile_rps;
+            p.reconcile_burst = d.reconcile_burst;
             cfg.getlogs_chain.push_back(std::move(p));
         }
 

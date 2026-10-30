@@ -657,6 +657,14 @@ TEST_CASE("pool: create() rejects an invalid pacing config", "[unit]") {
     CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
     cfg.reconcile_burst = 5;
     CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
+
+    cfg.providers[0].reconcile_rps = 0;
+    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+    cfg.providers[0].reconcile_rps = 10;
+    cfg.providers[0].reconcile_burst = 8;
+    CHECK_THROWS_AS(ProviderPool::create(ioc.get_executor(), cfg, {}), std::invalid_argument);
+    cfg.providers[0].reconcile_burst = 15;
+    CHECK_NOTHROW(ProviderPool::create(ioc.get_executor(), cfg, {}));
 }
 
 TEST_CASE("pool: head silence keeps counting after every WS provider went Down, so a stall can still alert", "[integration]") {
