@@ -15,7 +15,7 @@ build: ## Compile C++ project using current preset ($(CMAKE_PRESET))
 .PHONY: rebuild
 rebuild: ## Clean build folder, reinstall dependencies, configure, and recompile
 	@echo "$(YELLOW)==> Cleaning and rebuilding C++ project ($(BUILD_TYPE))...$(RESET)"
-	$(DEV_EXEC) bash -c "rm -rf build/$(BUILD_TYPE) && conan install . --build=missing -pr:a=$(CONAN_PROFILE) -s build_type=$(BUILD_TYPE) && cmake --preset $(CMAKE_PRESET) && cmake --build --preset $(CMAKE_PRESET) --parallel $(BUILD_JOBS)"
+	$(DEV_EXEC) bash -c "rm -rf build/$(BUILD_TYPE) && conan install . --lockfile=conan.lock --build=missing -pr:a=$(CONAN_PROFILE) -s build_type=$(BUILD_TYPE) && cmake --preset $(CMAKE_PRESET) && cmake --build --preset $(CMAKE_PRESET) --parallel $(BUILD_JOBS)"
 
 .PHONY: clean-build
 clean-build: ## Remove the local build/ directory

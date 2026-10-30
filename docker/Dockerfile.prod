@@ -29,12 +29,12 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && pip3 install --no-cache-dir --break-system-packages 'conan==2.*' \
     && conan profile detect --force
 
-# Copy single-source version, Conan recipe, and profiles first (layer caching)
-COPY VERSION conanfile.py conan.lock* ./
+# Copy single-source version, Conan recipe, lockfile, and profiles first (layer caching)
+COPY VERSION conanfile.py conan.lock ./
 COPY conan/ ./conan/
 
 # Install Release dependencies
-RUN conan install . --build=missing -pr:a=conan/profiles/release -s build_type=Release
+RUN conan install . --lockfile=conan.lock --build=missing -pr:a=conan/profiles/release -s build_type=Release
 
 # Copy source tree (exclude tests and local .env from builder cache)
 COPY CMakeLists.txt ./

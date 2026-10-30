@@ -18,4 +18,4 @@ endif
 .PHONY: conan
 conan: ## Install C++ dependencies via Conan 2.x inside container
 	@echo "$(GREEN)==> Installing Conan dependencies (profile: $(CONAN_PROFILE), build_type: $(BUILD_TYPE))...$(RESET)"
-	$(DEV_EXEC) conan install . --build=missing -pr:a=$(CONAN_PROFILE) -s build_type=$(BUILD_TYPE)
+	$(DEV_EXEC) conan install . --lockfile=conan.lock --build=missing -pr:a=$(CONAN_PROFILE) -s build_type=$(BUILD_TYPE)

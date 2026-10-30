@@ -107,7 +107,7 @@ jobs:
       - name: Build and test Debug (conan-debug, ASan+UBSan, test hooks)
         run: |
           export HOSTNAME=127.0.0.1
-          conan install . --build=missing -pr:a=conan/profiles/debug -s build_type=Debug
+          conan install . --lockfile=conan.lock --build=missing -pr:a=conan/profiles/debug -s build_type=Debug
           cmake --preset conan-debug -DEVML_SANITIZE=ON -DEVML_TEST_HOOKS=ON
           cmake --build --preset conan-debug --parallel "$(nproc)"
           ctest --preset conan-debug --output-on-failure
@@ -116,7 +116,7 @@ jobs:
         run: |
           export HOSTNAME=127.0.0.1
           redis-cli -h 127.0.0.1 -p 6379 FLUSHALL
-          conan install . --build=missing -pr:a=conan/profiles/release -s build_type=Release
+          conan install . --lockfile=conan.lock --build=missing -pr:a=conan/profiles/release -s build_type=Release
           cmake --preset conan-release
           cmake --build --preset conan-release --parallel "$(nproc)"
           ctest --preset conan-release --output-on-failure
