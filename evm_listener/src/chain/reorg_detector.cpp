@@ -43,6 +43,12 @@ std::optional<BlockRef> ReorgDetector::ref_at(std::uint64_t number) const {
     return it->second;
 }
 
+std::optional<std::uint64_t> ReorgDetector::timestamp_of(std::uint64_t number, const core::Hash32& hash) const {
+    const auto it = ring_.find(number);
+    if (it == ring_.end() || !(it->second.hash == hash) || it->second.timestamp == 0) return std::nullopt;
+    return it->second.timestamp;
+}
+
 // Evaluates incoming head against ring top; categorizes into Seeded, Extended, Duplicate, or NeedWalk.
 HeadKind ReorgDetector::on_head(const BlockRef& head) {
     if (ring_.empty()) {

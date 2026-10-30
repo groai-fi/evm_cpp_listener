@@ -155,7 +155,17 @@ private:
         }
     }
     void on_ws_log(const rpc::Log& log, const std::string& provider) {
-        if (rt_ && rt_->driver && !demoting_ && !stopping_) rt_->ws_reconciler.on_ws_log(log, provider);
+        if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
+        rt_->ws_reconciler.on_ws_log(log, provider);
+        if (log.removed || log.topics.empty()) return;
+        const auto* route = cfg_.route(log.address, log.topics.front());
+        if (!route || !route->fast_stream) return;
+        const auto now_ms = wall_ms();
+        const std::uint64_t ts = rt_->ring.timestamp_of(log.block_number, log.block_hash).value_or(0);
+        const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
+        auto ev = pipeline::make_event(log, cfg_, ctx, pipeline::EventType::Log, ts, provider, now_ms, now_ms);
+        ev.finality = core::Finality::Latest;
+        rt_->sink->emit_fast(std::move(ev));
     }
     void on_sweep_page(core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
         if (!rt_) return;

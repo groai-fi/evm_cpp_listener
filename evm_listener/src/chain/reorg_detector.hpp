@@ -63,6 +63,7 @@ public:
     std::optional<std::uint64_t> top() const;
     std::optional<core::Hash32> hash_at(std::uint64_t number) const;
     std::optional<BlockRef> ref_at(std::uint64_t number) const;
+    std::optional<std::uint64_t> timestamp_of(std::uint64_t number, const core::Hash32& hash) const;
     std::size_t size() const { return ring_.size(); }
 
 private:

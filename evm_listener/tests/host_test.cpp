@@ -662,10 +662,10 @@ TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release po
     CHECK(posts.empty());  // before the first 10 s evaluation, nothing has been posted yet
 
     // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
-    // `current_getlogs()` and records `finalized = c0 + 250` before we regress the tag.
+    // `current_getlogs()` and records `finalized = c0 + 250` before we trigger a finalized hash conflict.
     evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
 
-    ns.finalized = c0 + 100;  // an impossible regression of the finalized tag: release frozen
+    ns.finalized_hash_char = 'c';  // a finalized hash conflict at the same height: release frozen
     REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s));
     REQUIRE_FALSE(h.threw.load());
 
@@ -1282,6 +1282,8 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
         "evml_sink_heartbeat_failures_total",
         "evml_sink_consumer_lag_failures_total",
         "evml_sink_reconnects_total",
+        "evml_fast_emitted_total",
+        "evml_fast_dropped_total",
         "evml_sink_queue_depth",
         "evml_sink_spill_records",
         "evml_sink_spill_bytes",
@@ -1992,3 +1994,97 @@ TEST_CASE("host: a safe reorg rewinding C_s and re-sweeping previously reconcile
     r.host.finish();
     CHECK(r.host.exit_code.load() == 0);
 }
+
+TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with finality=latest while non-fast contracts and safe sweeps stay isolated",
+          "[integration][host]") {
+    using Catch::Matchers::ContainsSubstring;
+    evml::core::log::init("info");
+    HeadRig r;
+    r.host.start();
+    REQUIRE(r.live());
+    r.quiet();
+
+    sw::redis::Redis admin{require_env("REDIS_URL")};
+    const evml::sink::Keys keys{r.shard};
+
+    const std::uint64_t n_tip = r.c0 + 305;
+    const std::uint64_t n_unseen = r.c0 + 306;
+    const std::string h_tip = hx('a', n_tip);
+    const std::string h_unseen = hx('a', n_unseen);
+
+    // 1. Seed head n_tip (timestamp = 1000 + n_tip) into ring, then push a Swap WS log on contract 0 (fast_stream = true).
+    r.feed.out.push_back(head_msg(n_tip, h_tip, hx('a', n_tip - 1)));
+    const std::string log_tip = cfg_log_json(r.host.cfg, n_tip, h_tip, 0);
+    r.feed.out.push_back(logs_msg(log_tip));
+
+    // 2. Push a Swap WS log at n_unseen (before its newHeads header arrives -> block_timestamp = "0", zero HTTP block calls).
+    const std::string log_unseen = cfg_log_json(r.host.cfg, n_unseen, h_unseen, 1);
+    r.feed.out.push_back(logs_msg(log_unseen));
+
+    // 3. Push a WS log for contract 2 (aerodrome_cl_factory, fast_stream = false) and a removed=true WS log for contract 0.
+    const auto& c_factory = r.host.cfg.contracts.at(2);
+    REQUIRE_FALSE(c_factory.fast_stream);
+    const std::string log_factory = R"({"address":")" + c_factory.address.to_hex() + R"(","topics":[")" +
+                                    c_factory.topics.at(0).to_hex() + R"("],"data":"0x","blockNumber":")" +
+                                    evml::core::to_hex_u64(n_tip) + R"(","blockHash":")" + h_tip +
+                                    R"(","transactionHash":"0x)" + std::string(64, 'e') +
+                                    R"(","transactionIndex":"0x0","logIndex":"0x2","removed":false})";
+    const auto& c0_cfg = r.host.cfg.contracts.at(0);
+    const std::string log_removed = R"({"address":")" + c0_cfg.address.to_hex() + R"(","topics":[")" +
+                                    c0_cfg.topics.at(0).to_hex() + R"("],"data":"0x","blockNumber":")" +
+                                    evml::core::to_hex_u64(n_tip) + R"(","blockHash":")" + h_tip +
+                                    R"(","transactionHash":"0x)" + std::string(64, 'e') +
+                                    R"(","transactionIndex":"0x0","logIndex":"0x3","removed":true})";
+    r.feed.out.push_back(logs_msg(log_factory));
+    r.feed.out.push_back(logs_msg(log_removed));
+
+    REQUIRE(r.until([&] { return r.feed.out.empty() && admin.xlen(keys.fast()) == 2; }, 10s));
+
+    // Verify fast stream entries and zero dedup keys created by the fast path.
+    using StreamEntry = std::pair<std::string, std::unordered_map<std::string, std::string>>;
+    std::vector<StreamEntry> fast_entries;
+    admin.xrange(keys.fast(), "-", "+", std::back_inserter(fast_entries));
+    REQUIRE(fast_entries.size() == 2);
+
+    CHECK(fast_entries[0].second.at("v") == "1");
+    CHECK(fast_entries[0].second.at("type") == "log");
+    CHECK(fast_entries[0].second.at("finality") == "latest");
+    CHECK(fast_entries[0].second.at("contract") == "eurc_usdc_cl1_pool");
+    CHECK(fast_entries[0].second.at("event") == "Swap");
+    CHECK(fast_entries[0].second.at("block_number") == std::to_string(n_tip));
+    CHECK(fast_entries[0].second.at("block_timestamp") == std::to_string(1000 + n_tip));
+    CHECK(fast_entries[0].second.at("first_source") == "quicknode");
+
+    CHECK(fast_entries[1].second.at("finality") == "latest");
+    CHECK(fast_entries[1].second.at("block_number") == std::to_string(n_unseen));
+    CHECK(fast_entries[1].second.at("block_timestamp") == "0");
+
+    // Verify no eth_getBlockByNumber HTTP call was made for n_unseen.
+    CHECK(std::find(r.ns.block_requests.begin(), r.ns.block_requests.end(), n_unseen) == r.ns.block_requests.end());
+
+    // Verify zero dedup:* keys exist in Redis before the authoritative safe sweep runs.
+    std::vector<std::string> dedup_keys;
+    admin.keys("evml:{" + r.shard + "}:dedup:*", std::back_inserter(dedup_keys));
+    CHECK(dedup_keys.empty());
+
+    // 4. Advance safe tag across n_tip so the authoritative safe sweep emits log_tip to evml:{shard}:events.
+    r.ns.blocks[n_tip] = head_json(n_tip, h_tip, hx('a', n_tip - 1));
+    r.ns.logs.emplace_back(n_tip, log_tip);
+    r.ns.safe = r.c0 + 310;
+    REQUIRE(r.until([&] { return r.host.status().c_s >= r.c0 + 310 && admin.xlen(keys.events()) == 1; }, 30s));
+
+    std::vector<StreamEntry> cold_entries;
+    admin.xrange(keys.events(), "-", "+", std::back_inserter(cold_entries));
+    REQUIRE(cold_entries.size() == 1);
+    CHECK(cold_entries[0].second.at("finality") == "safe");
+    CHECK(cold_entries[0].second.at("event_id") == fast_entries[0].second.at("event_id"));
+
+    const auto m = ops_get(r.host.ops_port.load(), "/metrics");
+    CHECK(m.status == 200);
+    CHECK_THAT(m.body, ContainsSubstring("evml_fast_emitted_total 2"));
+    CHECK_THAT(m.body, ContainsSubstring("evml_fast_dropped_total 0"));
+
+    r.host.finish();
+    CHECK(r.host.exit_code.load() == 0);
+}
+

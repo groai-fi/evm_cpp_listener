@@ -224,3 +224,35 @@ TEST_CASE("reorg: reset clears the ring for a failover re-seed", "[unit][reorg]"
     CHECK_FALSE(d.top().has_value());
     CHECK(d.on_head(kMain.at(50)) == HeadKind::Seeded);
 }
+
+TEST_CASE("reorg: timestamp_of returns non-zero timestamp only when number and hash match", "[unit][reorg]") {
+    ReorgDetector d(16);
+    BlockRef b99 = kMain.at(99);
+    b99.timestamp = 0;  // unknown timestamp treated as a miss
+    BlockRef b100 = kMain.at(100);
+    b100.timestamp = 1700000100ULL;
+
+    REQUIRE(d.on_head(b99) == HeadKind::Seeded);
+    REQUIRE(d.on_head(b100) == HeadKind::Extended);
+
+    // Hit: matching number and hash with non-zero timestamp
+    CHECK(d.timestamp_of(100, b100.hash) == std::optional<std::uint64_t>{1700000100ULL});
+
+    // Misses: timestamp == 0, wrong hash, unknown block number
+    CHECK_FALSE(d.timestamp_of(99, b99.hash).has_value());
+    CHECK_FALSE(d.timestamp_of(100, hash_for(100, 1)).has_value());
+    CHECK_FALSE(d.timestamp_of(101, hash_for(101, 0)).has_value());
+
+    // Post-reorg replacement at height 100
+    const Branch alt{1, 99};
+    BlockRef alt100 = alt.at(100);
+    alt100.timestamp = 1700000202ULL;
+    REQUIRE(d.on_head(alt100) == HeadKind::NeedWalk);
+    auto w = d.begin_walk(alt100);
+    REQUIRE(w.state() == ForkWalk::State::Done);
+    d.apply(w);
+
+    CHECK_FALSE(d.timestamp_of(100, b100.hash).has_value());
+    CHECK(d.timestamp_of(100, alt100.hash) == std::optional<std::uint64_t>{1700000202ULL});
+}
+

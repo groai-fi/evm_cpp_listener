@@ -69,3 +69,16 @@ TEST_CASE("metrics: misuse fails loudly", "[metrics]") {
     CHECK_THROWS_AS(m.counter_total("evml_y", "y", {}, 1), std::logic_error);
     CHECK_THROWS_AS(m.counter_total("bad name!", "x", {}, 1), std::invalid_argument);
 }
+
+TEST_CASE("metrics: fast-stream emitted and dropped counters serialize with Prometheus TYPE and HELP", "[metrics]") {
+    Metrics m;
+    m.counter_total("evml_fast_emitted_total", "Fast-stream tip events emitted to Redis", {}, 4);
+    m.counter_total("evml_fast_dropped_total",
+                    "Fast-stream tip events dropped due to backpressure, outage, or fencing", {}, 1);
+    const auto out = m.serialize();
+    CHECK(has_line(out, "evml_fast_emitted_total 4"));
+    CHECK(has_line(out, "evml_fast_dropped_total 1"));
+    CHECK_THAT(out, ContainsSubstring("# TYPE evml_fast_emitted_total counter"));
+    CHECK_THAT(out, ContainsSubstring("# TYPE evml_fast_dropped_total counter"));
+}
+

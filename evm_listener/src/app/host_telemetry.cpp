@@ -108,6 +108,10 @@ void HostTelemetry::set_sink_counters(const sink::SinkStatus& sk) {
     metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {},
                            sk.consumer_lag_failures_total);
     metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, sk.reconnects_total);
+    metrics_.counter_total("evml_fast_emitted_total", "Fast-stream tip events emitted to Redis", {}, sk.fast_emitted_total);
+    metrics_.counter_total("evml_fast_dropped_total",
+                           "Fast-stream tip events dropped due to backpressure, outage, or fencing", {},
+                           sk.fast_dropped_total);
 }
 
 void HostTelemetry::set_sweeper_counters(const pipeline::SweepStats& sw) {
