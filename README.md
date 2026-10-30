@@ -70,7 +70,7 @@ Primary configuration lives in [`evm_listener/config/base.toml`](evm_listener/co
 | :--- | :--- |
 | `[shard]` | Shard namespace `id = "base_eurc_usdc"` (`evml:{base_eurc_usdc}:*`) and `host_id` (`$EVML_HOST_ID` or hostname). |
 | `[chain]` | `name = "base"`, `chain_id = 8453`, `block_time_ms = 2000`, `default_finality = "finalized"`, `hash_ring_size = 1024`, `start_policy = "contract_start"`, `safe_poll_ms = 4000`, `finalized_poll_ms = 12000`, `pending_max_logs = 200000`. |
-| `[[providers]]` | Per-provider `ws_env`, `http_env` (or credential-free `http_url`), and measured `max_getlogs_range` (`quicknode = 5`, `infura = 500`, `alchemy = 2000`, `ankr = 10000`, `base_public = 500`). |
+| `[[providers]]` | Per-provider `ws_env`, `http_env` (or credential-free `http_url`), measured `max_getlogs_range` (`quicknode = 5`, `infura = 500`, `alchemy = 2000`, `ankr = 10000`, `base_public = 500`), and optional per-provider `reconcile_rps` / `reconcile_burst` overrides (`quicknode` overrides to `reconcile_rps = 10`, `reconcile_burst = 15`). |
 | `[redundancy]` | `mode = "failover"`, `ws_order = ["quicknode", "infura", "alchemy"]`, `getlogs_order = ["infura", "alchemy", "ankr", "base_public", "quicknode"]`, `failover_after = 3`, `stale_after_blocks = 5`, `prefer_primary_after_s = 600`, `quota_cooldown_s = 3600`, `reconcile_rps = 2`, `reconcile_burst = 4`. |
 | `[lease]` | Active-passive Redis lease (`enabled = true`, `ttl_ms = 15000`, `renew_ms = 5000`). |
 | `[[contracts]]` | Tracked contracts, `start_block`, `finality` (`"safe"` for pools, `"finalized"` for gauge/registry), `fast_stream` (`true` on pools to mirror WebSocket tip logs into `evml:{shard}:fast`), target `stream` (`"events"` or `"registry"`), and canonical ABI event signatures. |

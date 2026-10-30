@@ -22,18 +22,18 @@ The system SHALL support an optional `fast_stream` boolean attribute on each `[[
 - **THEN** configuration parsing SHALL fail fast with a descriptive configuration error before opening network connections
 
 ### Requirement: Immediate WebSocket Tip Emission to Fast Stream
-When the active leader instance receives a non-removed WebSocket log (`removed == false`) matching a configured contract and event topic where `fast_stream = true`, the system SHALL immediately emit a schema `v=1` event entry to the Redis stream `evml:{<shard>}:fast` with `finality = "latest"`, without waiting for the `safe` or `finalized` gate poll. The same WebSocket log SHALL still be staged for subsequent `safe` or `finalized` sweep cross-checking.
+When a healthy active leader receives a non-removed WebSocket log (`removed == false`) for a configured contract and event topic with `fast_stream = true`, the system SHALL immediately emit a schema `v=1` event entry to `evml:{<shard>}:fast` with `finality = "latest"` without waiting for the `safe` or `finalized` gate poll, while still staging the log for subsequent `safe` or `finalized` sweep cross-checking.
 
 #### Scenario: Live WebSocket Swap log arrives on fast-enabled pool
 - **WHEN** the active leader receives a valid `Swap` log over WebSocket for `eurc_usdc_cl1_pool` (`fast_stream = true`)
-- **THEN** the system SHALL write an entry to `evml:{<shard>}:fast` containing schema `v=1` fields with `type = "log"`, `finality = "latest"`, `block_timestamp = "0"`, and `event_id = "<chain_id>:<block_hash>:<log_index>"`, AND the log SHALL also be staged in the pending buffer for the `safe` sweep cross-check
+- **THEN** the system SHALL write an entry to `evml:{<shard>}:fast` containing schema `v=1` fields with `type = "log"`, `finality = "latest"`, `block_timestamp` set to the decimal string of the cached `newHeads` header timestamp from the reorg detector ring when the block header has already been observed (or `"0"` if the WebSocket log arrives before `newHeads`), and `event_id = "<chain_id>:<block_hash>:<log_index>"`, AND the log SHALL also be staged in the pending buffer for the `safe` sweep cross-check
 
 #### Scenario: Live WebSocket log arrives on non-fast contract
 - **WHEN** the active leader receives a WebSocket log for a contract with `fast_stream = false` (such as `eurc_usdc_cl50_gauge` or `aero_voter`)
 - **THEN** the system SHALL stage the log for the authoritative `safe`/`finalized` cross-check and SHALL NOT write an entry to `evml:{<shard>}:fast`
 
-#### Scenario: Standby instance does not emit to fast stream
-- **WHEN** an instance is in `standby` role or is demoting after lease loss
+#### Scenario: Standby or frozen/failed instance does not emit to fast stream
+- **WHEN** an instance is in `standby` role, is demoting after lease loss, or its pipeline is in `Frozen` or `Failed` state
 - **THEN** the instance SHALL NOT emit any entries to `evml:{<shard>}:fast`
 
 ### Requirement: Zero-Key-Flood Retention and Leader Fencing on Fast Stream
