@@ -150,7 +150,16 @@ if(EVML_BUILD_TESTS OR NOT DEFINED EVML_BUILD_TESTS)
 endif()
 
 foreach(t IN LISTS EVML_TARGETS)
-    target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(${t} PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wconversion
+        -Wimplicit-fallthrough
+        -Wformat=2
+        -Wnon-virtual-dtor
+        -Woverloaded-virtual
+        -Werror)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
         # GCC 12 -O2/-O3 false positives in libstdc++ basic_string.h (Bug 105329) and std::variant union storage.
         target_compile_options(${t} PRIVATE -Wno-restrict -Wno-maybe-uninitialized)
