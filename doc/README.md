@@ -48,6 +48,9 @@ This directory contains the canonical v1 architecture, operational runbooks, dep
 |---|---|
 | [`research/Redis_Lua_Streaming_and_Kafka_Tooling.md`](research/Redis_Lua_Streaming_and_Kafka_Tooling.md) | Scaling Redis Streams + Lua toward Kafka-grade durability and analytics (Apache Kvrocks on NVMe, Redpanda Connect / Benthos ETL, embedded DuckDB Parquet archival, BullMQ / Asynq) |
 
+### Post-v1 Upgrade Options
+1. **Multi-Shard Process Partitioning:** Each `evm_listener` instance uses a single-threaded Boost.Asio reactor. To scale beyond `500+` high-frequency pools on a single chain without reactor contention, shard contract sets across multiple independent `evm_listener` processes (`base_shard_1.toml`, `base_shard_2.toml`).
+
 ---
 
 ## 5. Archived Pre-Implementation Brainstorming (`doc/archive/brainstorming/`)

@@ -216,6 +216,9 @@ Institutional consumers (Bot B) should subscribe to both planes simultaneously, 
 2. **Redis AOF `everysec` 1-Second Window:** A hard Redis crash can lose up to 1 second of acknowledged writes (both stream entries and checkpoint updates). On recovery, the listener re-sweeps from the older persisted checkpoint and re-emits the lost second of events. Only if those exact blocks also underwent a safe reorg during the same 1-second crash window could a consumer that read the pre-crash stream hold an un-reverted log.
 3. **7-Day Dedup Key TTL on Re-Backfill:** `evml:{base_eurc_usdc}:dedup:<event_id>` keys expire after 7 days (`604800 s`) to bound Redis memory (~10 MB). Re-running a historical backfill covering blocks older than 7 days will re-emit `type=log` entries, which consumers must ignore via their own `event_id` idempotency check.
 
+### 5.9 Future Upgrade Options
+1. **Multi-Shard Horizontal Scaling (`500+` Pools):** Each `evm_listener` process runs on a single Boost.Asio reactor thread (`< 2%` CPU for the current Base shard). When scaling to hundreds of high-frequency pools on a single chain, partition contracts across multiple shard configs (`base_shard_1.toml`, `base_shard_2.toml`) rather than packing all contracts into one process.
+
 ---
 
 ## 6. Architecture
