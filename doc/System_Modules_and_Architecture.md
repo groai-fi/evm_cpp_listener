@@ -3,7 +3,9 @@
 > **Bottom Line Up Front (BLUF)**:  
 > The `evm_listener` is a high-throughput, deterministic C++20 daemon engineered to ingest EVM blockchain logs (e.g., Base 8453, Arbitrum, Ethereum L1) and output deduplicated, ordered, reorg-safe events into Redis Streams. It solves four fundamental DeFi infrastructure hazards: **silent event loss**, **unhandled chain reorganizations**, **RPC rate-limit throttling**, and **split-brain multi-instance writes**.
 >
-> The system is architected around **dual-cursor finality sweeps** ($C_s$ safe, $C_f$ finalized), **Redis Lua atomic deduplication**, **ephemeral CRC32C disk spill buffering**, and **active-passive distributed leader leases**.
+> The system is architected around a **Dual-Plane ingestion pipeline**:
+> 1. **Authoritative Cold Plane (`evml:{<shard>}:events`, `evml:{<shard>}:registry`)**: Driven by **dual-cursor finality sweeps** ($C_s$ safe, $C_f$ finalized), **Redis Lua atomic deduplication**, **ephemeral CRC32C disk spill buffering**, and **active-passive distributed leader leases**.
+> 2. **Best-Effort Hot Signal Plane (`evml:{<shard>}:fast`)**: Zero-RPC-overhead WebSocket tip emission (`finality = "latest"`, sub-150ms latency) for contracts opted in with `fast_stream = true`, fenced on the leader lease via `emit_fast.lua` (`XADD MINID ~`) with strict fault isolation (no `dedup:*`, no `released`, and never spilled to disk).
 
 ---
 
@@ -67,7 +69,7 @@ If an ingestion listener emits an event as "safe" and the chain reorgs, downstre
 
 #### 2. Architectural Mechanics
 - **`FinalityGate`**: Pure state machine tracking the provider's `safe` and `finalized` block heights and hashes. Detects regressions and hash mismatches. If `finalized` ever regresses, it freezes the pipeline permanently (`FinalizedAnomaly`), requiring human inspection.
-- **`ReorgDetector` & `ForkWalk`**: Maintains a 512-block ring buffer of `{number, hash, parent_hash}`. When an incoming head's parent does not match the ring's top hash, it triggers a `ForkWalk`. The async engine walks backwards fetching ancestors until it finds the fork point $F$.
+- **`ReorgDetector` & `ForkWalk`**: Maintains a 512-block ring buffer of `{number, hash, parent_hash, timestamp}`. When an incoming head's parent does not match the ring's top hash, it triggers a `ForkWalk`. The async engine walks backwards fetching ancestors until it finds the fork point $F$. Also provides $O(1)$ in-memory timestamp lookup (`ReorgDetector::timestamp_of(number, hash)`) so the WebSocket fast-stream hot path can attach block timestamps without issuing blocking `eth_getBlockByNumber` RPC calls.
 - **Revert Emission**: If the fork point $F < C_s$, it triggers `reverify_released()`. Safe-class logs that were released but vanished in the new fork are converted into `revert` events containing the full original event fields, restoring downstream state.
 
 #### 3. Failure Implications
@@ -85,7 +87,10 @@ Bypassing or miscalculating reorg depths allows "ghost transactions" to persist 
 Network partitions to Redis, database restarts, or latency spikes in downstream storage will either crash naive listeners or cause unbounded memory inflation (OOM crashes). Furthermore, in high-availability deployments with active-passive instances, two instances must never write concurrently (split-brain).
 
 #### 2. Architectural Mechanics
-- **Embedded Lua Scripting (`kEmitLua`, `kCkptLua`, `kFinalTrimLua`, `kLeaseLua` embedded from `src/sink/lua/*.lua` via `lua_sources.hpp`)**: In one Redis round-trip, `kEmitLua` checks the per-event dedup key (`GET` + compare last type), appends to the stream (`XADD MINID ~ <minid_ms>`), and only then writes the dedup key (`SET ... EX <ttl_s>`). Writing dedup last means a failed script is retried and re-emitted, never silently lost.
+- **Embedded Lua Scripting (`kEmitLua`, `kEmitFastLua`, `kCkptLua`, `kFinalTrimLua`, `kLeaseLua` embedded from `src/sink/lua/*.lua` via `lua_sources.hpp`)**:
+  * `kEmitLua` (Authoritative Cold Plane): In one Redis round-trip, checks the per-event dedup key (`GET` + compare last type), appends to `evml:{<shard>}:events` or `registry` (`XADD MINID ~ <minid_ms>`), records safe before-images in `released`/`released_data`, and writes the dedup key (`SET ... EX <ttl_s>`). Writing dedup last means a failed script is retried and re-emitted, never silently lost.
+  * `kEmitFastLua` (Best-Effort Hot Plane): Verifies the leader lease token (`KEYS[2]`) when fencing is enabled and appends schema `v=1` tip logs (`finality = "latest"`) directly to `evml:{<shard>}:fast` (`XADD MINID ~ <fast_minid_ms>`) with zero `dedup:*`, `released`, or `released_data` writes so later authoritative `safe`/`finalized` sweeps are never suppressed as `DUP`.
+- **Non-Spilling Fast Path (`RedisSink::emit_fast`)**: Shares Connection A's batch pipeline (`detail::FastEmitItem`) when `mode() == SinkMode::Connected`, but drops immediately (incrementing `evml_fast_dropped_total`) if the sink is saturated or not `Connected`, and strips any in-flight/queued `FastEmitItem`s on transition to `Degraded`/`Spill` so tip signals never consume `/tmp/evml-spill` WAL disk budget.
 - **Dual Connections**: Uses two distinct TCP connections to Redis:
   * Connection A: Carries high-volume write batches (`held_`) and pipeline reads.
   * Connection B: Dedicated exclusively to lease renewal and host heartbeats, ensuring a slow write batch never starves a leader lease renewal.
@@ -352,6 +357,7 @@ classDiagram
         +begin_walk(head) ForkWalk
         +apply(walk) ReorgInfo
         +crosses_safe(info, c_s) bool
+        +timestamp_of(number, hash) optional~uint64_t~
     }
 
     class ForkWalk {
@@ -370,6 +376,7 @@ classDiagram
         <<interface>>
         +saturated()* bool
         +emit(emission)*
+        +emit_fast(event)
         +checkpoint(kind, block)*
         +load_checkpoint()* Task~Checkpoint~
         +released_range(from, to)* Task~vector~
@@ -384,6 +391,7 @@ classDiagram
         -deque~WriteItem~ held_
         -atomic~SinkMode~ mode_
         +emit(emission)
+        +emit_fast(event)
         +checkpoint(kind, block)
         +drain(budget) DrainResult
         +pump() bool
