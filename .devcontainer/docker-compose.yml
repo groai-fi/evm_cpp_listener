@@ -1,8 +1,12 @@
+name: evm_cpp_listener
+
 services:
   dev:
     build:
       context: .
       dockerfile: Dockerfile
+    image: evm_cpp_listener:dev
+    container_name: evm_cpp_listener_dev
     command: sleep infinity
     working_dir: /workspaces/evm_cpp_listener
     volumes:
