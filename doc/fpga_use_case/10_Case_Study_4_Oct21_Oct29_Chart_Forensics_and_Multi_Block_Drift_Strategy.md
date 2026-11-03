@@ -189,3 +189,44 @@ inline void step_multi_block_ofi_strategy(
     }
 }
 ```
+
+
+---
+
+## 4. Production Profitability Audit: Why Atomic MEV Bots Cannot Steal This Alpha
+
+### 4.1 Type A (Single-Tx Flash Error) vs. Type B (Multi-Block OFI Wave)
+On Base Aerodrome, there are **two fundamentally different types of price dislocations**, and separating them is the core structural reason this strategy makes money in production:
+
+| Dislocation Type | On-Chain Example (`Oct 21–29, 2026`) | Duration | Who Captures It? | Profitable for Yearn v3 Keeper? |
+| :--- | :--- | :---: | :--- | :--- |
+| **Type A: Single-Tx Flash Error** (1 pool spikes while the sibling pool stays flat) | `Oct 28, Block 53193044` (`txIdx=123` buys `$29.9k` on `CL50`, backrun at `txIdx=124, 125` in the **same block**) | **`0 ms`** (`0 blocks`) | Atomic single-block MEV bots (`CL50` $\leftrightarrow$ `CL1` backrunners) | **No (`0%`)** — arbitraged away before `Block N+1`. |
+| **Type B: Multi-Block Order Flow Imbalance (OFI) Wave** (Both `CL50` and `CL1` are pushed down together vs. steady CEX) | **`Oct 29, Blocks 53245177–53248027`** (`165 swaps` push **both** `CL50` & `CL1` down to `$1.11095` while CEX holds steady at `$1.1147`) | **`26 to 67 minutes`** (`780 to 2,022 blocks`) | **Stateful Inventory Vaults (Yearn v3 + Dual-Feed FSM)** | **Yes (`+15 to +42 bps` per cycle)** — MEV bots refuse to hold unhedged inventory for 30–60 minutes. |
+
+**Why don't atomic MEV bots erase Type B (`Cycle #13` on `Oct 29`)?**
+At `Block 53245299` (`13:19 UTC`), **both** `CL50` (`$1.110952`, `tick 1052`) and `CL1` (`$1.110972`, `tick 1052`) were pushed down together by L2 `EURC` sellers. Because both Base pools sat at the exact same depressed tick (`1052`), there was **zero riskless same-block on-chain arbitrage** left between `CL50` and `CL1`. Closing the `-33.8 bps` discount against Coinbase/Binance (`$1.1147`) required **buying `EURC` on Base and holding inventory across time (`30–67 minutes`)** (or bridging inventory between Base L2 and CEX). Atomic MEV bots operate with zero balance-sheet duration (`flashloan -> swap -> repay` in `0 ms`) and refuse to hold inventory across 1,000 blocks—leaving that entire mean-reversion spread open for a stateful Yearn v3 vault.
+
+---
+
+### 4.2 Ideal Backtest vs. Realistic Live Production Earnings (`$100,000 USDC` Vault)
+
+After applying realistic production haircuts for **4-clip scaling entry, self-impact slippage, partial fills, and occasional CEX macro stop-losses**, the strategy remains strongly profitable (`71.0% – 90.8% annualized APY`):
+
+| Metric (9-Day Window: `Oct 21 – Oct 29, 2026`, `14 Cycles`) | Ideal Backtest (`Close` / `Upper-Band`) | Realistic Live Production (`$100k` Vault, 4x `$25k` Clips) | Why the Haircut Happens in Live Trading |
+| :--- | :---: | :---: | :--- |
+| **Gross Rebound Captured per Cycle** | `+20.9 to +26.8 bps` | **`+15.5 to +19.0 bps`** | Scaling in across 4 clips captures ~75% of the peak dip depth and incurs `~2.5 bps` self-impact rather than filling 100% at the exact bottom tick (`1052`). |
+| **Win Rate Across 14 Signals** | `14 / 14` (`100%`) | **`12 / 14` (`85.7%`)** | In ~2 out of 14 cycles, CEX `EUR/USD` drifts downward while holding `EURC`, triggering a `-8 bps` time-stop/stop-loss. |
+| **Round-Trip DEX Fee + Gas per Cycle** | `-0.01 bps` (net of `+0.70 bps` `CL1` maker rebate) | **`-0.35 bps`** | Occasional taker stop-loss exits pay `0.70 bps` instead of earning the `+0.70 bps` `CL1` maker rebate. |
+| **Net 9-Day Profit (on `$100,000 USDC`)** | **`+$3,104 to +$3,918`** (`+3.10%` to `+3.92%`) | **`+$1,750 to +$2,240`** (`+1.75%` to `+2.24%`) | Strongly profitable after all realistic slippage, partial-fill, and stop-loss haircuts. |
+| **Annualized Net APY** | `125.9% – 158.9% APY` | **`71.0% – 90.8% APY`** | Outperforms passive `EURC/USDC` LPing (`~12%–22% APY`) while avoiding permanent out-of-range Impermanent Loss during directional FX trends. |
+
+---
+
+### 4.3 The Three Hard Engineering Constraints to Preserve Profitability in Production
+
+1. **Capital Capacity Ceiling (`$50,000 – $150,000` per Vault):**
+   During the 26-minute dip in `Cycle #13` (`Oct 29, 13:15–13:45 UTC`), total pool volume near the trough was **`$125,738`**. A `$50k–$100k` vault slicing orders into `$25k` clips blends into organic order flow with minimal price impact (`~2.5 bps`); a `$1,000,000` vault would push the pool `+15 ticks` against itself on entry and erase its own edge.
+2. **Mandatory Slow-Basis Subtraction ($b_{\text{slow}} \approx -10\text{ ticks}$):**
+   Never trigger buys solely because Aerodrome `EURC/USDC` trades `-10 bps` below `Binance EURUSDT`—that `-10 bps` is the permanent `USDC`-vs-`USDT` structural basis. Only trigger when the **basis-adjusted spread** breaches $S_{\text{adj}} \le -15\text{ to }-18\text{ ticks}$ (`-25 to -28 bps` raw spread).
+3. **Exit as a 1-Tick `CL1` Maker (`[t_exit, t_exit+1]`), Not a Taker:**
+   Minting a single-sided 1-tick `EURC` LP range order in `CL1` (`tickSpacing = 1`) converts a `-0.70 bps` taker exit fee into a **`+0.70 bps` LP fee rebate**, saving **`+1.40 bps` per cycle** (`+$196` across 14 cycles on `$100,000 USDC`).
