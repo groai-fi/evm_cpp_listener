@@ -42,10 +42,12 @@ This directory contains the canonical v1 architecture, operational runbooks, dep
 
 ---
 
-## 4. Future Scaling & Ecosystem Research (`doc/research/`)
+## 4. Future Scaling, Data Lake & Ecosystem Research (`doc/data_lake/`, `doc/research/`)
 
 | Document | Scope |
 |---|---|
+| [`data_lake/Two_Tier_Parquet_DuckDB_ClickHouse_Architecture.md`](data_lake/Two_Tier_Parquet_DuckDB_ClickHouse_Architecture.md) | Two-tier institutional data lake architecture: Tier 1 (Apache Arrow / Parquet + Embedded DuckDB with atomic write-rename-`XACK`) and Tier 2 (drop-in ClickHouse live OLAP & Grafana upgrade) |
+| [`data_lake/Parquet_Archiver_Implementation_Plan.md`](data_lake/Parquet_Archiver_Implementation_Plan.md) | 5-phase implementation plan for the Tier 1 Redis-to-Parquet archiver (`schema v=1` 24-column Parquet mapping, PEL crash recovery, daily compaction, and quant SQL views) |
 | [`research/Redis_Lua_Streaming_and_Kafka_Tooling.md`](research/Redis_Lua_Streaming_and_Kafka_Tooling.md) | Scaling Redis Streams + Lua toward Kafka-grade durability and analytics (Apache Kvrocks on NVMe, Redpanda Connect / Benthos ETL, embedded DuckDB Parquet archival, BullMQ / Asynq) |
 
 ### Post-v1 Upgrade Options
