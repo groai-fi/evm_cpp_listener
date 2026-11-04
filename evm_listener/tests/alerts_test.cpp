@@ -107,7 +107,7 @@ TEST_CASE("alerts: a standby raises only the host-local rows and drops leader st
     AlertEngine e(thresholds());
     auto stuck = snap(0s);
     stuck.g_s = 1000;
-    e.evaluate(stuck);
+    CHECK(e.evaluate(stuck).empty());
     auto later = snap(700s);
     later.g_s = 1000;
     later.c_s = 1000;

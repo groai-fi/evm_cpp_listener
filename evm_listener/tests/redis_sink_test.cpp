@@ -211,7 +211,7 @@ struct FakeServer {
 };
 
 struct Fault {
-    enum class Kind { None, ThrowBefore, ThrowAfter, FailAt } kind{Kind::None};
+    enum class Kind : std::uint8_t { None, ThrowBefore, ThrowAfter, FailAt } kind{Kind::None};
     std::size_t at{0};                 // position in the pipeline
     FailKind fail{FailKind::Transient};
     bool rest_also{false};             // FailAt: every later call fails too (what a flushed script cache does)
@@ -262,18 +262,18 @@ public:
         if (load_fixes_cache) server.scripts_valid = true;
     }
 
-    void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override {
+    void set_with_ttl(std::string_view key, std::string_view value, std::uint32_t ttl_s) override {
         if (down) throw ConnError("fake: connection down");
         if (aux_throws) throw std::runtime_error("fake: NOPERM this user has no permissions");
-        server.kv[key] = {value, ttl_s};
+        server.kv[std::string(key)] = {std::string(value), ttl_s};
         ++server.kv_writes;
     }
 
-    GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override {
+    GroupFacts read_group_facts(std::string_view stream_key, std::string_view group) override {
         if (down) throw ConnError("fake: connection down");
         if (aux_throws) throw std::runtime_error("fake: XINFO answered a reply we cannot read");
         ++server.group_reads;
-        const auto it = server.group_facts.find(stream_key + "|" + group);
+        const auto it = server.group_facts.find(std::string(stream_key) + "|" + std::string(group));
         return it == server.group_facts.end() ? GroupFacts{} : it->second;
     }
 
@@ -382,6 +382,10 @@ struct Rig {
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
+    Rig(const Rig&) = delete;
+    Rig& operator=(const Rig&) = delete;
+    Rig(Rig&&) = delete;
+    Rig& operator=(Rig&&) = delete;
 
     void advance(milliseconds d) { elapsed += d; }
 

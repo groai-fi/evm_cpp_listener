@@ -51,6 +51,10 @@ struct ConfigGuard {
             std::cerr << "ConfigGuard: restoring " << name << " failed: " << e.what() << "\n";
         }
     }
+    ConfigGuard(const ConfigGuard&) = delete;
+    ConfigGuard& operator=(const ConfigGuard&) = delete;
+    ConfigGuard(ConfigGuard&&) = delete;
+    ConfigGuard& operator=(ConfigGuard&&) = delete;
 };
 
 }  // namespace
@@ -119,12 +123,17 @@ TEST_CASE("startup: a reachable, correctly configured Redis passes with no warni
     struct KeyGuard {
         sw::redis::Redis& r;
         std::string k;
+        KeyGuard(sw::redis::Redis& r_, std::string k_) : r(r_), k(std::move(k_)) {}
         ~KeyGuard() {
             try {
                 r.del(k);
             } catch (...) {
             }
         }
+        KeyGuard(const KeyGuard&) = delete;
+        KeyGuard& operator=(const KeyGuard&) = delete;
+        KeyGuard(KeyGuard&&) = delete;
+        KeyGuard& operator=(KeyGuard&&) = delete;
     } guard{admin, Keys(opts.shard).tenant()};
 
     const auto r = await_redis_ready(url, opts);
@@ -144,12 +153,17 @@ TEST_CASE("startup: maxmemory-policy allkeys-lru is fatal when noeviction is req
     struct KeyGuard {
         sw::redis::Redis& r;
         std::string k;
+        KeyGuard(sw::redis::Redis& r_, std::string k_) : r(r_), k(std::move(k_)) {}
         ~KeyGuard() {
             try {
                 r.del(k);
             } catch (...) {
             }
         }
+        KeyGuard(const KeyGuard&) = delete;
+        KeyGuard& operator=(const KeyGuard&) = delete;
+        KeyGuard(KeyGuard&&) = delete;
+        KeyGuard& operator=(KeyGuard&&) = delete;
     } key_guard{admin, Keys(shard).tenant()};
 
     StartupOptions strict;
@@ -185,12 +199,17 @@ TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenari
     struct KeyGuard {
         sw::redis::Redis& r;
         std::string k;
+        KeyGuard(sw::redis::Redis& r_, std::string k_) : r(r_), k(std::move(k_)) {}
         ~KeyGuard() {
             try {
                 r.del(k);
             } catch (...) {
             }
         }
+        KeyGuard(const KeyGuard&) = delete;
+        KeyGuard& operator=(const KeyGuard&) = delete;
+        KeyGuard(KeyGuard&&) = delete;
+        KeyGuard& operator=(KeyGuard&&) = delete;
     } key_guard{admin, Keys(o.shard).tenant()};
 
     o.probe_min = 10ms;
@@ -332,6 +351,7 @@ TEST_CASE("startup: live Redis tenancy checks reject foreign keys, foreign DBs, 
     struct CleanupGuard {
         sw::redis::Redis& r;
         std::string tenant_key;
+        CleanupGuard(sw::redis::Redis& r_, std::string tk) : r(r_), tenant_key(std::move(tk)) {}
         ~CleanupGuard() {
             try {
                 r.del("mds:test");
@@ -339,6 +359,10 @@ TEST_CASE("startup: live Redis tenancy checks reject foreign keys, foreign DBs, 
             } catch (...) {
             }
         }
+        CleanupGuard(const CleanupGuard&) = delete;
+        CleanupGuard& operator=(const CleanupGuard&) = delete;
+        CleanupGuard(CleanupGuard&&) = delete;
+        CleanupGuard& operator=(CleanupGuard&&) = delete;
     } cleanup{admin, keys.tenant()};
 
     StartupOptions opts;
@@ -369,12 +393,17 @@ TEST_CASE("startup: live Redis tenancy checks reject foreign keys, foreign DBs, 
         sw::redis::Redis admin_db1(db1_url);
         struct Db1Guard {
             sw::redis::Redis& r;
+            explicit Db1Guard(sw::redis::Redis& r_) : r(r_) {}
             ~Db1Guard() {
                 try {
                     r.flushdb();
                 } catch (...) {
                 }
             }
+            Db1Guard(const Db1Guard&) = delete;
+            Db1Guard& operator=(const Db1Guard&) = delete;
+            Db1Guard(Db1Guard&&) = delete;
+            Db1Guard& operator=(Db1Guard&&) = delete;
         } db1_guard{admin_db1};
 
         admin_db1.set("evml:db1_probe", "1");

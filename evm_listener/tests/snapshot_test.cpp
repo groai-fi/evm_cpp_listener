@@ -184,7 +184,7 @@ TEST_CASE("snapshot: consumer probes are converted; a never-probed group is skip
     CHECK(s.consumers[0].stream == "events");
     CHECK(s.consumers[0].group == "indexer");
     CHECK(s.consumers[0].found);
-    CHECK(s.consumers[0].lag == -1);
+    CHECK_FALSE(s.consumers[0].lag.has_value());
     CHECK(s.consumers[0].trimmed_unread);
     CHECK(s.consumers[0].retention_s == 604800);
     CHECK(s.consumers[0].undelivered_age_s == 30.0);

@@ -65,6 +65,8 @@ public:
     }
     ToxiRedis(const ToxiRedis&) = delete;
     ToxiRedis& operator=(const ToxiRedis&) = delete;
+    ToxiRedis(ToxiRedis&&) = delete;
+    ToxiRedis& operator=(ToxiRedis&&) = delete;
 
     // The Redis URL a client under test must use to go through the proxy.
     std::string url() const { return "redis://" + api_host_ + ":" + port_ + "/0"; }
@@ -171,6 +173,8 @@ public:
     }
     ToxiHttp(const ToxiHttp&) = delete;
     ToxiHttp& operator=(const ToxiHttp&) = delete;
+    ToxiHttp(ToxiHttp&&) = delete;
+    ToxiHttp& operator=(ToxiHttp&&) = delete;
 
     std::string url() const { return "http://" + api_host_ + ":" + port_ + "/"; }
 

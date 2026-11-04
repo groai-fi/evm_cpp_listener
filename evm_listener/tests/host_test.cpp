@@ -123,6 +123,7 @@ std::uint64_t first_start_block(const evml::core::Config& cfg) {
 struct Cleanup {
     std::string shard;
     fs::path spill;
+    Cleanup(std::string s, fs::path sp) : shard(std::move(s)), spill(std::move(sp)) {}
     ~Cleanup() {
         try {
             sw::redis::Redis admin{require_env("REDIS_URL")};
@@ -136,6 +137,10 @@ struct Cleanup {
         std::error_code ec;
         fs::remove_all(spill, ec);
     }
+    Cleanup(const Cleanup&) = delete;
+    Cleanup& operator=(const Cleanup&) = delete;
+    Cleanup(Cleanup&&) = delete;
+    Cleanup& operator=(Cleanup&&) = delete;
 };
 
 std::string rpc_reply(std::uint64_t id, const std::string& result_json) {
@@ -275,6 +280,10 @@ struct RunningHost {
         if (th.joinable()) th.join();
     }
     ~RunningHost() { finish(); }
+    RunningHost(const RunningHost&) = delete;
+    RunningHost& operator=(const RunningHost&) = delete;
+    RunningHost(RunningHost&&) = delete;
+    RunningHost& operator=(RunningHost&&) = delete;
 };
 
 struct OpsReply {
@@ -614,6 +623,7 @@ TEST_CASE("host: a finalized hash conflict on the current provider freezes relea
 // Sets a process environment variable for one test and removes it afterwards.
 struct ScopedEnv {
     std::vector<std::string> names;
+    ScopedEnv() = default;
     void set(const std::string& k, const std::string& v) {
         ::setenv(k.c_str(), v.c_str(), 1);
         names.push_back(k);
@@ -621,6 +631,10 @@ struct ScopedEnv {
     ~ScopedEnv() {
         for (const auto& k : names) ::unsetenv(k.c_str());
     }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+    ScopedEnv(ScopedEnv&&) = delete;
+    ScopedEnv& operator=(ScopedEnv&&) = delete;
 };
 
 TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release posts an alert to the webhook",
@@ -1442,7 +1456,7 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
         // Disable Redis and advance the safe gate across multiple steps so checkpoint writes overflow the 2-item queue
         // into the 1-byte spill and saturate the sink.
         px.disable();
-        for (int i = 1; i <= 5; ++i) {
+        for (std::uint64_t i = 1; i <= 5; ++i) {
             ns.safe = c0 + 300 + i * 10;
             const auto step_end = std::chrono::steady_clock::now() + 300ms;
             evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= step_end; }, 1s);

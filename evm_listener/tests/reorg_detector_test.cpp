@@ -13,7 +13,7 @@ namespace {
 Hash32 hash_for(std::uint64_t n, std::uint8_t branch) {
     Hash32 h;
     h.bytes[0] = branch;
-    for (int i = 0; i < 8; ++i) h.bytes[1 + i] = static_cast<std::uint8_t>(n >> (8 * i));
+    for (std::size_t i = 0; i < 8; ++i) h.bytes[1 + i] = static_cast<std::uint8_t>(n >> (8 * i));
     return h;
 }
 

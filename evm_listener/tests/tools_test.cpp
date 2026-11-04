@@ -49,6 +49,7 @@ sw::redis::Redis make_admin() {
 
 struct ShardCleanup {
     std::string shard;
+    explicit ShardCleanup(std::string s) : shard(std::move(s)) {}
     ~ShardCleanup() {
         try {
             auto r = make_admin();
@@ -58,6 +59,10 @@ struct ShardCleanup {
         } catch (...) {
         }
     }
+    ShardCleanup(const ShardCleanup&) = delete;
+    ShardCleanup& operator=(const ShardCleanup&) = delete;
+    ShardCleanup(ShardCleanup&&) = delete;
+    ShardCleanup& operator=(ShardCleanup&&) = delete;
 };
 
 std::string rpc_ok(std::uint64_t id, const std::string& result_json) {

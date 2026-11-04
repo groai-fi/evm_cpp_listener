@@ -28,6 +28,10 @@ struct TempDir {
         std::error_code ec;
         fs::remove_all(path, ec);
     }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    TempDir(TempDir&&) = delete;
+    TempDir& operator=(TempDir&&) = delete;
 };
 
 std::size_t segment_files(const fs::path& dir) {
@@ -48,7 +52,9 @@ SpillRecord pop_one(Spill& s) {
 
 TEST_CASE("spill: crc32c matches the standard check value", "[unit][spill]") {
     const std::string v = "123456789";
-    CHECK(evml::sink::crc32c(v.data(), v.size()) == 0xE3069283u);
+    CHECK(evml::sink::crc32c(v) == 0xE3069283u);
+    CHECK(evml::sink::crc32c(evml::core::BytesView(reinterpret_cast<const std::uint8_t*>(v.data()), v.size())) ==
+          0xE3069283u);
 }
 
 TEST_CASE("spill: records round-trip in FIFO order, including empty and binary payloads", "[unit][spill]") {

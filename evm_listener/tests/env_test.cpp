@@ -31,6 +31,10 @@ struct TempTree {
         std::error_code ec;
         fs::remove_all(root, ec);
     }
+    TempTree(const TempTree&) = delete;
+    TempTree& operator=(const TempTree&) = delete;
+    TempTree(TempTree&&) = delete;
+    TempTree& operator=(TempTree&&) = delete;
     void write(const fs::path& rel, const std::string& content) {
         std::ofstream f(root / rel, std::ios::binary);
         f << content;
@@ -95,7 +99,7 @@ TEST_CASE("load_dotenv syntax: comments, quotes, export, inline comments, '=' in
 TEST_CASE("env::require throws ConfigError naming the variable", "[unit][env]") {
     unsetenv("EVML_T_MISSING");
     try {
-        env::require("EVML_T_MISSING");
+        (void)env::require("EVML_T_MISSING");
         FAIL("expected ConfigError");
     } catch (const ConfigError& e) {
         CHECK(std::string(e.what()) == "missing env: EVML_T_MISSING");

@@ -66,7 +66,7 @@ Run condition(const std::vector<int>& bad_at, const std::function<void(SnapshotI
               const std::function<SnapshotInputs(std::chrono::seconds)>& base = leader_in) {
     AlertEngine e{AlertThresholds{}};
     SnapshotBuilder b;
-    e.evaluate(b.build(base(0s)));  // baseline: trackers start from a healthy snapshot
+    (void)e.evaluate(b.build(base(0s)));  // baseline: trackers start from a healthy snapshot
     Run r;
     for (const int t : bad_at) {
         auto in = base(std::chrono::seconds(t));
@@ -91,7 +91,7 @@ Run builder_event(const std::function<void(SnapshotInputs&)>& before, const std:
     SnapshotBuilder b;
     auto in0 = leader_in(0s);
     before(in0);
-    e.evaluate(b.build(in0));
+    (void)e.evaluate(b.build(in0));
     auto in1 = leader_in(10s);
     after(in1);
     Run r;
@@ -106,7 +106,7 @@ Run builder_event(const std::function<void(SnapshotInputs&)>& before, const std:
 Run pushed_event(const AlertEvent& ev) {
     AlertEngine e{AlertThresholds{}};
     SnapshotBuilder b;
-    e.evaluate(b.build(leader_in(0s)));
+    (void)e.evaluate(b.build(leader_in(0s)));
     b.push_event(ev);
     Run r;
     r.fire = e.evaluate(b.build(leader_in(10s)));

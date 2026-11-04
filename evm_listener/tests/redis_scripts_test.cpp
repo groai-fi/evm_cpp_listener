@@ -68,6 +68,10 @@ struct Rig {
             std::cerr << "Rig cleanup of shard keys failed: " << e.what() << "\n";
         }
     }
+    Rig(const Rig&) = delete;
+    Rig& operator=(const Rig&) = delete;
+    Rig(Rig&&) = delete;
+    Rig& operator=(Rig&&) = delete;
 
     // Raw reads for assertions.
     long long xlen(const std::string& key) { return redis.command<long long>("XLEN", key); }
@@ -121,6 +125,10 @@ struct MaxMemoryGuard {
             std::cerr << "FAILED TO RESTORE maxmemory=" << old_value << ": " << e.what() << "\n";
         }
     }
+    MaxMemoryGuard(const MaxMemoryGuard&) = delete;
+    MaxMemoryGuard& operator=(const MaxMemoryGuard&) = delete;
+    MaxMemoryGuard(MaxMemoryGuard&&) = delete;
+    MaxMemoryGuard& operator=(MaxMemoryGuard&&) = delete;
 };
 
 }  // namespace

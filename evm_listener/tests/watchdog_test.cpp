@@ -140,22 +140,22 @@ TEST_CASE("watchdog: the abort line follows the core/log schema and carries the 
 
 TEST_CASE("watchdog: stale_heartbeat() applies the same rule as the abort", "[watchdog]") {
     Harness h;
-    CHECK(h.wd.stale_heartbeat() == nullptr);
+    CHECK_FALSE(h.wd.stale_heartbeat().has_value());
     h.t += 30'000;
-    CHECK(h.wd.stale_heartbeat() == nullptr);  // exactly 30 s: not stale
+    CHECK_FALSE(h.wd.stale_heartbeat().has_value());  // exactly 30 s: not stale
     h.t += 1;
-    REQUIRE(h.wd.stale_heartbeat() != nullptr);
-    CHECK(std::string(h.wd.stale_heartbeat()) == "io_tick");
+    REQUIRE(h.wd.stale_heartbeat().has_value());
+    CHECK(std::string(*h.wd.stale_heartbeat()) == "io_tick");
     h.wd.beat_io();
-    CHECK(h.wd.stale_heartbeat() == nullptr);
+    CHECK_FALSE(h.wd.stale_heartbeat().has_value());
 
     h.wd.set_sink_registered(true);
     h.t += 31'000;
     h.wd.beat_io();
-    REQUIRE(h.wd.stale_heartbeat() != nullptr);
-    CHECK(std::string(h.wd.stale_heartbeat()) == "sink_loop");
+    REQUIRE(h.wd.stale_heartbeat().has_value());
+    CHECK(std::string(*h.wd.stale_heartbeat()) == "sink_loop");
     h.wd.set_sink_registered(false);  // standby again
-    CHECK(h.wd.stale_heartbeat() == nullptr);
+    CHECK_FALSE(h.wd.stale_heartbeat().has_value());
 }
 
 TEST_CASE("watchdog: the sink writes its beat through the watchdog-owned slot", "[watchdog]") {

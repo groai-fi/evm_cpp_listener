@@ -145,6 +145,10 @@ struct Live {
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
+    Live(const Live&) = delete;
+    Live& operator=(const Live&) = delete;
+    Live(Live&&) = delete;
+    Live& operator=(Live&&) = delete;
 
     // The `event_id` of every entry of a stream, in stream order.
     std::vector<std::string> event_ids(StreamKind stream) {
@@ -189,6 +193,10 @@ public:
     ~Worker() {
         if (t_.joinable()) t_.join();
     }
+    Worker(const Worker&) = delete;
+    Worker& operator=(const Worker&) = delete;
+    Worker(Worker&&) = delete;
+    Worker& operator=(Worker&&) = delete;
 
 private:
     std::exception_ptr err_;
@@ -206,7 +214,8 @@ TEST_CASE("redis sink integration 2: a 60 s outage during 10k events loses nothi
     constexpr int kTotal = 10000;
     int next = 0;
     const auto burst = [&](int n) {
-        for (int k = 0; k < n && next < kTotal; ++k, ++next) L.sink->emit(mk(id_of(next), 1000 + next));
+        for (int k = 0; k < n && next < kTotal; ++k, ++next)
+            L.sink->emit(mk(id_of(next), 1000u + static_cast<std::uint64_t>(next)));
     };
 
     burst(3000);
@@ -235,7 +244,7 @@ TEST_CASE("redis sink integration 4: spill cap saturates, the checkpoint stays f
     L.start([](RedisSinkOptions& o) { o.spill_max_bytes = 64 * 1024; });
 
     L.sink->init_checkpoint(999, {"a:1:x"});
-    for (int i = 0; i < 10; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    for (int i = 0; i < 10; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     L.sink->checkpoint(CheckpointKind::Safe, 1009);
     REQUIRE(L.sink->wait_idle(30s));
     REQUIRE(L.ckpt_field("safe") == std::optional<std::string>("1009"));
@@ -245,17 +254,19 @@ TEST_CASE("redis sink integration 4: spill cap saturates, the checkpoint stays f
     const auto t0 = std::chrono::steady_clock::now();
     while (!L.sink->saturated()) {
         REQUIRE(std::chrono::steady_clock::now() - t0 < 60s);
-        L.sink->emit(mk(id_of(next), 1000 + next));
+        L.sink->emit(mk(id_of(next), 1000u + static_cast<std::uint64_t>(next)));
         ++next;
         std::this_thread::sleep_for(200us);
     }
-    for (int k = 0; k < 20; ++k, ++next) L.sink->emit(mk(id_of(next), 1000 + next));  // mid-flight hand-over: accepted
+    for (int k = 0; k < 20; ++k, ++next)
+        L.sink->emit(mk(id_of(next), 1000u + static_cast<std::uint64_t>(next)));  // mid-flight hand-over: accepted
     std::this_thread::sleep_for(300ms);
     CHECK(L.sink->saturated());
     CHECK(L.ckpt_field("safe") == std::optional<std::string>("1009"));  // C is frozen while saturated
 
     L.px.enable();
-    L.sink->checkpoint(CheckpointKind::Safe, 1000 + next - 1);  // the pipeline resumes once the sink drains
+    L.sink->checkpoint(CheckpointKind::Safe,
+                       1000u + static_cast<std::uint64_t>(next - 1));  // the pipeline resumes once the sink drains
     REQUIRE(L.sink->wait_idle(60s));
     INFO("fatal: " << L.sink->fatal_message());
     REQUIRE(L.sink->mode() == SinkMode::Connected);
@@ -314,8 +325,8 @@ TEST_CASE("redis sink integration 12: script flush and reset_peer never put the 
     });
 
     for (int k = 0; k < kTotal; ++k) {
-        L.sink->emit(mk(id_of(k), 1000 + k));
-        if ((k + 1) % 10 == 0) L.sink->checkpoint(CheckpointKind::Safe, 1000 + k);
+        L.sink->emit(mk(id_of(k), 1000u + static_cast<std::uint64_t>(k)));
+        if ((k + 1) % 10 == 0) L.sink->checkpoint(CheckpointKind::Safe, 1000u + static_cast<std::uint64_t>(k));
         if (k % 20 == 19) std::this_thread::sleep_for(1ms);
     }
     producing = false;
@@ -342,7 +353,8 @@ TEST_CASE("redis sink integration 13: released_range sees queued emits, and is u
 
     std::vector<Emission> sent;
     for (int k = 0; k < 5; ++k) {
-        sent.push_back(mk(id_of(k), 100 + k, k == 4 ? StreamKind::Registry : StreamKind::Events, 100 + k));
+        const auto blk = 100u + static_cast<std::uint64_t>(k);
+        sent.push_back(mk(id_of(k), blk, k == 4 ? StreamKind::Registry : StreamKind::Events, blk));
         L.sink->emit(sent.back());
     }
     const auto got = await_released(*L.sink, 0, 1000);  // no wait_idle first: the read is queued behind the emits
@@ -376,7 +388,7 @@ TEST_CASE("redis sink integration 16: replaying 50k spilled items never lets the
 
     L.px.disable();
     constexpr int kTotal = 50000;
-    for (int k = 0; k < kTotal; ++k) L.sink->emit(mk(id_of(k), 1000 + k));
+    for (int k = 0; k < kTotal; ++k) L.sink->emit(mk(id_of(k), 1000u + static_cast<std::uint64_t>(k)));
     REQUIRE(wait_for([&] { return L.sink->status().queue_depth == 0; }, 60s));
     CHECK(L.sink->status().spill_records > 40000);
 
@@ -444,7 +456,7 @@ TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis rep
     CHECK(evaluate_consumer_lag(cfg, probe.read_group_facts(stream, "bot")).missing);
 
     L.start();
-    for (int i = 0; i < 5; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    for (int i = 0; i < 5; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(L.sink->wait_idle(30s));
     const auto ids = entry_ids(L, StreamKind::Events);
     REQUIRE(ids.size() == 5);
@@ -541,11 +553,11 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
     L.token = kNoFence;
     L.start();
 
-    for (int i = 0; i < 50; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    for (int i = 0; i < 50; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(L.sink->wait_idle(30s));
 
     L.px.disable();
-    for (int i = 50; i < 100; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    for (int i = 50; i < 100; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.px.enable();
     REQUIRE(L.sink->wait_idle(60s));
@@ -557,14 +569,15 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
 
     // Crash with a non-empty spill: the spill dies with the process.
     L.px.disable();
-    for (int i = 100; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000 + i));
+    for (int i = 100; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.sink.reset();
     L.px.enable();
 
     L.start();  // same spill_dir
     CHECK(L.sink->status().spill_records == 0);
-    for (int i = 90; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000 + i));  // the re-sweep re-emits an overlap
+    for (int i = 90; i < 120; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));  // the re-sweep re-emits an overlap
     REQUIRE(L.sink->wait_idle(60s));
     L.expect_exactly(120);  // 90..99 were already there: dedup; 100..119 land now, in order
     CHECK(L.sink->status().dup_total >= 10);
@@ -583,6 +596,7 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
     struct Cleanup {
         sw::redis::Redis& admin;
         const Keys& keys;
+        Cleanup(sw::redis::Redis& a, const Keys& k) : admin(a), keys(k) {}
         ~Cleanup() {
             try {
                 std::vector<std::string> mine;
@@ -592,6 +606,10 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
                 std::cerr << "scenario 9 cleanup failed: " << e.what() << "\n";
             }
         }
+        Cleanup(const Cleanup&) = delete;
+        Cleanup& operator=(const Cleanup&) = delete;
+        Cleanup(Cleanup&&) = delete;
+        Cleanup& operator=(Cleanup&&) = delete;
     } cleanup{admin, keys};
     evml::core::log::init("info");
 
@@ -619,7 +637,12 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
     Worker wb([&] { standby("hostB", rb); });
     struct StopGuard {  // destroyed before the workers: a failing REQUIRE must not leave a standby polling forever
         std::atomic<bool>& stop;
+        explicit StopGuard(std::atomic<bool>& s) : stop(s) {}
         ~StopGuard() { stop.store(true); }
+        StopGuard(const StopGuard&) = delete;
+        StopGuard& operator=(const StopGuard&) = delete;
+        StopGuard(StopGuard&&) = delete;
+        StopGuard& operator=(StopGuard&&) = delete;
     } guard{stop};
 
     REQUIRE(wait_for([&] { return ra.done.load() || rb.done.load(); }, 5s));
@@ -843,6 +866,7 @@ TEST_CASE("redis sink integration 20: try_acquire_lease on real Redis returns ep
     struct Cleanup {
         sw::redis::Redis& admin;
         const Keys& keys;
+        Cleanup(sw::redis::Redis& a, const Keys& k) : admin(a), keys(k) {}
         ~Cleanup() {
             try {
                 std::vector<std::string> mine;
@@ -852,6 +876,10 @@ TEST_CASE("redis sink integration 20: try_acquire_lease on real Redis returns ep
                 std::cerr << "scenario 20 cleanup failed: " << e.what() << "\n";
             }
         }
+        Cleanup(const Cleanup&) = delete;
+        Cleanup& operator=(const Cleanup&) = delete;
+        Cleanup(Cleanup&&) = delete;
+        Cleanup& operator=(Cleanup&&) = delete;
     } cleanup{admin, keys};
 
     RedisppConn conn(url, keys);
