@@ -26,6 +26,7 @@ evml:{base_eurc_usdc}:released_data          Hash    event_id → packed field l
 evml:{base_eurc_usdc}:leader                 String  lease token "<n>|<host_id>|<nonce>", PX 15000
 evml:{base_eurc_usdc}:epoch                  String  token of the latest acquisition, no TTL   (r6, P3)
 evml:{base_eurc_usdc}:hb:<host_id>           String  heartbeat JSON, EX 30
+evml:{base_eurc_usdc}:tenant                 String  "evm-listener|<EVML_DEPLOY_ENV>", no TTL  (T-029)
 ```
 - **`ckpt.contracts`:** a JSON array of sorted `address:start_block:class` strings. Written by `init` (first run), by the driver when the manifest changes without a backfill (contract added above `C_s`, or removed; [pipeline_driver.cpp:104](file:///Users/jonathan/MyCode/GroAI.fi/evm_cpp_listener/evm_listener/src/pipeline/pipeline_driver.cpp#L104)), and by `--backfill-contract`. Every write is fenced (r6, P7).
 - **`epoch`** holds the full token of the latest acquisition, including a random nonce, so a `FLUSHALL` can never make an old token match again.
@@ -103,6 +104,24 @@ return id
 | `CONFIG GET appendonly` | WARN + alert if `no` |
 
 Only conditions a restart cannot fix exit 2. **Railway smoke (Phase 6):** `--check-redis` confirms hiredis reaches the IPv6 private network. If it fails, the fallback is `getaddrinfo(AF_UNSPEC)` ourselves and passing the literal address.
+
+### 4.3.1 Dedicated-Redis Tenancy Guardrails (`T-029`, mirrored from `market-data-streamer`)
+`evm_listener` requires a dedicated Redis instance (`evml-redis`), isolated from `market-data-streamer` (`mds-redis`) and across environments (`staging` vs `production`).
+
+- **Startup checks (`await_redis_ready`, enforced on both host startup and `--check-redis`):**
+  1. **Foreign key prefixes (`SCAN 0 COUNT 1000`, up to 10,000 keys):** any key that does not start with `evml:` (e.g. `mds:*`, `bull:*`, `cel:*`) is a **fatal `StartupFatal` (`tenancy_violation = true`, exit code `2`)** logging `event="REDIS_TENANCY_VIOLATION"`.
+  2. **Logical database isolation (`INFO keyspace`):** any `dbN` other than the URL's selected DB (`parse_redis_db(url)`, default `0`) having `keys > 0` is **fatal (exit `2`)**.
+  3. **Tenant identity marker (`evml:{<shard_id>}:tenant`):**
+     - `SET evml:{<shard_id>}:tenant "evm-listener|<deploy_env>" NX` claims an uninitialized instance.
+     - If already present with a different value (e.g. `evm-listener|staging` vs `evm-listener|production`), startup **fails fast (exit `2`)**. Intentional re-homing requires an explicit operator `DEL evml:{<shard_id>}:tenant`.
+  4. **Non-fatal warnings (`CLIENT SETNAME` + `CLIENT LIST` + `INFO keyspace`):**
+     - Each connection sets `CLIENT SETNAME evml:<host_id>:{acquire,data,lease,audit}` (sanitized to printable ASCII without spaces).
+     - Foreign `name=` prefixes (neither empty nor starting with `evml:`), `total_clients > 30`, or `current_db_keys > 200000` log `event="REDIS_TENANCY_WARNING"`.
+- **`EVML_DEPLOY_ENV` resolution (`resolve_deploy_env`):** `EVML_DEPLOY_ENV` → `RAILWAY_ENVIRONMENT_NAME` → `"local"` fallback; trimmed to `[A-Za-z0-9._-]`.
+- **Runtime periodic check (`RedisSink::service_tenancy`, every 300 s on `lease_conn_`):**
+  - Runs bounded `SCAN 0 COUNT 200`, `GET evml:{<shard_id>}:tenant`, and `INFO keyspace` after lease renewal and heartbeat.
+  - **Alert-only (never self-fences):** increments `SinkStatus::tenancy_violations_total` (`evml_redis_tenancy_violations_total` counter → `Redis Tenancy Violation` `critical` alert, rate-limited to 15 min) and logs `REDIS_TENANCY_VIOLATION`, while keeping the leader writing.
+- **Read-only consumer contract:** downstream consumers (`botB`, `redis-parquet-archiver`) are **read-only** on `evml-redis` (`XREAD` / `HGETALL` / `GET` only) or create consumer groups exclusively on existing `evml:{<shard>}:*` streams; they must never write non-`evml:` keys into `evml-redis`.
 
 ## 4.4 Sink thread (`sink/redis_sink`), r6
 - **Transport seam:** `RedisSink` drives a small `RedisConn` interface (pipeline send / replies). Production uses `sw::redis::Redis` (pool 1, connect/socket timeouts 2 s). Unit tests use a fake that injects errors and timeouts at chosen positions, so P1/A are proven without a real Redis. **TLS (`rediss://`) is not supported yet:** redis++ 1.3.15 `Uri` rejects the scheme, so it fails fast at startup with "invalid URI: invalid scheme". Railway's private network URL is plain `redis://`; if a TLS endpoint is ever needed, map `rediss` to `redis` and set `ConnectionOptions::tls.enabled` (the conan build already has TLS).

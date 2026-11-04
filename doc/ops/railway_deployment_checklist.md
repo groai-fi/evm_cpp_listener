@@ -22,8 +22,11 @@ Before deploying to Railway production:
 
 ## 1. Prerequisites & Railway Project Setup (§6.11 & Plan 60 §5.6)
 
-### 1.1 Railway Redis 8.4 Service
-- [ ] Provision a **Redis** service (`redis:8.4`) inside the Railway production project/environment.
+### 1.1 Dedicated Railway Redis 8.4 Service (`evml-redis`)
+- [ ] Provision a **dedicated Redis** service (`redis:8.4`, e.g. `evml-redis`) inside the Railway production project/environment — **separate from `mds-redis` (`market-data-streamer`) and separate between staging and production**.
+  - `evm_listener` writes and verifies `evml:{base_eurc_usdc}:tenant = "evm-listener|<EVML_DEPLOY_ENV>"` at startup and during Railway's `preDeployCommand` (`--check-redis`). Pointing `evm_listener` at a Redis containing non-`evml:` keys (such as `mds:*`), keys in another logical DB, or a mismatched tenant marker exits `2` (`REDIS_TENANCY_VIOLATION`) and aborts deployment.
+  - Intentional re-homing across environments requires explicit operator deletion: `redis-cli -u "$REDIS_URL" DEL "evml:{base_eurc_usdc}:tenant"`.
+  - Downstream consumers (`botB`, `redis-parquet-archiver`) must treat `evml-redis` as **read-only** (or only create consumer groups on existing `evml:{<shard>}:*` streams) and must never write non-`evml:` keys into `evml-redis`.
 - [ ] Ensure Redis starts with persistence and `noeviction` enabled (`--appendonly yes --maxmemory-policy noeviction`), or apply and persist via `redis-cli`:
   ```bash
   redis-cli -u "$REDIS_URL" CONFIG SET appendonly yes
@@ -52,7 +55,7 @@ Before deploying to Railway production:
 
 ### 1.3 Service Creation & Environment Variables (`evml-base-a` and `evml-base-b`)
 Create `evml-base-a` first for §6.5 smoke (and `evml-base-b` in §6.6 Step 2), pointing to the repo root ([`railway.json`](../../railway.json)):
-- **No Custom Start Command:** Leave Railway's `startCommand` empty so the image's `ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/evm_listener"]` runs as PID 1.
+- **No Custom Start Command:** Leave Railway's `startCommand` empty so the image's `ENTRYPOINT ["/usr/bin/tini", "-s", "--"]` and `CMD ["/usr/local/bin/evm_listener", "--config", "/app/config/base.toml"]` run as PID 1, while `preDeployCommand` (`/usr/local/bin/evm_listener --config /app/config/base.toml --check-redis`) gates every deploy before the running container is replaced.
 - **No Volume Attached:** Spill uses ephemeral container disk (`/tmp/evml-spill`) and is wiped on start (`D1`).
 - **No Public Domain:** Keep HTTP port `9464` (`/healthz`, `/readyz`, `/metrics`) strictly on `*.railway.internal`.
 - **Regions:** Place `evml-base-a` and `evml-base-b` in different regions if supported by your Railway plan.
@@ -60,6 +63,7 @@ Create `evml-base-a` first for §6.5 smoke (and `evml-base-b` in §6.6 Step 2), 
 | Variable Name | `evml-base-a` Value | `evml-base-b` Value | Purpose |
 |---|---|---|---|
 | `EVML_HOST_ID` | `a` | `b` | Lease token identity & alert/heartbeat `host` tag |
+| `EVML_DEPLOY_ENV` | `production` *(or `staging`)* | `production` *(or `staging`)* | Tenant marker (`evm-listener|<EVML_DEPLOY_ENV>`); falls back to `RAILWAY_ENVIRONMENT_NAME` |
 | `REDIS_URL` | `${{Redis.REDIS_URL}}` | `${{Redis.REDIS_URL}}` | Private IPv6 URL (`redis://...@redis.railway.internal:6379`) |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` | `30` | Gives `tini` + `evm_listener` 30 s between `SIGTERM` and `SIGKILL` to drain & release lease |
 | `BASE_WSS_URL_QUICKNODE` | `<from .env>` | `<from .env>` | WS #1 primary |
@@ -78,12 +82,12 @@ Create `evml-base-a` first for §6.5 smoke (and `evml-base-b` in §6.6 Step 2), 
 
 Deploy `evml-base-a` (`make prod-deploy` or via Railway GitHub auto-deploy) and complete all 8 checks before deploying `evml-base-b`:
 
-- [ ] **1. IPv6 Redis Connectivity (`--check-redis`):**
-  Run as a one-off command in the `evml-base-a` container (`railway ssh --service evml-base-a`):
+- [ ] **1. IPv6 Redis Connectivity & Tenancy Gate (`preDeployCommand` / `--check-redis`):**
+  Verify in the Railway deployment logs (first staging deploy and production smoke) that `preDeployCommand` (`/usr/local/bin/evm_listener --config /app/config/base.toml --check-redis`) ran before container promotion, or run it manually in `evml-base-a` (`railway ssh --service evml-base-a`):
   ```bash
   /usr/local/bin/evm_listener --config /app/config/base.toml --check-redis
   ```
-  - **Accept:** Exits `0`, reaches `redis.railway.internal`, prints `addr_family="IPv6"` (or `IPv4` if dual-stack), `redis_version="8.4..."`, `maxmemory_policy="noeviction"`, `appendonly="yes"`.
+  - **Accept:** Exits `0`, reaches `redis.railway.internal`, prints `addr_family="IPv6"` (or `IPv4` if dual-stack), `redis_version="8.4..."`, `maxmemory_policy="noeviction"`, `appendonly="yes"`, and writes `evml:{base_eurc_usdc}:tenant = "evm-listener|production"` (or `staging`).
   - **Fallback if DNS/IPv6 fails:** Stop and report before changing code (Plan 50 §4.3 fallback: resolve with `getaddrinfo(AF_UNSPEC)`).
 
 - [ ] **2. Deploy Healthcheck (`/healthz`):**

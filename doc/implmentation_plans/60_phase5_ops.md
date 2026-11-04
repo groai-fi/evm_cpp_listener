@@ -81,6 +81,7 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 | Pipeline Stalled (rev 5, G4) | a cursor missed 3 consecutive progress deadlines, or a sweep returned `Stalled` (min range still `RangeTooLarge`, or no agreement after `max_bad_attempts` bad pages) | critical | `class, cursor, gate, provider, detail` |
 | Leader Changed | lease taken over by another host | warning | `old_host, new_host` |
 | Redis Misconfigured | eviction policy ≠ `noeviction` or persistence off (startup check) | critical | `maxmemory_policy, appendonly, redis_version` |
+| Redis Tenancy Violation (T-029) | startup or 300 s runtime check detected foreign keys, cross-DB keys, or `evml:{<shard>}:tenant` mismatch | critical | `foreign_prefixes, db, marker` |
 | Consumer Lagging (r6, Q2) | `max(undelivered_age_s, pending_age_s)` > `consumer_lag_warn_s` (12 h) | warning | `stream, group, undelivered_age_s, pending_age_s, lag, retention_s` |
 | Consumer Near Trim (r6, Q2) | same > `consumer_lag_crit_s` (24 h) | critical | same |
 | Consumer Entries Trimmed (r6, Q2) | `trimmed_unread` | critical (data loss already happened; recovery = consumer re-reads from its own store, or a backfill into a fresh stream) | `stream, group, last_delivered_id, max_deleted_id` |
@@ -88,12 +89,12 @@ Opt-in `[ws] liveness = "ping"` (replaces the billed `newHeads` subscription wit
 
 The four consumer alerts come from the Phase 4 §4.10 probe and are rate-limited to one per group per 15 min.
 
-**Kinds (rev 10, §5.3.1):** **Event** alerts are Provider Failover, Safe Reorg, Sink Fenced, Sink Invariant, WS Missed Logs, Provider Inconsistent, Leader Changed and Consumer Entries Trimmed. Every other row is a **condition** alert.
+**Kinds (rev 10, §5.3.1):** **Event** alerts are Provider Failover, Safe Reorg, Sink Fenced, Sink Invariant, WS Missed Logs, Provider Inconsistent, Leader Changed, Redis Tenancy Violation and Consumer Entries Trimmed. Every other row is a **condition** alert.
 
 **Never** alert on event silence. Your sample `seconds_since_last_event > 120s` would page during every quiet minute; gauge events can be hours apart (master W6). The sample's title "WebSocket Stalled" is kept, with a head-based trigger.
 
 ## 5.4 Metrics (unchanged list from the previous revision, plus)
-`evml_role{role=leader|standby}`, `evml_lease_renew_failures_total`, `evml_provider_active{provider}`, `evml_provider_failovers_total`, `evml_alerts_fired_total{alert}`, and (rev 5) `evml_provider_inconsistency_total{provider}`, `evml_safe_missed_total`, `evml_reverify_total{result}`, `evml_getlogs_throttled_total{provider}`, and (rev 6) `evml_consumer_undelivered_age_seconds{stream,group}`, `evml_consumer_pending_age_seconds{stream,group}`, `evml_consumer_lag_entries{stream,group}`, `evml_spill_discarded_records_total`.
+`evml_role{role=leader|standby}`, `evml_lease_renew_failures_total`, `evml_provider_active{provider}`, `evml_provider_failovers_total`, `evml_alerts_fired_total{alert}`, and (rev 5) `evml_provider_inconsistency_total{provider}`, `evml_safe_missed_total`, `evml_reverify_total{result}`, `evml_getlogs_throttled_total{provider}`, and (rev 6) `evml_consumer_undelivered_age_seconds{stream,group}`, `evml_consumer_pending_age_seconds{stream,group}`, `evml_consumer_lag_entries{stream,group}`, `evml_spill_discarded_records_total`, and (T-029) `evml_redis_tenancy_violations_total`.
 
 ## 5.4a `LogSource` adapter over `ProviderPool` (rev 5, G1/G2)
 The production implementation of Phase 3's `LogSource` interface:
@@ -113,18 +114,19 @@ Why: it keeps 1× RPC quota on plans that are already limited. With pools at `sa
 - **Redis down for both:** no one can renew. The current leader keeps running in spill-degraded mode; the standby cannot acquire. On Redis recovery the leader's first op is `renew`: `RESUMED` if nobody took over, so the spill is replayed; otherwise `FENCED` and the spill is discarded (fencing, not ownership, makes this safe).
 - **Remaining SPOF = the Railway Redis single node.** Covered by the spill (outage, same process) and re-backfill from `start_block` (data loss). Documented as an accepted v1 risk.
 
-## 5.6 Railway service configuration (`railway.json` at the repo root, config-as-code; rev 8, D10)
+## 5.6 Railway service configuration (`railway.json` at the repo root, config-as-code; rev 8, D10; T-029)
 ```json
 { "$schema": "https://railway.com/railway.schema.json",
   "build":  { "builder": "DOCKERFILE", "dockerfilePath": "docker/Dockerfile.prod" },
-  "deploy": { "healthcheckPath": "/healthz", "healthcheckTimeout": 120,
+  "deploy": { "preDeployCommand": ["/usr/local/bin/evm_listener --config /app/config/base.toml --check-redis"],
+              "healthcheckPath": "/healthz", "healthcheckTimeout": 120,
               "restartPolicyType": "ALWAYS" } }
 ```
-**No `startCommand` (rev 9 fix).** Railway runs a custom start command in exec form **in place of the image `ENTRYPOINT`**, which would bypass `tini` (no signal forwarding, no zombie reaping). The image carries the command instead: `ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/evm_listener"]` + `CMD ["--config","/app/config/base.toml"]`. `docker run <image> --version` still works because it replaces only `CMD`.
+**No `startCommand` (rev 9 fix, updated in T-029).** Railway runs a custom start command in exec form **in place of the image `ENTRYPOINT`**, which would bypass `tini` (no signal forwarding, no zombie reaping). The image sets `ENTRYPOINT ["/usr/bin/tini", "-s", "--"]` and `CMD ["/usr/local/bin/evm_listener", "--config", "/app/config/base.toml"]` so Railway's `preDeployCommand` executes `/usr/local/bin/evm_listener --config /app/config/base.toml --check-redis` cleanly under `tini` without argument concatenation, and blocks rollout before replacing the live container if Redis tenancy or configuration checks fail (exit `2`).
 
 Service variables (set in the Railway UI, never committed):
 - Providers (each one is enabled by being set): `BASE_WSS_URL_QUICKNODE`, `BASE_RPC_URL_QUICKNODE`, `BASE_WSS_URL`, `BASE_RPC_URL`, `BASE_RPC_URL_ANKR`, `BASE_RPC_URL_ALCHEMY` (it rejoins automatically when its quota resets). The public Base endpoint is a config literal and needs no variable.
-- `REDIS_URL=${{Redis.REDIS_URL}}`, `EVML_HOST_ID=a|b`.
+- `REDIS_URL=${{Redis.REDIS_URL}}`, `EVML_HOST_ID=a|b`, `EVML_DEPLOY_ENV=production|staging` (falls back to `RAILWAY_ENVIRONMENT_NAME`, then `local`).
 - `N8N_ALERT_WEBHOOK_URL`, `N8N_ALERT_WEBHOOK_TOKEN`, `DEADMAN_PING_URL` (the same URL on both services; only the leader pings).
 - `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`.
 

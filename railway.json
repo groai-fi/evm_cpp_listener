@@ -5,6 +5,7 @@
     "dockerfilePath": "docker/Dockerfile.prod"
   },
   "deploy": {
+    "preDeployCommand": ["/usr/local/bin/evm_listener --config /app/config/base.toml --check-redis"],
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 120,
     "restartPolicyType": "ALWAYS"
