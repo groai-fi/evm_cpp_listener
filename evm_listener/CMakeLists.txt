@@ -53,6 +53,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sink/lua_sources.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/sink/lua_sources.hpp @ONLY)
 
 option(EVML_SANITIZE "Build with ASan+UBSan" ON)
+option(EVML_TSAN "Build with ThreadSanitizer" OFF)
 # Test-only CLI hooks (--test-freeze-io-after). On for Debug (dev/test) builds, off for Release (the prod image).
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(EVML_TEST_HOOKS_DEFAULT ON)
@@ -150,6 +151,7 @@ if(EVML_BUILD_TESTS OR NOT DEFINED EVML_BUILD_TESTS)
 endif()
 
 foreach(t IN LISTS EVML_TARGETS)
+    set_target_properties(${t} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${t} PRIVATE
         -Wall
         -Wextra
@@ -164,7 +166,11 @@ foreach(t IN LISTS EVML_TARGETS)
         # GCC 12 -O2/-O3 false positives in libstdc++ basic_string.h (Bug 105329) and std::variant union storage.
         target_compile_options(${t} PRIVATE -Wno-restrict -Wno-maybe-uninitialized)
     endif()
-    if(EVML_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(EVML_TSAN)
+        target_compile_definitions(${t} PRIVATE BOOST_ASIO_DISABLE_FENCED_BLOCK)
+        target_compile_options(${t} PRIVATE -fsanitize=thread -fno-omit-frame-pointer $<$<CXX_COMPILER_ID:GNU>:-Wno-tsan>)
+        target_link_options(${t} PRIVATE -fsanitize=thread)
+    elseif(EVML_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${t} PRIVATE -fsanitize=address,undefined)
     endif()

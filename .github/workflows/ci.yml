@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   test:
-    name: Build & Test (Debug ASan/UBSan + Release)
+    name: Build & Test (Debug ASan/UBSan + TSan + Release)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -44,6 +44,8 @@ jobs:
             build-essential \
             gcc-12 \
             g++-12 \
+            clang-tidy \
+            clang-format \
             cmake \
             ninja-build \
             pkg-config \
@@ -109,6 +111,18 @@ jobs:
           export HOSTNAME=127.0.0.1
           conan install . --lockfile=conan.lock --build=missing -pr:a=conan/profiles/debug -s build_type=Debug
           cmake --preset conan-debug -DEVML_SANITIZE=ON -DEVML_TEST_HOOKS=ON
+          cmake --build --preset conan-debug --parallel "$(nproc)"
+          ctest --preset conan-debug --output-on-failure
+
+      - name: Run clang-tidy
+        run: |
+          find evm_listener/src evm_listener/tests -name '*.cpp' -print0 | xargs -0 -n 4 -P "$(nproc)" clang-tidy -p build/Debug
+
+      - name: Build and test Debug with ThreadSanitizer (TSan)
+        run: |
+          export HOSTNAME=127.0.0.1
+          redis-cli -h 127.0.0.1 -p 6379 FLUSHALL
+          cmake --preset conan-debug -DEVML_TSAN=ON -DEVML_SANITIZE=OFF -DEVML_TEST_HOOKS=ON
           cmake --build --preset conan-debug --parallel "$(nproc)"
           ctest --preset conan-debug --output-on-failure
 
