@@ -94,9 +94,10 @@ public:
 
 private:
     boost::asio::awaitable<void> run();
-    boost::asio::awaitable<WsClosed> session_main(std::shared_ptr<WsSession> self);
+    static boost::asio::awaitable<void> run_impl(std::shared_ptr<WsSession> self);
+    static boost::asio::awaitable<WsClosed> session_main(std::shared_ptr<WsSession> self);
     template <class Ws>
-    boost::asio::awaitable<WsClosed> serve(std::shared_ptr<WsSession> self, Ws& ws);
+    static boost::asio::awaitable<WsClosed> serve(std::shared_ptr<WsSession> self, std::shared_ptr<Ws> ws);
     void finish(WsClosed c);
     void close_socket();
 

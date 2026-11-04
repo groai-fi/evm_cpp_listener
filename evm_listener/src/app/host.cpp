@@ -94,9 +94,26 @@ public:
           }()),
           telemetry_(cfg),
           beat_timer_(ioc_),
-          sleep_timer_(ioc_),
+          sleep_timer_(std::make_shared<net::steady_timer>(ioc_)),
           grace_timer_(ioc_),
           freeze_timer_(ioc_) {}
+
+    ~Host() noexcept {
+        stopping_ = true;
+        if (startup_.joinable()) startup_.join();
+        wd_.stop();
+        teardown_runtime();
+        if (ops_) {
+            ops_->stop();
+            ops_.reset();
+        }
+        telemetry_.stop();
+    }
+
+    Host(const Host&) = delete;
+    Host& operator=(const Host&) = delete;
+    Host(Host&&) = delete;
+    Host& operator=(Host&&) = delete;
 
     int run();
 
@@ -104,9 +121,11 @@ private:
     enum class Phase : std::uint8_t { WaitingRedis, Standby, Leader };
 
     void start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant);
-    static net::awaitable<void> pipeline_loop(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt);
-    static net::awaitable<void> walk_fork(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt, std::uint64_t epoch,
-                                          HeadEvent e);
+    void teardown_runtime();
+    static net::awaitable<void> pipeline_loop(std::weak_ptr<Host> weak_self, std::shared_ptr<Runtime> rt,
+                                              std::shared_ptr<net::steady_timer> sleep_timer);
+    static net::awaitable<void> walk_fork(std::weak_ptr<Host> weak_self, std::shared_ptr<Runtime> rt,
+                                          std::uint64_t epoch, HeadEvent e);
     void acquire_thread_main(bool first);
 
     std::string state_name() const {
@@ -155,7 +174,7 @@ private:
             rt_->deferred_head.reset();
         }
     }
-    void on_ws_log(const rpc::Log& log, const std::string& provider) {
+    void on_ws_log(const rpc::Log& log, std::string_view provider) {
         if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
         rt_->ws_reconciler.on_ws_log(log, provider);
         if (log.removed || log.topics.empty()) return;
@@ -170,7 +189,7 @@ private:
         const auto now_ms = wall_ms();
         const std::uint64_t ts = rt_->ring.timestamp_of(log.block_number, log.block_hash).value_or(0);
         const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
-        auto ev = pipeline::make_event(log, cfg_, ctx, pipeline::EventType::Log, ts, provider, now_ms, now_ms);
+        auto ev = pipeline::make_event(log, cfg_, ctx, pipeline::EventType::Log, ts, std::string(provider), now_ms, now_ms);
         ev.finality = core::Finality::Latest;
         rt_->sink->emit_fast(std::move(ev));
     }
@@ -181,9 +200,9 @@ private:
         ws_extra_total_ += cc.ws_extra;
         if (opt_.on_cross_check) opt_.on_cross_check(ws_missed_total_, ws_extra_total_);
     }
-    void on_head(const rpc::Head& h, const std::string& provider) {
+    void on_head(const rpc::Head& h, std::string_view provider) {
         if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
-        HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, provider};
+        HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, std::string(provider)};
         if (rt_->walking) rt_->deferred_head = std::move(e);
         else handle_head(e);
     }
@@ -197,7 +216,7 @@ private:
         }
         if (rt_->ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
         rt_->walking = true;
-        net::co_spawn(ioc_, walk_fork(shared_from_this(), rt_, head_epoch_, e), net::detached);
+        net::co_spawn(ioc_, walk_fork(weak_from_this(), rt_, head_epoch_, e), net::detached);
     }
     void resync_ring(const chain::BlockRef& head, std::string_view why) {
         log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
@@ -207,7 +226,7 @@ private:
         rt_->ws_reconciler.on_ring_resync(head.number);
         rt_->driver->on_safe_reorg_signal("head ring resync: " + std::string(why));
     }
-    void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash) {
+    void on_tag(std::string_view provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash) {
         if (!rt_ || !rt_->driver || !rt_->pool) return;
         const auto cur = rt_->pool->current_getlogs();
         if (!cur || *cur != provider) return;
@@ -222,7 +241,7 @@ private:
         if (sig == chain::GateSignal::SafeRegression || sig == chain::GateSignal::SafeHashMismatch) {
             log::warn("gate", "safe gate signal", {{"signal", chain::to_string(sig)}, {"provider", provider}});
             if (rt_->source) rt_->source->clear_cache();
-            rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + provider);
+            rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + std::string(provider));
         } else if (sig == chain::GateSignal::FinalizedAnomaly) {
             log::error("gate", "finalized anomaly: release frozen", {{"provider", provider}, {"reason", gate.frozen_reason()}});
             rt_->driver->on_gate_frozen(gate.frozen_reason());
@@ -291,14 +310,13 @@ private:
         log::warn("host", "demoting to standby", {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
         rt_->driver->request_drain();
         if (rt_->pool) rt_->pool->stop();
-        sleep_timer_.cancel();
+        sleep_timer_->cancel();
     }
     void end_term() {
         if (stopping_ || !rt_) return;
         wd_.set_sink_registered(false);
         bump_head_epoch();
-        rt_->pool->stop();
-        rt_.reset();
+        teardown_runtime();
         demoting_ = false;
         last_state_ = pipeline::PipelineState::Init;
         phase_ = Phase::Standby;
@@ -320,7 +338,7 @@ private:
         if (rt_ && rt_->driver) {
             rt_->driver->request_drain();
             if (rt_->pool) rt_->pool->stop();
-            sleep_timer_.cancel();
+            sleep_timer_->cancel();
         } else {
             finish();
         }
@@ -331,7 +349,7 @@ private:
         stopping_ = true;
         beat_timer_.cancel();
         freeze_timer_.cancel();
-        sleep_timer_.cancel();
+        sleep_timer_->cancel();
         if (ops_) ops_->stop();
         if (rt_ && rt_->pool) rt_->pool->stop();
         grace_timer_.expires_after(kShutdownGrace);
@@ -346,11 +364,13 @@ private:
     std::string redis_url_;
     std::string deploy_env_{"local"};
     int expected_db_{0};
-    net::io_context ioc_;
     ops::Watchdog wd_;
+    net::io_context ioc_;
     HostTelemetry telemetry_;
     std::unique_ptr<ops::OpsHttpServer> ops_;
-    net::steady_timer beat_timer_, sleep_timer_, grace_timer_, freeze_timer_;
+    net::steady_timer beat_timer_;
+    std::shared_ptr<net::steady_timer> sleep_timer_;
+    net::steady_timer grace_timer_, freeze_timer_;
     std::thread startup_;
     std::atomic<bool> stopping_{false};
     std::atomic<Phase> phase_{Phase::WaitingRedis};
@@ -368,6 +388,19 @@ private:
     pipeline::PipelineState last_state_{pipeline::PipelineState::Init};
     std::shared_ptr<Runtime> rt_;  // declared last: destroyed first, before the io_context it posts to
 };
+
+void Host::teardown_runtime() {
+    if (!rt_) return;
+    wd_.set_sink_registered(false);
+    if (rt_->pool) rt_->pool->stop();
+    if (rt_->sink) rt_->sink->stop();
+    rt_->driver.reset();
+    rt_->sweeper.reset();
+    rt_->source.reset();
+    rt_->pool.reset();
+    rt_->sink.reset();
+    rt_.reset();
+}
 
 int Host::run() {
     if (!opt_.stop) throw std::invalid_argument("HostOptions::stop is required");
@@ -399,6 +432,12 @@ int Host::run() {
         stopping_ = true;
         if (startup_.joinable()) startup_.join();
         wd_.stop();
+        teardown_runtime();
+        if (ops_) {
+            ops_->stop();
+            ops_.reset();
+        }
+        telemetry_.stop();
         throw;
     }
 
@@ -411,6 +450,12 @@ int Host::run() {
                   {{"flushed", d.flushed ? "true" : "false"}, {"unflushed", std::to_string(d.unflushed)},
                    {"lease_released", d.lease_released ? "true" : "false"}});
     }
+    teardown_runtime();
+    if (ops_) {
+        ops_->stop();
+        ops_.reset();
+    }
+    telemetry_.stop();
     log::info("host", "stopped", {{"exit_code", std::to_string(exit_code_)}});
     return exit_code_;
 }
@@ -431,12 +476,12 @@ void Host::acquire_thread_main(bool first) {
             so.shard = cfg_.shard.id;
             so.deploy_env = deploy_env;
             so.host_id = cfg_.shard.host_id;
-            so.on_waiting = [this](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
+            so.on_waiting = [this](std::string_view error, std::string_view family, std::chrono::milliseconds waited) {
                 log::warn("host", "redis unreachable, waiting",
                           {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
                 {
                     std::lock_guard lk(redis_wait_mu_);
-                    redis_wait_family_ = family;
+                    redis_wait_family_ = std::string(family);
                 }
                 const auto since = std::chrono::steady_clock::now() - waited;
                 redis_wait_since_ns_.store(
@@ -463,7 +508,7 @@ void Host::acquire_thread_main(bool first) {
             ao.poll = std::chrono::milliseconds(cfg_.lease.renew_ms);
             ao.stop = stop;
             ao.sleep = sleep;
-            ao.on_waiting = [this](const std::string& /*error*/, std::chrono::milliseconds waited) {
+            ao.on_waiting = [this](std::string_view /*error*/, std::chrono::milliseconds waited) {
                 const auto since = std::chrono::steady_clock::now() - waited;
                 redis_wait_since_ns_.store(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count());
@@ -539,9 +584,9 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
             log::info("pool", "provider transition",
                       {{"provider", t.provider}, {"from", provider::to_string(t.from)}, {"to", provider::to_string(t.to)}, {"reason", why}});
         };
-        h.on_tag = [this](const std::string& p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) { on_tag(p, tag, n, hash); };
-        h.on_head = [this](const rpc::Head& head, const std::string& p) { on_head(head, p); };
-        h.on_log = [this](const rpc::Log& log, const std::string& p) { on_ws_log(log, p); };
+        h.on_tag = [this](std::string_view p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) { on_tag(p, tag, n, hash); };
+        h.on_head = [this](const rpc::Head& head, std::string_view p) { on_head(head, p); };
+        h.on_log = [this](const rpc::Log& log, std::string_view p) { on_ws_log(log, p); };
         h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to, std::string_view reason) {
             if (!rt_) return;
             log::info("pool", "ws active provider changed", {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
@@ -574,42 +619,60 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         phase_ = Phase::Leader;
         log::info("host", "leadership term started", {{"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
         if (opt_.on_event) opt_.on_event("leader");
-        net::co_spawn(ioc_, pipeline_loop(shared_from_this(), rt_), net::detached);
+        net::co_spawn(ioc_, pipeline_loop(weak_from_this(), rt_, sleep_timer_), net::detached);
     } catch (const std::exception& e) {
         begin_shutdown(kExitFailure, std::string("pipeline startup failed: ") + e.what());
     }
 }
 
-net::awaitable<void> Host::pipeline_loop(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt) {
+net::awaitable<void> Host::pipeline_loop(std::weak_ptr<Host> weak_self, std::shared_ptr<Runtime> rt,
+                                         std::shared_ptr<net::steady_timer> sleep_timer) {
     try {
         for (;;) {
+            if (!rt->driver) co_return;
             const auto r = co_await rt->driver->tick();
-            if (rt->driver->status().state == pipeline::PipelineState::Live) {
-                rt->ws_reconciler.on_live_tick(rt->driver->status().c_s, rt->pool && rt->pool->active_ws().has_value());
+            std::chrono::milliseconds wait_ms{0};
+            {
+                auto self = weak_self.lock();
+                if (!self || !rt->driver) co_return;
+                if (rt->driver->status().state == pipeline::PipelineState::Live) {
+                    rt->ws_reconciler.on_live_tick(rt->driver->status().c_s, rt->pool && rt->pool->active_ws().has_value());
+                }
+                if (r.done || self->stopping_ || self->demoting_) break;
+                wait_ms = r.wait;
+                if (wait_ms.count() > 0) {
+                    sleep_timer->expires_after(wait_ms);
+                }
             }
-            if (r.done || self->stopping_ || self->demoting_) break;
-            if (r.wait.count() > 0) {
-                self->sleep_timer_.expires_after(r.wait);
+            if (wait_ms.count() > 0) {
                 boost::system::error_code ec;
-                co_await self->sleep_timer_.async_wait(net::redirect_error(net::use_awaitable, ec));
+                co_await sleep_timer->async_wait(net::redirect_error(net::use_awaitable, ec));
             }
         }
     } catch (const std::exception& e) {
-        self->request_exit(kExitFailure, std::string("pipeline tick threw: ") + e.what());
+        if (auto self = weak_self.lock()) {
+            self->request_exit(kExitFailure, std::string("pipeline tick threw: ") + e.what());
+        }
     }
+    auto self = weak_self.lock();
+    if (!self || !rt->driver) co_return;
     const auto st = rt->driver->status();
     if (st.state == pipeline::PipelineState::Failed) self->request_exit(kExitUsage, "pipeline failed: " + st.fatal);
     if (self->demoting_ && !self->stopping_) {
-        net::post(self->ioc_, [self] { self->end_term(); });
+        net::post(self->ioc_, [weak_self] {
+            if (auto s = weak_self.lock()) s->end_term();
+        });
         co_return;
     }
     self->finish();
 }
 
-net::awaitable<void> Host::walk_fork(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt, std::uint64_t epoch,
+net::awaitable<void> Host::walk_fork(std::weak_ptr<Host> weak_self, std::shared_ptr<Runtime> rt, std::uint64_t epoch,
                                      HeadEvent e) {
-    const auto alive = [self, epoch] { return epoch == self->head_epoch_ && self->rt_ && self->rt_->driver; };
-    const auto pool = rt->pool;
+    const auto alive = [weak_self, rt, epoch] {
+        auto self = weak_self.lock();
+        return self && epoch == self->head_epoch_ && self->rt_ == rt && rt->driver;
+    };
     try {
         rpc::Decoder dec;
         std::optional<chain::ReorgInfo> info;
@@ -622,8 +685,9 @@ net::awaitable<void> Host::walk_fork(std::shared_ptr<Host> self, std::shared_ptr
                     why = "fork walk longer than " + std::to_string(kMaxWalkBlocks) + " blocks";
                     break;
                 }
+                if (!rt->pool) co_return;
                 const std::uint64_t n = walk.need();
-                const auto o = co_await pool->call_to(e.provider, [n](std::uint64_t id) {
+                const auto o = co_await rt->pool->call_to(e.provider, [n](std::uint64_t id) {
                     return rpc::build_get_block_by_number(id, core::to_hex_u64(n), false);
                 });
                 if (!alive()) co_return;
@@ -649,6 +713,8 @@ net::awaitable<void> Host::walk_fork(std::shared_ptr<Host> self, std::shared_ptr
         }
         if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
 
+        auto self = weak_self.lock();
+        if (!self || !alive()) co_return;
         rt->walking = false;
         if (info) {
             const auto c_s = rt->driver->status().c_s;
@@ -670,7 +736,8 @@ net::awaitable<void> Host::walk_fork(std::shared_ptr<Host> self, std::shared_ptr
             self->handle_head(next);
         }
     } catch (const std::exception& ex) {
-        if (!alive()) co_return;
+        auto self = weak_self.lock();
+        if (!self || !alive()) co_return;
         rt->walking = false;
         rt->deferred_head.reset();
         log::error("host", "head walk threw", {{"error", ex.what()}});

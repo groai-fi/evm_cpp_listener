@@ -7,11 +7,8 @@
 // (core::env::redact), never header values, and request bodies are never echoed.
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -59,9 +56,13 @@ public:
     struct State;
 
 private:
-    enum class Method : std::uint8_t { Get, Post };
+    enum class Method : unsigned char { Get, Post };
     static boost::asio::awaitable<core::Result<HttpResponse>> request(
         std::shared_ptr<State> st, Method method, std::string url, std::string body, Headers headers);
+    static boost::asio::awaitable<HttpResponse> post_json_impl(
+        std::shared_ptr<State> st, std::string url, std::string body, Headers headers);
+    static boost::asio::awaitable<HttpResponse> get_impl(
+        std::shared_ptr<State> st, std::string url, Headers headers);
 
     std::shared_ptr<State> state_;
 };

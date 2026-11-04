@@ -168,8 +168,7 @@ public:
 
     // Next usable getLogs provider that is not in `exclude`, in failover order. nullopt = none left.
     /// @brief Picks the best usable getLogs provider outside the exclude set.
-    [[nodiscard]] std::optional<std::string> pick_getlogs_excluding(
-        const std::unordered_set<std::string>& exclude) const {
+    [[nodiscard]] std::optional<std::string> pick_getlogs_excluding(const StringSet& exclude) const {
         if (stopped_) return std::nullopt;
         return book_.pick_getlogs(Clock::now(), exclude);
     }
@@ -182,19 +181,19 @@ public:
 
     /// @brief Number of report_bad() calls for the provider (provider_inconsistency_total).
     [[nodiscard]] std::uint64_t inconsistency_total(std::string_view provider) const {
-        return nodes_.at(std::string(provider)).inconsistent;
+        return node_at(provider).inconsistent;
     }
     /// @brief Number of call_to() calls that had to wait for a token (getlogs_throttled_total).
     [[nodiscard]] std::uint64_t throttled_total(std::string_view provider) const {
-        return nodes_.at(std::string(provider)).throttled;
+        return node_at(provider).throttled;
     }
     /// @brief Total HTTP JSON-RPC requests sent to the provider, keyed by method name.
     [[nodiscard]] const std::map<std::string, std::uint64_t>& rpc_requests_total(std::string_view provider) const {
-        return nodes_.at(std::string(provider)).rpc_requests;
+        return node_at(provider).rpc_requests;
     }
     /// @brief Total WebSocket subscription notifications received from the provider, keyed by stream ("heads", "logs").
     [[nodiscard]] const std::map<std::string, std::uint64_t>& ws_messages_total(std::string_view provider) const {
-        return nodes_.at(std::string(provider)).ws_messages;
+        return node_at(provider).ws_messages;
     }
 
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
@@ -261,26 +260,35 @@ private:
         TimePoint next_standby_probe{};
     };
 
+    Node& node_at(std::string_view provider);
+    const Node& node_at(std::string_view provider) const;
+
     // WS supervisor
     void reconcile();
-    void start_session(const std::string& name);
+    void start_session(std::string_view name);
     void end_session_quiet();
     void end_session(rpc::WsClosed c);
-    void schedule_restart(const std::string& name, ms delay);
+    void schedule_restart(std::string_view name, ms delay);
 
     // maintenance
     void schedule_tick();
     void tick();
-    void note(const std::string& provider, const RpcOutcome& o);
+    void note(std::string_view provider, const RpcOutcome& o);
     void emit_transition(const Transition& t, std::string_view reason);
-    void remember_fault(const std::string& provider, rpc::FailKind kind, int http_status,
-                        std::optional<std::int64_t> rpc_code, const std::string& message);
+    void remember_fault(std::string_view provider, rpc::FailKind kind, int http_status,
+                        std::optional<std::int64_t> rpc_code, std::string_view message);
 
     // I/O (each keeps the pool alive through `self`)
-    boost::asio::awaitable<RpcOutcome> call_on(std::string provider, std::string body, std::uint64_t id);
-    boost::asio::awaitable<void> probe(std::shared_ptr<ProviderPool> self, std::string provider);
-    boost::asio::awaitable<void> poll(std::shared_ptr<ProviderPool> self, std::string provider);
-    boost::asio::awaitable<void> crosscheck(std::shared_ptr<ProviderPool> self, std::string provider);
+    static boost::asio::awaitable<RpcOutcome> call_impl(std::shared_ptr<ProviderPool> self, RequestBuilder build);
+    static boost::asio::awaitable<RpcOutcome> call_to_impl(std::shared_ptr<ProviderPool> self, std::string provider,
+                                                           RequestBuilder build);
+    static boost::asio::awaitable<std::optional<TagSnapshot>> read_tag_impl(std::shared_ptr<ProviderPool> self,
+                                                                            std::string provider, Tag tag);
+    static boost::asio::awaitable<RpcOutcome> call_on(std::shared_ptr<ProviderPool> self, std::string provider,
+                                                      std::string body, std::uint64_t id);
+    static boost::asio::awaitable<void> probe(std::shared_ptr<ProviderPool> self, std::string provider);
+    static boost::asio::awaitable<void> poll(std::shared_ptr<ProviderPool> self, std::string provider);
+    static boost::asio::awaitable<void> crosscheck(std::shared_ptr<ProviderPool> self, std::string provider);
 
     boost::asio::any_io_executor exec_;
     PoolConfig cfg_;
@@ -288,7 +296,7 @@ private:
     ProviderBook book_;
     StaleDetector detector_;
     rpc::Decoder dec_;  // used only synchronously (never across a co_await)
-    std::unordered_map<std::string, Node> nodes_;
+    std::unordered_map<std::string, Node, StringHash, std::equal_to<>> nodes_;
     std::vector<std::string> names_;  // every provider, for probe iteration
 
     boost::asio::steady_timer tick_timer_;
@@ -308,7 +316,7 @@ private:
     TimePoint ws_ready_at_{};
 
     std::optional<std::string> last_getlogs_;
-    std::unordered_set<std::string> probing_;
+    StringSet probing_;
     bool polling_{false};
     bool crosschecking_{false};
     TimePoint next_poll_{};

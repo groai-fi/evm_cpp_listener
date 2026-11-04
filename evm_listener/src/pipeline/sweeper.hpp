@@ -139,6 +139,11 @@ private:
     static boost::asio::awaitable<Fetched> fetch_page(std::shared_ptr<State> st, std::uint64_t cursor,
                                                       std::uint64_t ceiling, core::LogFilter filter,
                                                       std::optional<core::Finality> only_class);
+    static boost::asio::awaitable<StepResult> safe_step_impl(std::shared_ptr<State> st, std::uint64_t g_s);
+    static boost::asio::awaitable<StepResult> final_step_impl(std::shared_ptr<State> st, std::uint64_t g_f);
+    static boost::asio::awaitable<StepResult> backfill_step_impl(std::shared_ptr<State> st, std::uint64_t ceiling,
+                                                                 core::Finality emit_finality);
+    static boost::asio::awaitable<ReverifyResult> reverify_released_impl(std::shared_ptr<State> st);
 
     std::shared_ptr<State> state_;
 };

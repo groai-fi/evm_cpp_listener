@@ -7,30 +7,46 @@ namespace evml::rpc {
 
 namespace {
 
-/// @brief Transforms string to lowercase for case-insensitive matching without allocations beyond output.
-std::string lower(std::string_view s) {
-    std::string out(s);
-    // Convert ASCII characters to lowercase in-place
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
-    return out;
+constexpr char ascii_lower(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 }
 
-/// @brief Substring containment check.
-bool has(const std::string& hay, std::string_view needle) { return hay.find(needle) != std::string::npos; }
+/// @brief Case-insensitive substring search (`needle` must be lowercase ASCII) without heap allocation.
+std::size_t find_icase(std::string_view hay, std::string_view needle) noexcept {
+    if (needle.empty()) return 0;
+    if (hay.size() < needle.size()) return std::string_view::npos;
+    const std::size_t limit = hay.size() - needle.size();
+    for (std::size_t i = 0; i <= limit; ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (ascii_lower(hay[i + j]) != needle[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return i;
+    }
+    return std::string_view::npos;
+}
+
+/// @brief Case-insensitive substring containment check.
+bool has(std::string_view hay, std::string_view needle) noexcept {
+    return find_icase(hay, needle) != std::string_view::npos;
+}
 
 /// @brief Parses block range limit numbers from provider error messages (e.g., "eth_getLogs is limited to a 500 range").
-/// @param msg Lowercased error message text.
+/// @param msg Error message text.
 /// @return Extracted block limit, or nullopt if pattern not matched.
-std::optional<std::uint32_t> parse_range_limit(const std::string& msg) {
+std::optional<std::uint32_t> parse_range_limit(std::string_view msg) noexcept {
     static constexpr std::string_view kPhrase = "limited to a ";
     // Search for anchor phrase in message
-    const auto pos = msg.find(kPhrase);
-    if (pos == std::string::npos) return std::nullopt;
+    const auto pos = find_icase(msg, kPhrase);
+    if (pos == std::string_view::npos) return std::nullopt;
     std::uint64_t n = 0;
     std::size_t i = pos + kPhrase.size();
     const std::size_t start = i;
     // Extract contiguous decimal digits following the anchor phrase
-    while (i < msg.size() && std::isdigit(static_cast<unsigned char>(msg[i])) && n < 0xFFFFFFFFULL) {
+    while (i < msg.size() && msg[i] >= '0' && msg[i] <= '9' && n < 0xFFFFFFFFULL) {
         n = n * 10 + static_cast<std::uint64_t>(msg[i] - '0');
         ++i;
     }
@@ -43,8 +59,7 @@ std::optional<std::uint32_t> parse_range_limit(const std::string& msg) {
 
 /// @brief Classifies an RPC failure using ordered pattern matching across status codes and error messages.
 Classified classify(const ErrorInfo& e) noexcept {
-    // Normalise error text to lowercase once for efficient multi-pattern matching
-    const std::string m = lower(e.message);
+    const std::string_view m = e.message;
     const auto code = e.rpc_code.value_or(0);
 
     // Rule 1: Monthly quota exhaustion (Alchemy "Monthly capacity limit exceeded").

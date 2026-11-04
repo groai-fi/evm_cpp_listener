@@ -22,10 +22,10 @@ sw::redis::Redis make_redis(std::string_view url, std::chrono::milliseconds io_t
     return sw::redis::Redis(opts, pool);
 }
 
-bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
+bool starts_with(std::string_view s, std::string_view prefix) { return s.rfind(prefix, 0) == 0; }
 
 // An error reply that means "the server cannot serve this right now", as opposed to "your command is wrong".
-bool is_transient_reply(const std::string& msg) { return starts_with(msg, "LOADING") || starts_with(msg, "BUSY"); }
+bool is_transient_reply(std::string_view msg) { return starts_with(msg, "LOADING") || starts_with(msg, "BUSY"); }
 
 // Runs `f`, turning every transport-level failure into Result<T, ConnError>. Fatal error replies pass through unchanged.
 template <class F>
@@ -49,27 +49,28 @@ auto try_guarded(F&& f) -> core::Result<decltype(f()), ConnError> {
     }
 }
 
-std::uint64_t parse_u64(const std::string& s, const std::string& what) {
+std::uint64_t parse_u64(std::string_view s, std::string_view what) {
     std::uint64_t v = 0;
     const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
     if (ec != std::errc{} || p != s.data() + s.size())
-        throw std::runtime_error("redis: " + what + " is not an unsigned integer: '" + s + "'");
+        throw std::runtime_error("redis: " + std::string(what) + " is not an unsigned integer: '" + std::string(s) + "'");
     return v;
 }
 
 // ZRANGEBYSCORE ... WITHSCORES returns scores as text; ours are block numbers, so integral.
-std::uint64_t parse_score(const std::string& s, const std::string& member) {
+std::uint64_t parse_score(std::string_view s, std::string_view member) {
     double d = 0;
     const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), d);
     if (ec != std::errc{} || p != s.data() + s.size() || d < 0 || d != std::floor(d))
-        throw std::runtime_error("redis: released score of '" + member + "' is not a block number: '" + s + "'");
+        throw std::runtime_error("redis: released score of '" + std::string(member) + "' is not a block number: '" +
+                                 std::string(s) + "'");
     return static_cast<std::uint64_t>(d);
 }
 
-CallOutcome fail_outcome(const std::string& msg) {
-    if (starts_with(msg, "NOSCRIPT")) return ScriptFail{FailKind::NoScript, msg};
-    if (is_transient_reply(msg)) return ScriptFail{FailKind::Transient, msg};
-    return ScriptFail{FailKind::Fatal, msg};
+CallOutcome fail_outcome(std::string_view msg) {
+    if (starts_with(msg, "NOSCRIPT")) return ScriptFail{FailKind::NoScript, std::string(msg)};
+    if (is_transient_reply(msg)) return ScriptFail{FailKind::Transient, std::string(msg)};
+    return ScriptFail{FailKind::Fatal, std::string(msg)};
 }
 
 // ---- raw reply walking (XINFO / XPENDING / TIME answer arrays that mix integers, strings and nils) ----
@@ -91,7 +92,7 @@ void require_array(const redisReply& r, const char* what) {
 }
 
 // The value after `key` in a flat [k1, v1, k2, v2, ...] array; nullptr when the key is absent.
-const redisReply* flat_get(const redisReply& arr, const std::string& key, const char* what) {
+const redisReply* flat_get(const redisReply& arr, std::string_view key, const char* what) {
     require_array(arr, what);
     if (arr.elements % 2 != 0) throw std::runtime_error(std::string("redis: ") + what + " has an odd element count");
     for (std::size_t i = 0; i < arr.elements; i += 2)
@@ -99,9 +100,9 @@ const redisReply* flat_get(const redisReply& arr, const std::string& key, const 
     return nullptr;
 }
 
-std::optional<std::string> flat_str(const redisReply& arr, const std::string& key, const char* what) {
+std::optional<std::string> flat_str(const redisReply& arr, std::string_view key, const char* what) {
     const redisReply* v = flat_get(arr, key, what);
-    if (!v) throw std::runtime_error(std::string("redis: ") + what + " has no field '" + key + "'");
+    if (!v) throw std::runtime_error(std::string("redis: ") + what + " has no field '" + std::string(key) + "'");
     return reply_str(*v);
 }
 

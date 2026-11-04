@@ -146,8 +146,10 @@ boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
     if (st->last_head >= 2) {
         const auto from = st->last_head - 2, to = st->last_head;
         const auto filter = st->cfg.filter();
-        const auto o = co_await st->pool->call(
-            [&filter, from, to](std::uint64_t id) { return rpc::build_get_logs(id, from, to, filter); });
+        const provider::RequestBuilder build_req = [filter, from, to](std::uint64_t id) {
+            return rpc::build_get_logs(id, from, to, filter);
+        };
+        const auto o = co_await st->pool->call(build_req);
         if (o.ok) {
             rpc::Decoder dec;
             const auto parsed = dec.try_parse_logs(o.result_raw);
@@ -526,7 +528,7 @@ struct AuditFetchState {
     core::LogFilter filter;
     std::shared_ptr<provider::ProviderPool> pool;
     std::unique_ptr<PoolLogSource> source;
-    std::unordered_map<std::string, pipeline::AimdPager> pagers;
+    std::unordered_map<std::string, pipeline::AimdPager, provider::StringHash, std::equal_to<>> pagers;
     std::vector<rpc::Log> canonical_logs;
     std::string audit_provider;
     bool fetch_ok{true};
@@ -535,16 +537,17 @@ struct AuditFetchState {
     AuditFetchState(Config c, std::uint64_t from_b, std::uint64_t to_b, core::LogFilter f)
         : cfg(std::move(c)), from_block(from_b), to_block(to_b), filter(std::move(f)) {}
 
-    pipeline::AimdPager& pager_for(const std::string& provider) {
+    pipeline::AimdPager& pager_for(std::string_view provider) {
         const auto it = pagers.find(provider);
         if (it != pagers.end()) return it->second;
         for (const auto& p : cfg.getlogs_chain) {
             if (p.name == provider) {
-                return pagers.emplace(provider, pipeline::AimdPager(p.max_getlogs_range, cfg.backfill.min_range))
+                return pagers
+                    .emplace(std::string(provider), pipeline::AimdPager(p.max_getlogs_range, cfg.backfill.min_range))
                     .first->second;
             }
         }
-        return pagers.emplace(provider, pipeline::AimdPager(500, cfg.backfill.min_range)).first->second;
+        return pagers.emplace(std::string(provider), pipeline::AimdPager(500, cfg.backfill.min_range)).first->second;
     }
 };
 

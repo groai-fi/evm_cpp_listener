@@ -299,11 +299,11 @@ private:
     std::uint64_t discard_queue();
     std::optional<TimePoint> oldest_pending_stamp_locked() const;
 
-    void go_degraded(const std::string& reason);
+    void go_degraded(std::string_view reason);
     void schedule_next_probe();
     void handle_fenced();
     void enter_fenced();
-    void fail(const std::string& reason);
+    void fail(std::string_view reason);
     void refresh_spill_atomics();
 
     RedisSinkOptions opts_;

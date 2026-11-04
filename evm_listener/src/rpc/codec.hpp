@@ -74,32 +74,32 @@ using Message = std::variant<Response, Notification>;
 class Decoder {
 public:
     /// @brief Dissects a raw JSON string into a Response or Notification without throwing.
-    [[nodiscard]] core::Result<Message> try_decode(std::string_view json) noexcept;
+    [[nodiscard]] core::Result<Message> try_decode(std::string_view json);
     /// @brief Dissects a raw JSON string into a Response or Notification.
     [[nodiscard]] Message decode(std::string_view json);
 
     // Typed extractors over a Response::result_raw.
     /// @brief Parses an array of Log objects from eth_getLogs result JSON without throwing.
-    [[nodiscard]] core::Result<std::vector<Log>> try_parse_logs(std::string_view result_raw) noexcept;
+    [[nodiscard]] core::Result<std::vector<Log>> try_parse_logs(std::string_view result_raw);
     /// @brief Parses an array of Log objects from eth_getLogs result JSON.
     [[nodiscard]] std::vector<Log> parse_logs(std::string_view result_raw);
     /// @brief Parses a Head block header from eth_getBlockByNumber result JSON without throwing.
-    [[nodiscard]] core::Result<std::optional<Head>> try_parse_block(std::string_view result_raw) noexcept;
+    [[nodiscard]] core::Result<std::optional<Head>> try_parse_block(std::string_view result_raw);
     /// @brief Parses a Head block header from eth_getBlockByNumber result JSON (null returns nullopt).
     [[nodiscard]] std::optional<Head> parse_block(std::string_view result_raw);
     /// @brief Parses a hex quantity (e.g., "0x1b4") into an unsigned 64-bit integer without throwing.
-    [[nodiscard]] core::Result<std::uint64_t> try_parse_quantity(std::string_view result_raw) noexcept;
+    [[nodiscard]] core::Result<std::uint64_t> try_parse_quantity(std::string_view result_raw);
     /// @brief Parses a hex quantity (e.g., "0x1b4") into an unsigned 64-bit integer.
     [[nodiscard]] std::uint64_t parse_quantity(std::string_view result_raw);
     /// @brief Parses a raw string scalar from result JSON without throwing.
-    [[nodiscard]] core::Result<std::string> try_parse_string(std::string_view result_raw) noexcept;
+    [[nodiscard]] core::Result<std::string> try_parse_string(std::string_view result_raw);
     /// @brief Parses a raw string scalar from result JSON.
     [[nodiscard]] std::string parse_string(std::string_view result_raw);
 
     /// @brief Attempts to extract RpcError from an HTTP error body.
     /// Supports standard {"error":{...}} and bare {"code":...,"message":...} formats (Alchemy 429).
     /// @return Extracted RpcError, or nullopt if body is not valid JSON-RPC error.
-    [[nodiscard]] std::optional<RpcError> try_parse_error_body(std::string_view body) noexcept;
+    [[nodiscard]] std::optional<RpcError> try_parse_error_body(std::string_view body);
 
 private:
     [[nodiscard]] simdjson::padded_string_view load(std::string_view json);

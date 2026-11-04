@@ -20,23 +20,24 @@ boost::json::array fields_to_json(const std::vector<pipeline::Field>& fields) {
 }
 
 // `what` names the caller in error messages; `raw` is the full stored value, quoted for diagnosis.
-std::vector<pipeline::Field> fields_from_json(const boost::json::value& v, const char* what, std::string_view raw) {
-    if (!v.is_array()) throw core::DecodeError(std::string(what) + ": not a JSON array: " + std::string(raw));
+core::Result<std::vector<pipeline::Field>> fields_from_json(const boost::json::value& v, const char* what,
+                                                            std::string_view raw) {
+    if (!v.is_array()) return core::Error(std::string(what) + ": not a JSON array: " + std::string(raw));
 
     std::vector<pipeline::Field> out;
     for (const auto& item : v.as_array()) {
         if (!item.is_array() || item.as_array().size() != 2 || !item.as_array()[0].is_string() ||
             !item.as_array()[1].is_string())
-            throw core::DecodeError(std::string(what) + ": element is not a [name, value] string pair: " + std::string(raw));
+            return core::Error(std::string(what) + ": element is not a [name, value] string pair: " + std::string(raw));
         out.emplace_back(std::string(item.as_array()[0].as_string()), std::string(item.as_array()[1].as_string()));
     }
     return out;
 }
 
-boost::json::value parse_json(std::string_view json, const char* what) {
+core::Result<boost::json::value> parse_json(std::string_view json, const char* what) {
     boost::system::error_code ec;
     boost::json::value v = boost::json::parse(json, ec);
-    if (ec) throw core::DecodeError(std::string(what) + ": invalid JSON (" + ec.message() + "): " + std::string(json));
+    if (ec) return core::Error(std::string(what) + ": invalid JSON (" + ec.message() + "): " + std::string(json));
     return v;
 }
 
@@ -141,8 +142,16 @@ std::string pack_fields(const std::vector<pipeline::Field>& fields) {
     return boost::json::serialize(fields_to_json(fields));
 }
 
+core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json) {
+    const auto v = parse_json(json, "unpack_fields");
+    if (!v) return v.error();
+    return fields_from_json(*v, "unpack_fields", json);
+}
+
 std::vector<pipeline::Field> unpack_fields(std::string_view json) {
-    return fields_from_json(parse_json(json, "unpack_fields"), "unpack_fields", json);
+    auto r = try_unpack_fields(json);
+    if (!r) throw core::DecodeError(r.error().what());
+    return std::move(*r);
 }
 
 std::string pack_released(core::StreamKind stream, const std::vector<pipeline::Field>& fields) {
@@ -153,7 +162,9 @@ std::string pack_released(core::StreamKind stream, const std::vector<pipeline::F
 }
 
 ReleasedImage unpack_released(std::string_view json) {
-    const boost::json::value v = parse_json(json, "unpack_released");
+    const auto v_res = parse_json(json, "unpack_released");
+    if (!v_res) throw core::DecodeError(v_res.error().what());
+    const boost::json::value& v = *v_res;
     if (!v.is_object()) throw core::DecodeError("unpack_released: not a JSON object: " + std::string(json));
     const auto& o = v.as_object();
     const auto* stream = o.if_contains("stream");
@@ -165,7 +176,9 @@ ReleasedImage unpack_released(std::string_view json) {
     if (stream->as_string() == core::to_string(core::StreamKind::Events)) out.stream = core::StreamKind::Events;
     else if (stream->as_string() == core::to_string(core::StreamKind::Registry)) out.stream = core::StreamKind::Registry;
     else throw core::DecodeError("unpack_released: unknown stream '" + std::string(stream->as_string()) + "': " + std::string(json));
-    out.fields = fields_from_json(*fields, "unpack_released", json);
+    auto fields_res = fields_from_json(*fields, "unpack_released", json);
+    if (!fields_res) throw core::DecodeError(fields_res.error().what());
+    out.fields = std::move(*fields_res);
     return out;
 }
 
@@ -175,18 +188,24 @@ std::string pack_manifest(const std::vector<std::string>& manifest) {
     return boost::json::serialize(arr);
 }
 
-std::vector<std::string> unpack_manifest(std::string_view json) {
+core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json) {
     boost::system::error_code ec;
     const boost::json::value v = boost::json::parse(json, ec);
-    if (ec) throw core::DecodeError("unpack_manifest: invalid JSON (" + ec.message() + "): " + std::string(json));
-    if (!v.is_array()) throw core::DecodeError("unpack_manifest: not a JSON array: " + std::string(json));
+    if (ec) return core::Error("unpack_manifest: invalid JSON (" + ec.message() + "): " + std::string(json));
+    if (!v.is_array()) return core::Error("unpack_manifest: not a JSON array: " + std::string(json));
 
     std::vector<std::string> out;
     for (const auto& item : v.as_array()) {
-        if (!item.is_string()) throw core::DecodeError("unpack_manifest: element is not a string: " + std::string(json));
+        if (!item.is_string()) return core::Error("unpack_manifest: element is not a string: " + std::string(json));
         out.emplace_back(item.as_string());
     }
     return out;
+}
+
+std::vector<std::string> unpack_manifest(std::string_view json) {
+    auto r = try_unpack_manifest(json);
+    if (!r) throw core::DecodeError(r.error().what());
+    return std::move(*r);
 }
 
 }  // namespace evml::sink

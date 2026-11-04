@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,6 +15,16 @@ namespace evml::provider {
 
 using TimePoint = std::chrono::steady_clock::time_point;
 using std::chrono::seconds;
+
+/// @brief Transparent string hash enabling zero-copy std::string_view lookups on unordered containers.
+struct StringHash {
+    using is_transparent = void;
+    [[nodiscard]] std::size_t operator()(std::string_view sv) const noexcept {
+        return std::hash<std::string_view>{}(sv);
+    }
+};
+
+using StringSet = std::unordered_set<std::string, StringHash, std::equal_to<>>;
 
 /// @brief Health states for RPC endpoints.
 enum class State : std::uint8_t {
@@ -125,8 +136,7 @@ public:
     [[nodiscard]] std::optional<std::string> pick_getlogs(TimePoint now) const;
     // Same, skipping providers in `exclude` (those already tried for the current request).
     /// @brief Selects getLogs provider excluding already tried endpoints during failover retry loops.
-    [[nodiscard]] std::optional<std::string> pick_getlogs(TimePoint now,
-                                                          const std::unordered_set<std::string>& exclude) const;
+    [[nodiscard]] std::optional<std::string> pick_getlogs(TimePoint now, const StringSet& exclude) const;
 
 private:
     ProviderState& at(std::string_view name);
@@ -137,7 +147,7 @@ private:
     std::vector<std::string> ws_order_;
     std::vector<std::string> getlogs_order_;
     Policy policy_;
-    std::unordered_map<std::string, ProviderState> providers_;
+    std::unordered_map<std::string, ProviderState, StringHash, std::equal_to<>> providers_;
     std::optional<std::string> active_ws_;
     std::optional<TimePoint> last_switch_at_;
 };

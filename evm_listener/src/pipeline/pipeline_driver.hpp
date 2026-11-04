@@ -113,6 +113,7 @@ public:
 private:
     struct State;
     static boost::asio::awaitable<TickResult> recover(std::shared_ptr<State> st);
+    static boost::asio::awaitable<TickResult> tick_impl(std::shared_ptr<State> st);
 
     std::shared_ptr<State> state_;
 };

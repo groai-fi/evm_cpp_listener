@@ -43,6 +43,12 @@ public:
     struct State;
 
 private:
+    static boost::asio::awaitable<pipeline::LogResult> get_logs_impl(std::shared_ptr<State> st,
+                                                                     pipeline::BlockRange range,
+                                                                     core::LogFilter filter);
+    static boost::asio::awaitable<std::optional<pipeline::BlockInfo>> block_impl(std::shared_ptr<State> st,
+                                                                                 std::uint64_t number);
+
     std::shared_ptr<State> state_;
 };
 

@@ -40,43 +40,17 @@ core::Result<std::optional<std::string>, ConnError> run_lease_call(RedisConn& co
         if (!out_res) return out_res.error();
         const std::vector<CallOutcome>& out = *out_res;
         if (out.size() != 1)
-            throw std::logic_error(std::string("RedisConn::pipeline returned the wrong number of outcomes for lease ") + what);
+            return ConnError(std::string("RedisConn::pipeline returned the wrong number of outcomes for lease ") + what);
         if (const auto* f = std::get_if<ScriptFail>(&out.front())) {
             if (f->kind == FailKind::NoScript && attempt == 0) {
                 if (auto lr = conn.try_load_scripts(); !lr) return lr.error();
                 continue;
             }
-            if (f->kind == FailKind::Fatal) throw std::runtime_error(std::string("lease ") + what + " failed: " + f->message);
             return ConnError(std::string("lease ") + what + ": " + f->message);
         }
         return std::get<ScriptOk>(out.front()).value;
     }
     return ConnError(std::string("lease ") + what + ": scripts still missing after a reload");
-}
-
-core::Result<std::optional<LeaseGrant>, ConnError> try_acquire_lease_result(RedisConn& conn, const Keys& keys,
-                                                                            std::string_view host_id,
-                                                                            std::string_view nonce,
-                                                                            std::uint32_t ttl_ms) {
-    const auto reply_res = run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
-    if (!reply_res) return reply_res.error();
-    const auto& reply = *reply_res;
-    if (!reply) return std::optional<LeaseGrant>{};
-    const auto nl = reply->find('\n');
-    if (nl == std::string::npos) throw std::runtime_error("lease acquire: unexpected reply missing newline");
-    LeaseGrant g;
-    g.token = reply->substr(0, nl);
-    g.epoch_n = lease_token_epoch(g.token);
-    if (!g.epoch_n) throw std::runtime_error("lease acquire: script returned a malformed token");
-    const std::string prev = reply->substr(nl + 1);
-    if (!prev.empty()) {
-        if (const auto prev_host = lease_token_host(prev)) {
-            if (*prev_host != host_id) g.old_host = *prev_host;
-        } else {
-            core::log::warn("lease", "epoch key is not a lease token: Leader Changed is skipped", {});
-        }
-    }
-    return std::optional<LeaseGrant>{std::move(g)};
 }
 
 std::string random_nonce() {
@@ -87,6 +61,31 @@ std::string random_nonce() {
 }
 
 }  // namespace
+
+core::Result<std::optional<LeaseGrant>, ConnError> try_acquire_lease_result(RedisConn& conn, const Keys& keys,
+                                                                            std::string_view host_id,
+                                                                            std::string_view nonce,
+                                                                            std::uint32_t ttl_ms) {
+    const auto reply_res = run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
+    if (!reply_res) return reply_res.error();
+    const auto& reply = *reply_res;
+    if (!reply) return std::optional<LeaseGrant>{};
+    const auto nl = reply->find('\n');
+    if (nl == std::string::npos) return ConnError("lease acquire: unexpected reply missing newline");
+    LeaseGrant g;
+    g.token = reply->substr(0, nl);
+    g.epoch_n = lease_token_epoch(g.token);
+    if (!g.epoch_n) return ConnError("lease acquire: script returned a malformed token");
+    const std::string prev = reply->substr(nl + 1);
+    if (!prev.empty()) {
+        if (const auto prev_host = lease_token_host(prev)) {
+            if (*prev_host != host_id) g.old_host = *prev_host;
+        } else {
+            core::log::warn("lease", "epoch key is not a lease token: Leader Changed is skipped", {});
+        }
+    }
+    return std::optional<LeaseGrant>{std::move(g)};
+}
 
 /// @brief Attempts single non-blocking lease acquisition via lease.lua.
 std::optional<LeaseGrant> try_acquire_lease(RedisConn& conn, const Keys& keys, std::string_view host_id,
@@ -103,7 +102,7 @@ core::Result<bool, ConnError> try_release_lease(RedisConn& conn, const Keys& key
     const auto& reply = *reply_res;
     if (reply == "OK") return true;
     if (reply == "NOOP") return false;
-    throw std::runtime_error("lease release: unexpected reply '" + reply.value_or("<nil>") + "'");
+    return ConnError("lease release: unexpected reply '" + reply.value_or("<nil>") + "'");
 }
 
 /// @brief Explicitly surrenders leader lease token to allow standby to take over immediately.

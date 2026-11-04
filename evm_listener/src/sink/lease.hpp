@@ -20,10 +20,13 @@ struct LeaseGrant {
     std::optional<std::string> old_host;  // populated only when a previous epoch existed and belonged to another host
 };
 
+/// @brief Attempts single lease acquisition without throwing on operational/protocol errors.
+[[nodiscard]] core::Result<std::optional<LeaseGrant>, ConnError> try_acquire_lease_result(
+    RedisConn& conn, const Keys& keys, std::string_view host_id, std::string_view nonce, std::uint32_t ttl_ms);
+
 /// @brief Attempts single lease acquisition.
 /// @return The newly assigned LeaseGrant (token, epoch_n, old_host), or nullopt if another host holds leadership.
-/// @throws ConnError On transport failure.
-/// @throws std::runtime_error On Lua script syntax or execution failure.
+/// @throws ConnError On transport or protocol failure.
 [[nodiscard]] std::optional<LeaseGrant> try_acquire_lease(RedisConn& conn, const Keys& keys, std::string_view host_id,
                                                           std::string_view nonce, std::uint32_t ttl_ms);
 

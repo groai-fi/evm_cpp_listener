@@ -32,9 +32,9 @@ struct PoolLogSource::State {
 
     std::shared_ptr<provider::ProviderPool> pool;
     const chain::ReorgDetector* ring;
-    rpc::Decoder dec;                                // used only synchronously (never across a co_await)
-    std::unordered_set<std::string> avoid;           // providers reported bad since the last get_logs
-    std::unordered_set<std::string> logs_providers;  // every provider that answered get_logs for the current page
+    rpc::Decoder dec;                       // used only synchronously (never across a co_await)
+    provider::StringSet avoid;              // providers reported bad since the last get_logs
+    provider::StringSet logs_providers;     // every provider that answered get_logs for the current page
     std::optional<pipeline::BlockRange> last_logs_range;
     std::vector<core::Address20> seen_split_addresses;
     bool page_sealed{false};
@@ -63,9 +63,13 @@ void PoolLogSource::report_bad(std::string_view provider, std::string_view reaso
 void PoolLogSource::clear_cache() { state_->clear_cache(); }
 
 net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range,
-                                                            const core::LogFilter& filter_ref) {
-    auto st = state_;
-    const core::LogFilter filter = filter_ref;
+                                                            const core::LogFilter& filter) {
+    return get_logs_impl(state_, range, filter);
+}
+
+net::awaitable<pipeline::LogResult> PoolLogSource::get_logs_impl(std::shared_ptr<State> st,
+                                                                 pipeline::BlockRange range,
+                                                                 core::LogFilter filter) {
     const bool same_split_page =
         st->last_logs_range && st->last_logs_range->from == range.from && st->last_logs_range->to == range.to &&
         !st->page_sealed && filter.addresses.size() == 1 &&
@@ -80,11 +84,14 @@ net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange
     if (filter.addresses.size() == 1) {
         st->seen_split_addresses.push_back(filter.addresses.front());
     }
-    std::unordered_set<std::string> tried = std::move(st->avoid);  // steer this call away from providers reported bad
+    provider::StringSet tried = std::move(st->avoid);  // steer this call away from providers reported bad
     st->avoid.clear();
     const bool steered = !tried.empty();
     bool attempted = false;
 
+    const provider::RequestBuilder build_req = [range, filter = std::move(filter)](std::uint64_t id) {
+        return rpc::build_get_logs(id, range.from, range.to, filter);
+    };
     pipeline::LogResult last;
     last.kind = rpc::FailKind::Retry;
     last.error = "no usable getLogs provider";
@@ -95,9 +102,7 @@ net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange
         tried.insert(*p);
         attempted = true;
 
-        const auto o = co_await st->pool->call_to(*p, [&](std::uint64_t id) {
-            return rpc::build_get_logs(id, range.from, range.to, filter);
-        });
+        const auto o = co_await st->pool->call_to(*p, build_req);
         last.provider = o.provider;
         if (!o.ok) {
             last.kind = o.kind;
@@ -125,7 +130,11 @@ net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange
 }
 
 net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uint64_t number) {
-    auto st = state_;
+    return block_impl(state_, number);
+}
+
+net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block_impl(std::shared_ptr<State> st,
+                                                                             std::uint64_t number) {
     st->page_sealed = true;
     std::optional<core::Hash32> ring_hash;
     if (st->ring) {
@@ -148,15 +157,16 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block(std::uin
                               st->cache_order.end());
     }
 
-    std::unordered_set<std::string> tried = st->logs_providers;  // independence: never any provider that gave the logs
+    const provider::RequestBuilder build_req = [number](std::uint64_t id) {
+        return rpc::build_get_block_by_number(id, core::to_hex_u64(number), false);
+    };
+    provider::StringSet tried = st->logs_providers;  // independence: never any provider that gave the logs
     for (;;) {
         const auto p = st->pool->pick_getlogs_excluding(tried);
         if (!p) co_return std::nullopt;  // no independent provider left: no quorum
         tried.insert(*p);
 
-        const auto o = co_await st->pool->call_to(*p, [&](std::uint64_t id) {
-            return rpc::build_get_block_by_number(id, core::to_hex_u64(number), false);
-        });
+        const auto o = co_await st->pool->call_to(*p, build_req);
         if (!o.ok) continue;
 
         const auto head_res = st->dec.try_parse_block(o.result_raw);

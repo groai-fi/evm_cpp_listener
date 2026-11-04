@@ -10,6 +10,13 @@
 namespace evml::pipeline {
 
 namespace {
+struct StringHash {
+    using is_transparent = void;
+    [[nodiscard]] std::size_t operator()(std::string_view sv) const noexcept {
+        return std::hash<std::string_view>{}(sv);
+    }
+};
+
 bool is_safe_class(const core::Config& cfg, const rpc::Log& log) {
     const auto* route = cfg.route(log.address, log.topics.at(0));  // validated before this is called
     return route != nullptr && route->finality == core::Finality::Safe;
@@ -24,7 +31,7 @@ struct Sweeper::State {
     std::function<std::uint64_t()> now_ms;
     SweeperOptions opt;
     LastTypeMap recent;
-    std::unordered_map<std::string, AimdPager> pagers;
+    std::unordered_map<std::string, AimdPager, StringHash, std::equal_to<>> pagers;
     std::uint64_t c_s{0}, c_f{0};
     std::optional<std::uint64_t> pending_fork;  // lowest fork point found by an unfinished reverify_released
     SweepStats stats;
@@ -39,14 +46,15 @@ struct Sweeper::State {
           opt(std::move(o)),
           recent(opt.recent_capacity) {}
 
-    AimdPager& pager_for(const std::string& provider) {
+    AimdPager& pager_for(std::string_view provider) {
         const auto it = pagers.find(provider);
         if (it != pagers.end()) return it->second;
         for (const auto& p : cfg.getlogs_chain) {
             if (p.name == provider)
-                return pagers.emplace(provider, AimdPager(p.max_getlogs_range, opt.min_range)).first->second;
+                return pagers.emplace(std::string(provider), AimdPager(p.max_getlogs_range, opt.min_range))
+                    .first->second;
         }
-        throw std::logic_error("Sweeper: provider '" + provider + "' is not in the getLogs chain");
+        throw std::logic_error("Sweeper: provider '" + std::string(provider) + "' is not in the getLogs chain");
     }
 
     [[nodiscard]] Event build_event(const rpc::Log& log, const Fetched& f, EventType type) const {
@@ -223,7 +231,10 @@ boost::asio::awaitable<Sweeper::Fetched> Sweeper::fetch_page(std::shared_ptr<Sta
 // Executes a single page sweep for safe-tier logs; emits events and commits safe checkpoint.
 // Watch out: Emits events with finality=Safe and registers them in Redis released ZSET.
 boost::asio::awaitable<StepResult> Sweeper::safe_step(std::uint64_t g_s) {
-    auto st = state_;
+    return safe_step_impl(state_, g_s);
+}
+
+boost::asio::awaitable<StepResult> Sweeper::safe_step_impl(std::shared_ptr<State> st, std::uint64_t g_s) {
     if (st->sink.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
     if (st->c_s >= g_s) co_return StepResult{}; // Cursor already at safe gate; nothing to do
 
@@ -250,7 +261,10 @@ boost::asio::awaitable<StepResult> Sweeper::safe_step(std::uint64_t g_s) {
 // Emits finalized-class logs and retracts vanished logs as reverts (Invariant I6).
 // Watch out: Pauses if Redis sink is not readable to avoid diffing against incomplete released set.
 boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
-    auto st = state_;
+    return final_step_impl(state_, g_f);
+}
+
+boost::asio::awaitable<StepResult> Sweeper::final_step_impl(std::shared_ptr<State> st, std::uint64_t g_f) {
     if (st->sink.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
     const std::uint64_t ceiling = std::min(g_f, st->c_s);  // I2: never past what the safe sweep covered
     if (st->c_f >= ceiling) co_return StepResult{};
@@ -313,7 +327,11 @@ boost::asio::awaitable<StepResult> Sweeper::final_step(std::uint64_t g_f) {
 }
 
 boost::asio::awaitable<StepResult> Sweeper::backfill_step(std::uint64_t ceiling, core::Finality emit_finality) {
-    auto st = state_;
+    return backfill_step_impl(state_, ceiling, emit_finality);
+}
+
+boost::asio::awaitable<StepResult> Sweeper::backfill_step_impl(std::shared_ptr<State> st, std::uint64_t ceiling,
+                                                               core::Finality emit_finality) {
     if (st->sink.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
     if (st->c_s >= ceiling) co_return StepResult{};
 
@@ -341,7 +359,10 @@ boost::asio::awaitable<StepResult> Sweeper::backfill_step(std::uint64_t ceiling,
 // Emits reverts for logs that disappeared in the reorg and emits new logs on the winning branch.
 // Watch out: Pulls C_s back to the lowest fork point, ensuring no gaps in subsequent sweeps (Invariant I1).
 boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released() {
-    auto st = state_;
+    return reverify_released_impl(state_);
+}
+
+boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shared_ptr<State> st) {
     st->source.clear_cache();
     const std::uint64_t ceiling = st->c_s;  // snapshot: the sweeps are serialised, so C_s cannot move under us
     std::uint64_t cursor = st->c_f;

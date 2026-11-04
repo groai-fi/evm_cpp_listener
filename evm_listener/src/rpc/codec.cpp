@@ -31,7 +31,7 @@ namespace {
 }
 
 /// @brief Looks up a required field in a simdjson object, failing fast if absent or unreadable.
-[[nodiscard]] core::Result<od::value> need(od::object& obj, const char* field, const char* ctx) noexcept {
+[[nodiscard]] core::Result<od::value> need(od::object& obj, const char* field, const char* ctx) {
     // Unordered field lookup is faster than ordered scanning
     auto v = obj.find_field_unordered(field);
     if (v.error()) {
@@ -41,7 +41,7 @@ namespace {
 }
 
 /// @brief Extracts a string_view from a simdjson value, failing if type is not string.
-[[nodiscard]] core::Result<std::string_view> str_of(od::value v, const char* field, const char* ctx) noexcept {
+[[nodiscard]] core::Result<std::string_view> str_of(od::value v, const char* field, const char* ctx) {
     auto s = v.get_string();
     if (s.error()) {
         return fail_field(ctx, field, std::string("expected string (") + simdjson::error_message(s.error()) + ")");
@@ -50,14 +50,14 @@ namespace {
 }
 
 /// @brief Combines need() and str_of() to extract a required string field.
-[[nodiscard]] core::Result<std::string_view> need_str(od::object& obj, const char* field, const char* ctx) noexcept {
+[[nodiscard]] core::Result<std::string_view> need_str(od::object& obj, const char* field, const char* ctx) {
     auto v = need(obj, field, ctx);
     if (v.has_error()) return v.error();
     return str_of(v.value(), field, ctx);
 }
 
 /// @brief Parses a required hex-encoded unsigned 64-bit integer quantity (e.g. "0x1a").
-[[nodiscard]] core::Result<std::uint64_t> need_quantity(od::object& obj, const char* field, const char* ctx) noexcept {
+[[nodiscard]] core::Result<std::uint64_t> need_quantity(od::object& obj, const char* field, const char* ctx) {
     const auto s = need_str(obj, field, ctx);
     if (s.has_error()) return s.error();
     const auto q = core::try_parse_u64_hex(s.value());
@@ -66,7 +66,7 @@ namespace {
 }
 
 /// @brief Parses a required 32-byte hash from 0x-prefixed 64 hex characters.
-[[nodiscard]] core::Result<Hash32> need_hash(od::object& obj, const char* field, const char* ctx) noexcept {
+[[nodiscard]] core::Result<Hash32> need_hash(od::object& obj, const char* field, const char* ctx) {
     const auto s = need_str(obj, field, ctx);
     if (s.has_error()) return s.error();
     const auto h = Hash32::try_from_hex(s.value());
@@ -75,7 +75,7 @@ namespace {
 }
 
 /// @brief Extracts Head struct fields from a block object (newHeads or getBlockByNumber).
-[[nodiscard]] core::Result<Head> extract_head(od::object& o, const char* ctx) noexcept {
+[[nodiscard]] core::Result<Head> extract_head(od::object& o, const char* ctx) {
     Head h;
     const auto num = need_quantity(o, "number", ctx);
     if (num.has_error()) return num.error();
@@ -96,7 +96,7 @@ namespace {
 }
 
 /// @brief Extracts Log struct fields from an event log object.
-[[nodiscard]] core::Result<Log> extract_log(od::object& o, const char* ctx) noexcept {
+[[nodiscard]] core::Result<Log> extract_log(od::object& o, const char* ctx) {
     Log l;
     {
         // Parse emitting contract address
@@ -163,7 +163,7 @@ namespace {
 }
 
 /// @brief Extracts RpcError fields from a JSON-RPC error object.
-[[nodiscard]] core::Result<RpcError> extract_error(od::object& e, const char* ctx) noexcept {
+[[nodiscard]] core::Result<RpcError> extract_error(od::object& e, const char* ctx) {
     RpcError r;
     auto cv = need(e, "code", ctx);
     if (cv.has_error()) return cv.error();
@@ -192,7 +192,7 @@ simdjson::padded_string_view Decoder::load(std::string_view json) {
 }
 
 /// @brief Dissects an inbound JSON-RPC message into either a Response or a Notification without throwing.
-core::Result<Message> Decoder::try_decode(std::string_view json) noexcept {
+core::Result<Message> Decoder::try_decode(std::string_view json) {
     // Iterate on demand over SIMD-padded buffer
     auto doc_r = parser_.iterate(load(json));
     if (doc_r.error()) return fail_json("JSON-RPC message", doc_r.error());
@@ -294,7 +294,7 @@ Message Decoder::decode(std::string_view json) {
 }
 
 /// @brief Parses an array of logs from eth_getLogs raw JSON result without throwing.
-core::Result<std::vector<Log>> Decoder::try_parse_logs(std::string_view result_raw) noexcept {
+core::Result<std::vector<Log>> Decoder::try_parse_logs(std::string_view result_raw) {
     auto doc_r = parser_.iterate(load(result_raw));
     if (doc_r.error()) return fail_json("eth_getLogs result", doc_r.error());
     auto arr_r = doc_r.value_unsafe().get_array();
@@ -320,7 +320,7 @@ std::vector<Log> Decoder::parse_logs(std::string_view result_raw) {
 }
 
 /// @brief Parses block header from eth_getBlockByNumber raw JSON result without throwing.
-core::Result<std::optional<Head>> Decoder::try_parse_block(std::string_view result_raw) noexcept {
+core::Result<std::optional<Head>> Decoder::try_parse_block(std::string_view result_raw) {
     auto doc_r = parser_.iterate(load(result_raw));
     if (doc_r.error()) return fail_json("eth_getBlockByNumber result", doc_r.error());
     od::document& doc = doc_r.value_unsafe();
@@ -344,7 +344,7 @@ std::optional<Head> Decoder::parse_block(std::string_view result_raw) {
 }
 
 /// @brief Parses quantity hex string into uint64_t without throwing.
-core::Result<std::uint64_t> Decoder::try_parse_quantity(std::string_view result_raw) noexcept {
+core::Result<std::uint64_t> Decoder::try_parse_quantity(std::string_view result_raw) {
     auto doc_r = parser_.iterate(load(result_raw));
     if (doc_r.error()) return fail_json("quantity result", doc_r.error());
     auto s_r = doc_r.value_unsafe().get_string();
@@ -362,7 +362,7 @@ std::uint64_t Decoder::parse_quantity(std::string_view result_raw) {
 }
 
 /// @brief Parses string value from raw JSON result without throwing.
-core::Result<std::string> Decoder::try_parse_string(std::string_view result_raw) noexcept {
+core::Result<std::string> Decoder::try_parse_string(std::string_view result_raw) {
     auto doc_r = parser_.iterate(load(result_raw));
     if (doc_r.error()) return fail_json("string result", doc_r.error());
     auto s_r = doc_r.value_unsafe().get_string();
@@ -378,7 +378,7 @@ std::string Decoder::parse_string(std::string_view result_raw) {
 }
 
 /// @brief Attempts to extract RpcError from HTTP response body.
-std::optional<RpcError> Decoder::try_parse_error_body(std::string_view body) noexcept {
+std::optional<RpcError> Decoder::try_parse_error_body(std::string_view body) {
     auto doc_r = parser_.iterate(load(body));
     if (doc_r.error()) return std::nullopt;
     od::document& doc = doc_r.value_unsafe();

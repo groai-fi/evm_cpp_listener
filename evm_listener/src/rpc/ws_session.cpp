@@ -59,10 +59,13 @@ public:
             if (on_timeout) on_timeout();
         });
     }
-    ~Deadline() {
+    ~Deadline() noexcept {
         // Disarm active flag before cancelling timer
         *active_ = false;
-        timer_.cancel();
+        try {
+            timer_.cancel();
+        } catch (...) {
+        }
     }
     Deadline(const Deadline&) = delete;
     Deadline& operator=(const Deadline&) = delete;
@@ -88,11 +91,11 @@ struct CloserGuard {
 };
 
 /// @brief Tunes low-level TCP socket options for low latency and aggressive half-open peer detection.
-void tune_socket(tcp::socket& sock, const std::string& who) {
+void tune_socket(tcp::socket& sock, std::string_view who) {
     const auto check = [&](const boost::system::error_code& ec, const char* what) {
         if (ec) {
             core::log::warn("ws", "socket option not applied",
-                            {{"provider", who}, {"option", what}, {"error", ec.message()}});
+                            {{"provider", std::string(who)}, {"option", what}, {"error", ec.message()}});
         }
     };
     boost::system::error_code ec;
@@ -118,6 +121,7 @@ void tune_socket(tcp::socket& sock, const std::string& who) {
 
 /// @brief Ephemeral per-session protocol context tracking subscriptions and decoder state.
 struct Proto {
+    std::shared_ptr<WsSession> owner;
     const WsSessionConfig& cfg;
     const WsHandlers& handlers;
     const net::any_io_executor& exec;
@@ -131,22 +135,24 @@ struct Proto {
 };
 
 /// @brief Classifies JSON-RPC error payload and builds WsClosed with appropriate category.
-[[nodiscard]] WsClosed make_rpc_error(const RpcError& e, const std::string& what) {
+[[nodiscard]] WsClosed make_rpc_error(const RpcError& e, std::string_view what) {
     ErrorInfo info;
     info.rpc_code = e.code;
     info.message = e.message;
     const auto c = classify(info);
-    return WsClosed{c.kind, what + ": rpc error " + std::to_string(e.code) + ": " + e.message.substr(0, 120),
+    return WsClosed{c.kind,
+                    std::string(what) + ": rpc error " + std::to_string(e.code) + ": " + e.message.substr(0, 120),
                     c.retry_after, 0, e.code};
 }
 
 /// @brief Reads single WebSocket frame into protocol buffer with optional deadline.
 template <class Ws>
-net::awaitable<std::optional<WsClosed>> read_frame(Ws& ws, Proto& p, const Deadline* dl, const std::string& what) {
+net::awaitable<std::optional<WsClosed>> read_frame(std::shared_ptr<Ws> ws, std::shared_ptr<Proto> p,
+                                                   std::shared_ptr<const Deadline> dl, std::string what) {
     // Clear buffer from previously consumed frame
-    p.buf.consume(p.buf.size());
+    p->buf.consume(p->buf.size());
     boost::system::error_code ec;
-    co_await ws.async_read(p.buf, net::redirect_error(net::use_awaitable, ec));
+    co_await ws->async_read(p->buf, net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         // Differentiate explicit deadline expiration from socket disconnect
         if (dl && dl->hit()) {
@@ -181,9 +187,9 @@ void dispatch(Proto& p, Notification&& n) {
 
 /// @brief Asynchronously writes text frame over WebSocket.
 template <class Ws>
-net::awaitable<std::optional<WsClosed>> send_text(Ws& ws, const std::string& msg) {
+net::awaitable<std::optional<WsClosed>> send_text(std::shared_ptr<Ws> ws, std::string msg) {
     boost::system::error_code ec;
-    co_await ws.async_write(net::buffer(msg), net::redirect_error(net::use_awaitable, ec));
+    co_await ws->async_write(net::buffer(msg), net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return WsClosed{FailKind::Retry, "write failed: " + describe(ec), std::nullopt, 0, std::nullopt};
     }
@@ -192,22 +198,23 @@ net::awaitable<std::optional<WsClosed>> send_text(Ws& ws, const std::string& msg
 
 /// @brief Sends request and awaits matching Response; interleaving notifications are dispatched inline.
 template <class Ws>
-net::awaitable<core::Result<Response, WsClosed>> request(Ws& ws, Proto& p, std::uint64_t id, const std::string& req,
-                                                         std::chrono::milliseconds timeout, const std::string& what) {
+net::awaitable<core::Result<Response, WsClosed>> request(std::shared_ptr<Ws> ws, std::shared_ptr<Proto> p,
+                                                         std::uint64_t id, std::string req,
+                                                         std::chrono::milliseconds timeout, std::string what) {
     // Send request frame
-    if (auto err = co_await send_text(ws, req)) co_return std::move(*err);
+    if (auto err = co_await send_text(ws, std::move(req))) co_return std::move(*err);
     // Install request deadline timer
-    Deadline dl(p.exec, timeout, p.on_timeout);
+    auto dl = std::make_shared<Deadline>(p->exec, timeout, p->on_timeout);
     for (;;) {
-        if (auto err = co_await read_frame(ws, p, &dl, what)) co_return std::move(*err);
-        auto msg_r = p.dec.try_decode(frame_view(p));
+        if (auto err = co_await read_frame(ws, p, dl, what)) co_return std::move(*err);
+        auto msg_r = p->dec.try_decode(frame_view(*p));
         if (msg_r.has_error()) {
             co_return WsClosed{FailKind::Retry, msg_r.error().message, std::nullopt, 0, std::nullopt};
         }
         auto& msg = msg_r.value();
         // Notifications arriving while awaiting response are dispatched immediately
         if (auto* n = std::get_if<Notification>(&msg)) {
-            dispatch(p, std::move(*n));
+            dispatch(*p, std::move(*n));
             continue;
         }
         auto& r = std::get<Response>(msg);
@@ -220,12 +227,12 @@ net::awaitable<core::Result<Response, WsClosed>> request(Ws& ws, Proto& p, std::
 
 /// @brief Issues an eth_subscribe request and extracts subscription ID string.
 template <class Ws>
-net::awaitable<core::Result<std::string, WsClosed>> subscribe(Ws& ws, Proto& p, const std::string& req,
-                                                              std::uint64_t id, const std::string& what) {
-    auto r = co_await request(ws, p, id, req, p.cfg.subscribe_timeout, "subscribe ACK (" + what + ")");
+net::awaitable<core::Result<std::string, WsClosed>> subscribe(std::shared_ptr<Ws> ws, std::shared_ptr<Proto> p,
+                                                              std::string req, std::uint64_t id, std::string what) {
+    auto r = co_await request(ws, p, id, std::move(req), p->cfg.subscribe_timeout, "subscribe ACK (" + what + ")");
     if (r.has_error()) co_return r.error();
     if (!r->ok) co_return make_rpc_error(r->error, "subscribe " + what);
-    auto str_r = p.dec.try_parse_string(r->result_raw);
+    auto str_r = p->dec.try_parse_string(r->result_raw);
     if (str_r.has_error()) {
         co_return WsClosed{FailKind::Retry, str_r.error().message, std::nullopt, 0, std::nullopt};
     }
@@ -236,29 +243,32 @@ net::awaitable<core::Result<std::string, WsClosed>> subscribe(Ws& ws, Proto& p, 
 
 /// @brief Drives WebSocket session lifecycle: upgrade, chain ID check, subscriptions, and stream loop.
 template <class Ws>
-net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, Ws& ws) {
+net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, std::shared_ptr<Ws> ws) {
     auto weak = self->weak_from_this();
-    Proto p{self->cfg_, self->handlers_, self->exec_,
-            [weak] {
-                if (auto s = weak.lock()) s->close_socket();
-            },
-            self->unknown_msgs_};
+    auto p = std::make_shared<Proto>(Proto{self,
+                                           self->cfg_,
+                                           self->handlers_,
+                                           self->exec_,
+                                           [weak] {
+                                               if (auto s = weak.lock()) s->close_socket();
+                                           },
+                                           self->unknown_msgs_});
 
     // Configure maximum frame size limit
-    ws.read_message_max(kMaxMessageBytes);
+    ws->read_message_max(kMaxMessageBytes);
     // Set custom User-Agent in HTTP upgrade handshake
-    ws.set_option(websocket::stream_base::decorator(
+    ws->set_option(websocket::stream_base::decorator(
         [ua = self->cfg_.user_agent](websocket::request_type& req) { req.set(http::field::user_agent, ua); }));
-    beast::get_lowest_layer(ws).expires_never();  // WS-level timeouts take over from here
+    beast::get_lowest_layer(*ws).expires_never();  // WS-level timeouts take over from here
     // Enable automated keepalive ping frames and idle detection timeout
-    ws.set_option(
-        websocket::stream_base::timeout{self->cfg_.handshake_timeout, self->cfg_.idle_timeout, /*keep_alive_pings=*/true});
+    ws->set_option(websocket::stream_base::timeout{self->cfg_.handshake_timeout, self->cfg_.idle_timeout,
+                                                   /*keep_alive_pings=*/true});
 
     websocket::response_type res;
     boost::system::error_code ec;
     // Perform WebSocket upgrade handshake
-    co_await ws.async_handshake(res, self->url_.host_header(), self->url_.target,
-                                net::redirect_error(net::use_awaitable, ec));
+    co_await ws->async_handshake(res, self->url_.host_header(), self->url_.target,
+                                 net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         // Inspect HTTP upgrade rejection (401, 403, 429) and classify failure
         if (ec == websocket::error::upgrade_declined) {
@@ -276,15 +286,15 @@ net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, Ws& w
         co_return WsClosed{FailKind::Retry, "WS upgrade failed: " + describe(ec), std::nullopt, 0, std::nullopt};
     }
     // Set WebSocket stream to text mode
-    ws.text(true);
+    ws->text(true);
 
     // Phase 1: Verify chain ID (FailKind::ConfigFatal if mismatched)
     {
-        const auto id = p.next_id++;
+        const auto id = p->next_id++;
         auto r = co_await request(ws, p, id, build_chain_id(id), self->cfg_.request_timeout, "eth_chainId response");
         if (r.has_error()) co_return r.error();
         if (!r->ok) co_return make_rpc_error(r->error, "eth_chainId");
-        const auto got_r = p.dec.try_parse_quantity(r->result_raw);
+        const auto got_r = p->dec.try_parse_quantity(r->result_raw);
         if (got_r.has_error()) {
             co_return WsClosed{FailKind::Retry, got_r.error().message, std::nullopt, 0, std::nullopt};
         }
@@ -298,16 +308,16 @@ net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, Ws& w
     }
     // Phase 2: Establish subscriptions
     if (self->cfg_.subscribe_heads) {
-        const auto id = p.next_id++;
+        const auto id = p->next_id++;
         auto sub_r = co_await subscribe(ws, p, build_subscribe(id, "newHeads"), id, "newHeads");
         if (sub_r.has_error()) co_return sub_r.error();
-        p.heads_sub = std::move(*sub_r);
+        p->heads_sub = std::move(*sub_r);
     }
     if (self->cfg_.logs) {
-        const auto id = p.next_id++;
+        const auto id = p->next_id++;
         auto sub_r = co_await subscribe(ws, p, build_subscribe_logs(id, *self->cfg_.logs), id, "logs");
         if (sub_r.has_error()) co_return sub_r.error();
-        p.logs_sub = std::move(*sub_r);
+        p->logs_sub = std::move(*sub_r);
     }
 
     // Phase 3: Transition to Ready state and enter infinite event consumption loop
@@ -315,13 +325,13 @@ net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, Ws& w
     self->handlers_.on_ready();
     for (;;) {
         if (auto err = co_await read_frame(ws, p, nullptr, "stream data")) co_return std::move(*err);
-        auto msg_r = p.dec.try_decode(frame_view(p));
+        auto msg_r = p->dec.try_decode(frame_view(*p));
         if (msg_r.has_error()) {
             co_return WsClosed{FailKind::Retry, msg_r.error().message, std::nullopt, 0, std::nullopt};
         }
         auto& msg = msg_r.value();
         if (auto* n = std::get_if<Notification>(&msg)) {
-            dispatch(p, std::move(*n));
+            dispatch(*p, std::move(*n));
         } else {
             co_return WsClosed{FailKind::Retry, "unexpected JSON-RPC response on a live stream", std::nullopt, 0,
                                std::nullopt};
@@ -361,7 +371,7 @@ net::awaitable<WsClosed> WsSession::session_main(std::shared_ptr<WsSession> self
                                std::nullopt};
         }
         tune_socket(beast::get_lowest_layer(*ws).socket(), who);
-        co_return co_await self->serve(self, *ws);
+        co_return co_await serve(self, std::move(ws));
     }
 
     // Branch 2: TLS encrypted WebSocket stream (wss:// for production providers).
@@ -373,28 +383,28 @@ net::awaitable<WsClosed> WsSession::session_main(std::shared_ptr<WsSession> self
             : ctx(std::move(c)), ws(ex, *ctx) {}
     };
     auto conn = std::make_shared<TlsWsConn>(self->exec_, make_tls_client_context());
-    auto& ws = conn->ws;
+    auto ws_ptr = std::shared_ptr<websocket::stream<beast::ssl_stream<beast::tcp_stream>>>(conn, &conn->ws);
     CloserGuard guard(self->closer_, [conn] {
         boost::system::error_code close_ec;
         beast::get_lowest_layer(conn->ws).socket().close(close_ec);
     });
-    if (!configure_tls_sni_and_hostname(ws.next_layer(), self->url_.host)) {
+    if (!configure_tls_sni_and_hostname(ws_ptr->next_layer(), self->url_.host)) {
         co_return WsClosed{FailKind::Retry, "cannot set TLS SNI for " + who, std::nullopt, 0, std::nullopt};
     }
-    beast::get_lowest_layer(ws).expires_after(self->cfg_.connect_timeout);
-    co_await beast::get_lowest_layer(ws).async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
+    beast::get_lowest_layer(*ws_ptr).expires_after(self->cfg_.connect_timeout);
+    co_await beast::get_lowest_layer(*ws_ptr).async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return WsClosed{FailKind::Retry, "connect failed for " + who + ": " + describe(ec), std::nullopt, 0,
                            std::nullopt};
     }
-    tune_socket(beast::get_lowest_layer(ws).socket(), who);
-    beast::get_lowest_layer(ws).expires_after(self->cfg_.connect_timeout);
-    co_await ws.next_layer().async_handshake(ssl::stream_base::client, net::redirect_error(net::use_awaitable, ec));
+    tune_socket(beast::get_lowest_layer(*ws_ptr).socket(), who);
+    beast::get_lowest_layer(*ws_ptr).expires_after(self->cfg_.connect_timeout);
+    co_await ws_ptr->next_layer().async_handshake(ssl::stream_base::client, net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return WsClosed{FailKind::Retry, "TLS handshake failed for " + who + ": " + describe(ec), std::nullopt, 0,
                            std::nullopt};
     }
-    co_return co_await self->serve(self, ws);
+    co_return co_await serve(self, std::move(ws_ptr));
 }
 
 /// @brief Private constructor called by factory method create().
@@ -449,9 +459,10 @@ void WsSession::finish(WsClosed c) {
 }
 
 /// @brief Top-level coroutine orchestrating session execution.
-net::awaitable<void> WsSession::run() {
-    auto self = shared_from_this();  // keeps the session alive for the whole coroutine
-    WsClosed out = co_await self->session_main(self);
+net::awaitable<void> WsSession::run() { return run_impl(shared_from_this()); }
+
+net::awaitable<void> WsSession::run_impl(std::shared_ptr<WsSession> self) {
+    WsClosed out = co_await session_main(self);
     self->finish(std::move(out));
 }
 

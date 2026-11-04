@@ -16,7 +16,7 @@ namespace evml::core {
 using BytesView = std::span<const std::uint8_t>;
 
 /// @brief Non-throwing operational parser for 0x-prefixed hex quantity strings into uint64_t.
-[[nodiscard]] Result<std::uint64_t> try_parse_u64_hex(std::string_view s) noexcept;
+[[nodiscard]] Result<std::uint64_t> try_parse_u64_hex(std::string_view s);
 
 /// @brief Strictly parses a 0x-prefixed hex quantity string into a 64-bit unsigned integer.
 /// @param s Hex string (must start with "0x" or "0X" and contain 1 to 16 hex digits).
@@ -38,7 +38,7 @@ struct FixedBytes {
     std::array<std::uint8_t, N> bytes{};
 
     /// @brief Non-throwing operational parser for fixed-size byte array from "0x"-prefixed hex string.
-    [[nodiscard]] static Result<FixedBytes> try_from_hex(std::string_view s) noexcept;
+    [[nodiscard]] static Result<FixedBytes> try_from_hex(std::string_view s);
     /// @brief Parses a fixed-size byte array from a strict "0x"-prefixed hex string of length 2 + 2*N.
     /// @throws DecodeError on length mismatch or non-hex characters.
     [[nodiscard]] static FixedBytes from_hex(std::string_view s);

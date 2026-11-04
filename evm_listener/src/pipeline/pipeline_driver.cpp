@@ -104,7 +104,7 @@ struct PipelineDriver::State {
     }
 
     // Maps sweep outcome to next tick timing; resets backoff on progress, increases backoff on retry.
-    [[nodiscard]] TickResult after_step(StepStatus status, const std::string& detail) {
+    [[nodiscard]] TickResult after_step(StepStatus status, std::string_view detail) {
         switch (status) {
             case StepStatus::Advanced:
                 backoff.reset(); // Reset exponential backoff after successful forward progress
@@ -115,7 +115,7 @@ struct PipelineDriver::State {
                 return TickResult{backoff.next(), false}; // Exponential backoff with full jitter
             case StepStatus::Stalled:
                 stalled = true;
-                stall_detail = detail;
+                stall_detail = std::string(detail);
                 return TickResult{backoff.next(), false};
             case StepStatus::Paused:
                 return TickResult{opt.pause_poll, false}; // Wait fixed interval while sink is saturated
@@ -128,7 +128,7 @@ struct PipelineDriver::State {
     // Evaluates whether pipeline has caught up to the live head within live_lag_blocks threshold.
     void refresh_state() noexcept {
         if (state != PipelineState::CatchingUp && state != PipelineState::Live) return;
-        const auto lag = [](std::optional<std::uint64_t> ceiling, std::uint64_t cursor) {
+        const auto lag = [](std::optional<std::uint64_t> ceiling, std::uint64_t cursor) noexcept {
             return ceiling && *ceiling > cursor ? *ceiling - cursor : 0;
         };
         // Live requires both safe and final cursors to be within live_lag_blocks of their respective gates
@@ -222,7 +222,10 @@ asio::awaitable<TickResult> PipelineDriver::recover(std::shared_ptr<State> st) {
 // Priority: Recovery -> Reverify Reorgs -> Safe Sweep -> Final Sweep (AIMD interleaved).
 // Watch out: Returns done=true on shutdown (Draining) or fatal invariant failure (Failed).
 asio::awaitable<TickResult> PipelineDriver::tick() {
-    auto st = state_;
+    return tick_impl(state_);
+}
+
+asio::awaitable<TickResult> PipelineDriver::tick_impl(std::shared_ptr<State> st) {
     if (st->state == PipelineState::Failed) co_return TickResult{milliseconds{0}, true};
     if (st->drain) {
         st->state = PipelineState::Draining; // Graceful stop requested

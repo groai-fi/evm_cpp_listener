@@ -103,7 +103,7 @@ void Watchdog::publish_state(const State& s) {
     state_[6].store(s.sink_mode, std::memory_order_relaxed);
 }
 
-std::optional<std::string_view> Watchdog::stale_heartbeat() const noexcept {
+std::optional<std::string_view> Watchdog::stale_heartbeat() const {
     const std::uint64_t now = opts_.now();
     const std::uint64_t baseline = baseline_ms_.load(std::memory_order_relaxed);
     if (age_ms(now, io_beat_.load(std::memory_order_relaxed), baseline) > opts_.stall_ms) return "io_tick";

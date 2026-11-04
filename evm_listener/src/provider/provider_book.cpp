@@ -23,12 +23,12 @@ ProviderBook::ProviderBook(std::vector<std::string> ws_order, std::vector<std::s
 }
 
 ProviderState& ProviderBook::at(std::string_view name) {
-    const auto it = providers_.find(std::string(name));
+    const auto it = providers_.find(name);
     if (it == providers_.end()) throw std::out_of_range("ProviderBook: unknown provider '" + std::string(name) + "'");
     return it->second;
 }
 const ProviderState& ProviderBook::at(std::string_view name) const {
-    const auto it = providers_.find(std::string(name));
+    const auto it = providers_.find(name);
     if (it == providers_.end()) throw std::out_of_range("ProviderBook: unknown provider '" + std::string(name) + "'");
     return it->second;
 }
@@ -169,14 +169,14 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
 
 std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const { return pick_getlogs(now, {}); }
 
-std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now, const std::unordered_set<std::string>& exclude) const {
+std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now, const StringSet& exclude) const {
     // Cross-check: prioritize an independent provider distinct from active_ws to avoid single-node blind spots.
     for (const auto& n : getlogs_order_) {
         if (active_ws_ && n == *active_ws_) continue;
-        if (exclude.count(n) == 0 && usable(n, now)) return n;
+        if (!exclude.contains(n) && usable(n, now)) return n;
     }
     // Fall back to active WS provider only when no independent alternative is currently usable.
-    if (active_ws_ && exclude.count(*active_ws_) == 0 &&
+    if (active_ws_ && !exclude.contains(*active_ws_) &&
         std::find(getlogs_order_.begin(), getlogs_order_.end(), *active_ws_) != getlogs_order_.end() &&
         usable(*active_ws_, now)) {
         return active_ws_;

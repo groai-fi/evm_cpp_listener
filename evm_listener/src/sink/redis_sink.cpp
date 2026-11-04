@@ -40,16 +40,16 @@ overloaded(Ts...) -> overloaded<Ts...>;
 bool is_terminal(SinkMode m) { return m == SinkMode::Fenced || m == SinkMode::Failed; }
 
 // "n|host|nonce" -> n (the lease term). The whole token if it has no '|' (a token is opaque to everything but lease.lua).
-std::string term_of(const std::string& token) { return token.substr(0, token.find('|')); }
+std::string term_of(std::string_view token) { return std::string(token.substr(0, token.find('|'))); }
 
-bool all_digits(const std::string& s) {
+bool all_digits(std::string_view s) {
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
 }
 
 // "1699999999999-0": what XADD returns for '*'.
-bool looks_like_stream_id(const std::string& s) {
+bool looks_like_stream_id(std::string_view s) {
     const auto dash = s.find('-');
-    return dash != std::string::npos && all_digits(s.substr(0, dash)) && all_digits(s.substr(dash + 1));
+    return dash != std::string_view::npos && all_digits(s.substr(0, dash)) && all_digits(s.substr(dash + 1));
 }
 
 std::string describe(const WriteItem& item) {
@@ -107,75 +107,123 @@ std::pair<std::uint8_t, std::string> encode(const WriteItem& item) {
     return {kind, boost::json::serialize(o)};
 }
 
-const boost::json::value& need(const boost::json::object& o, const char* key, const std::string& raw) {
+core::Result<const boost::json::value*> need(const boost::json::object& o, const char* key, std::string_view raw) {
     const auto* v = o.if_contains(key);
-    if (!v) throw core::DecodeError(std::string("spill record: missing `") + key + "`: " + raw);
-    return *v;
+    if (!v) return core::Error(std::string("spill record: missing `") + key + "`: " + std::string(raw));
+    return v;
 }
 
-std::uint64_t to_u64(const boost::json::value& v, const char* key, const std::string& raw) {
+core::Result<std::uint64_t> to_u64(const boost::json::value& v, const char* key, std::string_view raw) {
     if (v.is_uint64()) return v.as_uint64();
     if (v.is_int64() && v.as_int64() >= 0) return static_cast<std::uint64_t>(v.as_int64());
-    throw core::DecodeError(std::string("spill record: `") + key + "` is not an unsigned integer: " + raw);
+    return core::Error(std::string("spill record: `") + key + "` is not an unsigned integer: " + std::string(raw));
 }
 
-std::string to_str(const boost::json::value& v, const char* key, const std::string& raw) {
-    if (!v.is_string()) throw core::DecodeError(std::string("spill record: `") + key + "` is not a string: " + raw);
+core::Result<std::string> to_str(const boost::json::value& v, const char* key, std::string_view raw) {
+    if (!v.is_string()) return core::Error(std::string("spill record: `") + key + "` is not a string: " + std::string(raw));
     return std::string(v.as_string());
 }
 
+core::Result<std::uint64_t> need_u64(const boost::json::object& o, const char* key, std::string_view raw) {
+    const auto v = need(o, key, raw);
+    if (!v) return v.error();
+    return to_u64(**v, key, raw);
+}
+
+core::Result<std::string> need_str(const boost::json::object& o, const char* key, std::string_view raw) {
+    const auto v = need(o, key, raw);
+    if (!v) return v.error();
+    return to_str(**v, key, raw);
+}
+
 // A record that does not decode is spill corruption: never skipped (plan 4.5).
-WriteItem decode(const SpillRecord& rec) {
+core::Result<WriteItem> decode(const SpillRecord& rec) {
     boost::system::error_code ec;
     const boost::json::value v = boost::json::parse(rec.payload, ec);
-    if (ec || !v.is_object()) throw core::DecodeError("spill record: not a JSON object: " + rec.payload);
+    if (ec || !v.is_object()) return core::Error("spill record: not a JSON object: " + rec.payload);
     const auto& o = v.as_object();
-    const std::string& raw = rec.payload;
+    const std::string_view raw = rec.payload;
 
     switch (static_cast<SpillTag>(rec.kind)) {
         case SpillTag::Emit: {
             EmitItem i;
-            const std::string stream = to_str(need(o, "stream", raw), "stream", raw);
-            if (stream == core::to_string(core::StreamKind::Events)) i.e.stream = core::StreamKind::Events;
-            else if (stream == core::to_string(core::StreamKind::Registry)) i.e.stream = core::StreamKind::Registry;
-            else throw core::DecodeError("spill record: unknown stream '" + stream + "': " + raw);
-            const std::string type = to_str(need(o, "type", raw), "type", raw);
-            if (type == pipeline::to_string(pipeline::EventType::Log)) i.e.type = pipeline::EventType::Log;
-            else if (type == pipeline::to_string(pipeline::EventType::Revert)) i.e.type = pipeline::EventType::Revert;
-            else throw core::DecodeError("spill record: unknown type '" + type + "': " + raw);
-            i.e.event_id = to_str(need(o, "id", raw), "id", raw);
-            i.e.dedup_key = to_str(need(o, "dedup", raw), "dedup", raw);
-            i.e.fields = unpack_fields(to_str(need(o, "fields", raw), "fields", raw));
-            if (const auto* released = o.if_contains("released")) i.e.released_block = to_u64(*released, "released", raw);
-            return i;
+            const auto stream = need_str(o, "stream", raw);
+            if (!stream) return stream.error();
+            if (*stream == core::to_string(core::StreamKind::Events)) i.e.stream = core::StreamKind::Events;
+            else if (*stream == core::to_string(core::StreamKind::Registry)) i.e.stream = core::StreamKind::Registry;
+            else return core::Error("spill record: unknown stream '" + *stream + "': " + std::string(raw));
+
+            const auto type = need_str(o, "type", raw);
+            if (!type) return type.error();
+            if (*type == pipeline::to_string(pipeline::EventType::Log)) i.e.type = pipeline::EventType::Log;
+            else if (*type == pipeline::to_string(pipeline::EventType::Revert)) i.e.type = pipeline::EventType::Revert;
+            else return core::Error("spill record: unknown type '" + *type + "': " + std::string(raw));
+
+            auto id = need_str(o, "id", raw);
+            if (!id) return id.error();
+            i.e.event_id = std::move(*id);
+
+            auto dedup = need_str(o, "dedup", raw);
+            if (!dedup) return dedup.error();
+            i.e.dedup_key = std::move(*dedup);
+
+            const auto fields_raw = need_str(o, "fields", raw);
+            if (!fields_raw) return fields_raw.error();
+            auto fields = try_unpack_fields(*fields_raw);
+            if (!fields) return fields.error();
+            i.e.fields = std::move(*fields);
+
+            if (const auto* released = o.if_contains("released")) {
+                const auto rel = to_u64(*released, "released", raw);
+                if (!rel) return rel.error();
+                i.e.released_block = *rel;
+            }
+            return WriteItem{std::move(i)};
         }
         case SpillTag::Ckpt: {
             CkptItem i;
-            const std::string kind = to_str(need(o, "kind", raw), "kind", raw);
-            if (kind == "safe") i.kind = pipeline::CheckpointKind::Safe;
-            else if (kind == "finalized") i.kind = pipeline::CheckpointKind::Finalized;
-            else throw core::DecodeError("spill record: unknown checkpoint kind '" + kind + "': " + raw);
-            i.block = to_u64(need(o, "block", raw), "block", raw);
-            return i;
+            const auto kind = need_str(o, "kind", raw);
+            if (!kind) return kind.error();
+            if (*kind == "safe") i.kind = pipeline::CheckpointKind::Safe;
+            else if (*kind == "finalized") i.kind = pipeline::CheckpointKind::Finalized;
+            else return core::Error("spill record: unknown checkpoint kind '" + *kind + "': " + std::string(raw));
+
+            const auto blk = need_u64(o, "block", raw);
+            if (!blk) return blk.error();
+            i.block = *blk;
+            return WriteItem{i};
         }
         case SpillTag::CkptInit: {
             CkptInitItem i;
-            i.c0 = to_u64(need(o, "c0", raw), "c0", raw);
-            i.manifest = unpack_manifest(to_str(need(o, "manifest", raw), "manifest", raw));
-            return i;
+            const auto c0 = need_u64(o, "c0", raw);
+            if (!c0) return c0.error();
+            i.c0 = *c0;
+
+            const auto manifest_raw = need_str(o, "manifest", raw);
+            if (!manifest_raw) return manifest_raw.error();
+            auto manifest = try_unpack_manifest(*manifest_raw);
+            if (!manifest) return manifest.error();
+            i.manifest = std::move(*manifest);
+            return WriteItem{std::move(i)};
         }
         case SpillTag::Contracts: {
             ContractsItem i;
-            i.manifest = unpack_manifest(to_str(need(o, "manifest", raw), "manifest", raw));
-            return i;
+            const auto manifest_raw = need_str(o, "manifest", raw);
+            if (!manifest_raw) return manifest_raw.error();
+            auto manifest = try_unpack_manifest(*manifest_raw);
+            if (!manifest) return manifest.error();
+            i.manifest = std::move(*manifest);
+            return WriteItem{std::move(i)};
         }
         case SpillTag::FinalTrim: {
             FinalTrimItem i;
-            i.block = to_u64(need(o, "block", raw), "block", raw);
-            return i;
+            const auto blk = need_u64(o, "block", raw);
+            if (!blk) return blk.error();
+            i.block = *blk;
+            return WriteItem{i};
         }
     }
-    throw core::DecodeError("spill record: unknown kind " + std::to_string(rec.kind) + ": " + raw);
+    return core::Error("spill record: unknown kind " + std::to_string(rec.kind) + ": " + std::string(raw));
 }
 
 RedisSinkOptions validated(RedisSinkOptions o) {
@@ -452,15 +500,11 @@ RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
                         {{"unflushed", std::to_string(r.unflushed)}});
     // Explicitly release leader lease so standby replica takes over immediately without waiting for TTL.
     if (leasing() && mode_.load() != SinkMode::Fenced) {
-        try {
-            if (auto rel = try_release_lease(*lease_, keys_, opts_.token); rel) {
-                r.lease_released = *rel;
-            } else {
-                core::log::warn("sink", "lease release failed, a standby waits for the TTL",
-                                {{"error", rel.error().what()}});
-            }
-        } catch (const std::exception& e) {
-            core::log::error("sink", "lease release failed", {{"error", e.what()}});
+        if (auto rel = try_release_lease(*lease_, keys_, opts_.token); rel) {
+            r.lease_released = *rel;
+        } else {
+            core::log::warn("sink", "lease release failed, a standby waits for the TTL",
+                            {{"error", rel.error().what()}});
         }
     }
     return r;
@@ -561,7 +605,8 @@ bool RedisSink::pump() {
             case SinkMode::Degraded: worked |= try_reconnect(); break;
             case SinkMode::Replaying:
                 // Replay disk spill records in strict FIFO order until empty.
-                if (held_.empty()) refill_from_spill();
+                if (held_.empty()) worked |= refill_from_spill();
+                if (is_terminal(mode_.load())) return worked;
                 if (!held_.empty()) worked |= send_held();
                 if (mode_.load() == SinkMode::Replaying && held_.empty() && spill_.empty()) {
                     mode_.store(SinkMode::Connected);
@@ -710,7 +755,13 @@ bool RedisSink::refill_from_spill() {
     while (held_.size() < opts_.max_batch) {
         const auto rec = spill_.peek();
         if (!rec) break;
-        WriteItem item = decode(*rec);
+        auto item_res = decode(*rec);
+        if (!item_res) {
+            refresh_spill_atomics();
+            fail(item_res.error().what());
+            return true;
+        }
+        WriteItem item = std::move(*item_res);
         // Non-emit items in spill also act as barriers and must be processed singly.
         const bool barrier = !std::holds_alternative<EmitItem>(item);
         if (barrier && !held_.empty()) break;
@@ -1076,7 +1127,7 @@ void RedisSink::enter_fenced() {
 
 // ---- outage lifecycle ----
 
-void RedisSink::go_degraded(const std::string& reason) {
+void RedisSink::go_degraded(std::string_view reason) {
     reload_streak_ = 0;
     fence_streak_ = 0;
     std::uint64_t fast_dropped = 0;
@@ -1146,10 +1197,10 @@ bool RedisSink::try_reconnect() {
     return true;
 }
 
-void RedisSink::fail(const std::string& reason) {
+void RedisSink::fail(std::string_view reason) {
     {
         std::lock_guard lk(fatal_mu_);
-        if (fatal_message_.empty()) fatal_message_ = reason;
+        if (fatal_message_.empty()) fatal_message_ = std::string(reason);
     }
     mode_.store(SinkMode::Failed);
     core::log::error("sink", "CRITICAL: sink failed, no further writes", {{"reason", reason}});

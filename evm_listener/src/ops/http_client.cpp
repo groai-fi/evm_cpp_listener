@@ -1,8 +1,12 @@
 #include "ops/http_client.hpp"
 
 #include <cctype>
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -33,7 +37,7 @@ core::Error format_phase_err(std::string_view who, const char* name, const boost
 
 template <class Stream>
 net::awaitable<core::Result<http::response<http::string_body>>> exchange(
-    std::shared_ptr<Stream> stream, http::request<http::string_body>& req, std::chrono::milliseconds timeout,
+    std::shared_ptr<Stream> stream, http::request<http::string_body> req, std::chrono::milliseconds timeout,
     std::size_t max_bytes, std::string who) {
     boost::system::error_code ec;
     beast::get_lowest_layer(*stream).expires_after(timeout);
@@ -57,16 +61,18 @@ bool iequals(std::string_view a, std::string_view b) {
 }
 
 /// Header values may be secrets (X-API-Key): the messages below never include them.
-void validate_headers(const HttpClient::Headers& headers) {
+std::optional<core::Error> validate_headers(const HttpClient::Headers& headers) {
     static constexpr std::string_view kOwned[] = {"host", "content-length", "connection", "transfer-encoding"};
     for (const auto& [name, value] : headers) {
         if (name.empty() || name.find_first_of(" \t:\r\n") != std::string::npos)
-            throw std::invalid_argument("HttpClient: invalid header name");
+            return core::Error{"HttpClient: invalid header name"};
         if (value.find_first_of("\r\n") != std::string::npos)
-            throw std::invalid_argument("HttpClient: header \"" + name + "\" has a line break in its value");
+            return core::Error{"HttpClient: header \"" + name + "\" has a line break in its value"};
         for (const auto owned : kOwned)
-            if (iequals(name, owned)) throw std::invalid_argument("HttpClient: header \"" + name + "\" is set by the client");
+            if (iequals(name, owned))
+                return core::Error{"HttpClient: header \"" + name + "\" is set by the client"};
     }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -88,28 +94,32 @@ HttpClient::HttpClient(net::any_io_executor executor, HttpClientOptions opts) {
 
 net::awaitable<core::Result<HttpResponse>> HttpClient::try_post_json(
     std::string url, std::string body, Headers headers) {
-    auto st = state_;
-    validate_headers(headers);
-    co_return co_await request(std::move(st), Method::Post, std::move(url), std::move(body), std::move(headers));
+    return request(state_, Method::Post, std::move(url), std::move(body), std::move(headers));
 }
 
 net::awaitable<core::Result<HttpResponse>> HttpClient::try_get(std::string url, Headers headers) {
-    auto st = state_;
-    validate_headers(headers);
-    co_return co_await request(std::move(st), Method::Get, std::move(url), {}, std::move(headers));
+    return request(state_, Method::Get, std::move(url), {}, std::move(headers));
 }
 
 net::awaitable<HttpResponse> HttpClient::post_json(std::string url, std::string body, Headers headers) {
-    auto st = state_;
-    validate_headers(headers);
+    return post_json_impl(state_, std::move(url), std::move(body), std::move(headers));
+}
+
+net::awaitable<HttpResponse> HttpClient::get(std::string url, Headers headers) {
+    return get_impl(state_, std::move(url), std::move(headers));
+}
+
+net::awaitable<HttpResponse> HttpClient::post_json_impl(
+    std::shared_ptr<State> st, std::string url, std::string body, Headers headers) {
+    if (const auto err = validate_headers(headers)) throw std::invalid_argument(err->what());
     auto r = co_await request(std::move(st), Method::Post, std::move(url), std::move(body), std::move(headers));
     if (!r) throw rpc::TransportError(r.error().what());
     co_return std::move(*r);
 }
 
-net::awaitable<HttpResponse> HttpClient::get(std::string url, Headers headers) {
-    auto st = state_;
-    validate_headers(headers);
+net::awaitable<HttpResponse> HttpClient::get_impl(
+    std::shared_ptr<State> st, std::string url, Headers headers) {
+    if (const auto err = validate_headers(headers)) throw std::invalid_argument(err->what());
     auto r = co_await request(std::move(st), Method::Get, std::move(url), {}, std::move(headers));
     if (!r) throw rpc::TransportError(r.error().what());
     co_return std::move(*r);
@@ -125,6 +135,7 @@ void HttpClient::cancel() {
 
 net::awaitable<core::Result<HttpResponse>> HttpClient::request(
     std::shared_ptr<State> st, Method method, std::string url, std::string body, Headers headers) {
+    if (const auto err = validate_headers(headers)) co_return *err;
     const std::string who = core::env::redact(url);
     if (st->cancelled) co_return core::Error{"request cancelled for " + who};
     const auto parsed = rpc::try_parse_url(url, rpc::UrlKind::Http);
@@ -179,7 +190,7 @@ net::awaitable<core::Result<HttpResponse>> HttpClient::request(
         stream->expires_after(st->opts.timeout);
         co_await stream->async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
         if (ec) co_return format_phase_err(who, "connect", ec);
-        auto ex = co_await exchange(stream, req, st->opts.timeout, st->opts.max_response_bytes, who);
+        auto ex = co_await exchange(stream, std::move(req), st->opts.timeout, st->opts.max_response_bytes, who);
         if (!ex) co_return ex.error();
         res = std::move(*ex);
         beast::error_code close_ec;
@@ -210,7 +221,7 @@ net::awaitable<core::Result<HttpResponse>> HttpClient::request(
         beast::get_lowest_layer(*stream_ptr).expires_after(st->opts.timeout);
         co_await stream_ptr->async_handshake(ssl::stream_base::client, net::redirect_error(net::use_awaitable, ec));
         if (ec) co_return format_phase_err(who, "TLS handshake", ec);
-        auto ex = co_await exchange(stream_ptr, req, st->opts.timeout, st->opts.max_response_bytes, who);
+        auto ex = co_await exchange(stream_ptr, std::move(req), st->opts.timeout, st->opts.max_response_bytes, who);
         if (!ex) co_return ex.error();
         res = std::move(*ex);
         beast::error_code close_ec;

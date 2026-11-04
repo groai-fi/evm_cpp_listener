@@ -51,7 +51,7 @@ tcp::endpoint parse_listen(std::string_view listen) {
 }
 
 http::response<http::string_body> make_response(unsigned version, bool keep_alive, int status, std::string body,
-                                                const std::string& content_type) {
+                                                std::string_view content_type) {
     http::response<http::string_body> res{static_cast<http::status>(status), version};
     res.set(http::field::content_type, content_type);
     res.set(http::field::cache_control, "no-store");

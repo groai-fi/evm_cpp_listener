@@ -29,19 +29,21 @@ struct PhaseError {
 };
 
 /// @brief Formats a phase error from a Boost error_code.
-[[nodiscard]] PhaseError make_phase_error(const std::string& who, const char* name, const boost::system::error_code& ec) {
+[[nodiscard]] PhaseError make_phase_error(std::string_view who, const char* name, const boost::system::error_code& ec) {
     const bool to = ec == beast::error::timeout;
-    return PhaseError{std::string(name) + " failed for " + who + ": " + (to ? "timeout" : ec.message()), to};
+    return PhaseError{std::string(name) + " failed for " + std::string(who) + ": " + (to ? "timeout" : ec.message()),
+                      to};
 }
 
 /// @brief Sends request and reads full HTTP response body over active socket stream without throwing.
 template <class Stream>
 net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> exchange(
-    Stream& stream, http::request<http::string_body>& req, std::chrono::milliseconds timeout, const std::string& who) {
+    std::shared_ptr<Stream> stream, http::request<http::string_body> req, std::chrono::milliseconds timeout,
+    std::string who) {
     boost::system::error_code ec;
     // Set socket write timeout deadline
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    co_await http::async_write(stream, req, net::redirect_error(net::use_awaitable, ec));
+    beast::get_lowest_layer(*stream).expires_after(timeout);
+    co_await http::async_write(*stream, req, net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return make_phase_error(who, "write", ec);
     }
@@ -51,8 +53,8 @@ net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> exch
     // Permit up to 64 MiB response bodies for heavy historical event queries
     parser.body_limit(kMaxBodyBytes);
     // Set socket read timeout deadline
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    co_await http::async_read(stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
+    beast::get_lowest_layer(*stream).expires_after(timeout);
+    co_await http::async_read(*stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return make_phase_error(who, "read", ec);
     }
@@ -73,41 +75,53 @@ struct HttpConn {
     HttpConn& operator=(HttpConn&&) = delete;
 
     virtual net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> roundtrip(
-        http::request<http::string_body>& req, std::chrono::milliseconds timeout, const std::string& who) = 0;
+        http::request<http::string_body> req, std::chrono::milliseconds timeout, std::string who) = 0;
     virtual void close() noexcept = 0;
 };
 
 namespace {
 
 /// @brief Plain unencrypted TCP connection implementation for local test environments.
-struct PlainConn final : HttpConn {
+struct PlainConn final : HttpConn, std::enable_shared_from_this<PlainConn> {
     explicit PlainConn(const net::any_io_executor& ex) : stream(ex) {}
     net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> roundtrip(
-        http::request<http::string_body>& req, std::chrono::milliseconds timeout, const std::string& who) override {
-        co_return co_await exchange(stream, req, timeout, who);
+        http::request<http::string_body> req, std::chrono::milliseconds timeout, std::string who) override {
+        return roundtrip_impl(shared_from_this(), std::move(req), timeout, std::move(who));
+    }
+    static net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> roundtrip_impl(
+        std::shared_ptr<PlainConn> self, http::request<http::string_body> req, std::chrono::milliseconds timeout,
+        std::string who) {
+        auto s = std::shared_ptr<beast::tcp_stream>(self, &self->stream);
+        co_return co_await exchange(std::move(s), std::move(req), timeout, std::move(who));
     }
     void close() noexcept override {
         beast::error_code ec;
         // Graceful shutdown before close
         stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-        stream.close();
+        stream.socket().close(ec);
     }
     beast::tcp_stream stream;
 };
 
 /// @brief TLS-encrypted connection implementation for production RPC endpoints.
-struct TlsConn final : HttpConn {
+struct TlsConn final : HttpConn, std::enable_shared_from_this<TlsConn> {
     explicit TlsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
         : ctx(std::move(c)), stream(ex, *ctx) {}
     net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> roundtrip(
-        http::request<http::string_body>& req, std::chrono::milliseconds timeout, const std::string& who) override {
-        co_return co_await exchange(stream, req, timeout, who);
+        http::request<http::string_body> req, std::chrono::milliseconds timeout, std::string who) override {
+        return roundtrip_impl(shared_from_this(), std::move(req), timeout, std::move(who));
+    }
+    static net::awaitable<core::Result<http::response<http::string_body>, PhaseError>> roundtrip_impl(
+        std::shared_ptr<TlsConn> self, http::request<http::string_body> req, std::chrono::milliseconds timeout,
+        std::string who) {
+        auto s = std::shared_ptr<beast::ssl_stream<beast::tcp_stream>>(self, &self->stream);
+        co_return co_await exchange(std::move(s), std::move(req), timeout, std::move(who));
     }
     void close() noexcept override {
         // Direct socket shutdown without async close_notify (for dead connections or process exit)
         beast::error_code ec;
         beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
-        beast::get_lowest_layer(stream).close();
+        beast::get_lowest_layer(stream).socket().close(ec);
     }
     std::shared_ptr<ssl::context> ctx;
     beast::ssl_stream<beast::tcp_stream> stream;
@@ -144,9 +158,12 @@ struct HttpRpcClient::State {
 
     void cancel() noexcept {
         cancelled = true;
-        lock_timer.cancel();
-        if (active_resolver) {
-            active_resolver->cancel();
+        try {
+            lock_timer.cancel();
+            if (active_resolver) {
+                active_resolver->cancel();
+            }
+        } catch (...) {
         }
         if (opening_conn) {
             opening_conn->close();
@@ -291,9 +308,12 @@ net::awaitable<core::Result<HttpResult>> HttpRpcClient::try_call_impl(std::share
     struct Unlock {
         std::shared_ptr<State> st;
         explicit Unlock(std::shared_ptr<State> s) : st(std::move(s)) {}
-        ~Unlock() {
+        ~Unlock() noexcept {
             st->locked = false;
-            st->lock_timer.cancel_one();
+            try {
+                st->lock_timer.cancel_one();
+            } catch (...) {
+            }
         }
         Unlock(const Unlock&) = delete;
         Unlock& operator=(const Unlock&) = delete;

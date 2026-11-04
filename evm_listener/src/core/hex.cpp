@@ -7,7 +7,7 @@ namespace evml::core {
 namespace {
 
 /// @brief Converts ASCII character to 4-bit hex nibble value (0-15); returns -1 on non-hex characters.
-int nibble(char c) {
+int nibble(char c) noexcept {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -27,7 +27,7 @@ std::string quoted(std::string_view s) {
 }  // namespace
 
 /// @brief Non-throwing operational parser for 0x-prefixed hex quantity strings into uint64_t.
-Result<std::uint64_t> try_parse_u64_hex(std::string_view s) noexcept {
+Result<std::uint64_t> try_parse_u64_hex(std::string_view s) {
     // Enforce 0x/0X prefix and at least one trailing hex digit
     if (s.size() < 3 || s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) {
         return Error("invalid hex quantity (need 0x prefix and >=1 digit): " + quoted(s));
@@ -67,7 +67,7 @@ std::string to_hex_u64(std::uint64_t v) {
 
 /// @brief Non-throwing operational parser for fixed-size byte array from "0x"-prefixed hex string.
 template <std::size_t N>
-Result<FixedBytes<N>> FixedBytes<N>::try_from_hex(std::string_view s) noexcept {
+Result<FixedBytes<N>> FixedBytes<N>::try_from_hex(std::string_view s) {
     // Validate exact length and 0x prefix
     if (s.size() != 2 + 2 * N || s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) {
         return Error("expected 0x + " + std::to_string(2 * N) + " hex digits: " + quoted(s));

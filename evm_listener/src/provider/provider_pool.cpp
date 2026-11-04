@@ -37,31 +37,33 @@ const char* reason_name(ProviderBook::WsDecision::Reason r) {
 }
 
 void validate(const PoolConfig& c) {
-    const auto fail = [](const std::string& m) { throw std::invalid_argument("ProviderPool: " + m); };
+    const auto fail = [](std::string_view m) { throw std::invalid_argument("ProviderPool: " + std::string(m)); };
     if (c.providers.empty()) fail("no providers");
     if (c.ws_order.empty()) fail("empty ws_order");
     if (c.getlogs_order.empty()) fail("empty getlogs_order");
     if (c.chain_id == 0) fail("chain_id not set");
     if (!c.subscribe_heads && !c.logs) fail("neither newHeads nor logs subscription configured");
-    if (c.logs && (c.logs->addresses.empty() || c.logs->topic0s.empty())) fail("logs filter needs an address and a topic0");
+    if (c.logs && (c.logs->addresses.empty() || c.logs->topic0s.empty()))
+        fail("logs filter needs an address and a topic0");
     if (c.reconcile_rps == 0) fail("reconcile_rps must be >= 1");
     if (c.reconcile_burst < c.reconcile_rps) fail("reconcile_burst must be >= reconcile_rps");
 
-    std::unordered_map<std::string, const ProviderEndpoint*> by_name;
+    std::unordered_map<std::string_view, const ProviderEndpoint*> by_name;
     for (const auto& p : c.providers) {
         if (p.name.empty()) fail("provider with empty name");
         if (!by_name.emplace(p.name, &p).second) fail("duplicate provider name '" + p.name + "'");
         if (p.reconcile_rps && *p.reconcile_rps == 0) fail("provider '" + p.name + "' reconcile_rps must be >= 1");
-        if (p.reconcile_burst && *p.reconcile_burst == 0) fail("provider '" + p.name + "' reconcile_burst must be >= 1");
+        if (p.reconcile_burst && *p.reconcile_burst == 0)
+            fail("provider '" + p.name + "' reconcile_burst must be >= 1");
         const std::uint32_t eff_rps = p.reconcile_rps.value_or(c.reconcile_rps);
         const std::uint32_t eff_burst = p.reconcile_burst.value_or(c.reconcile_burst);
         if (eff_burst < eff_rps) {
             fail("provider '" + p.name + "' effective reconcile_burst must be >= effective reconcile_rps");
         }
     }
-    const auto find = [&](const std::string& n, const char* list) -> const ProviderEndpoint& {
+    const auto find = [&](std::string_view n, const char* list) -> const ProviderEndpoint& {
         const auto it = by_name.find(n);
-        if (it == by_name.end()) fail(std::string(list) + " references unknown provider '" + n + "'");
+        if (it == by_name.end()) fail(std::string(list) + " references unknown provider '" + std::string(n) + "'");
         return *it->second;
     };
     for (const auto& n : c.ws_order) {
@@ -77,6 +79,18 @@ void validate(const PoolConfig& c) {
 }
 
 }  // namespace
+
+ProviderPool::Node& ProviderPool::node_at(std::string_view provider) {
+    const auto it = nodes_.find(provider);
+    if (it == nodes_.end()) throw std::out_of_range("ProviderPool: unknown provider '" + std::string(provider) + "'");
+    return it->second;
+}
+
+const ProviderPool::Node& ProviderPool::node_at(std::string_view provider) const {
+    const auto it = nodes_.find(provider);
+    if (it == nodes_.end()) throw std::out_of_range("ProviderPool: unknown provider '" + std::string(provider) + "'");
+    return it->second;
+}
 
 std::shared_ptr<ProviderPool> ProviderPool::create(net::any_io_executor executor, PoolConfig cfg,
                                                    PoolHandlers handlers) {
@@ -177,12 +191,12 @@ void ProviderPool::end_session_quiet() {
     restart_timer_.cancel();
 }
 
-void ProviderPool::start_session(const std::string& name) {
+void ProviderPool::start_session(std::string_view name) {
     const auto gen = ++session_gen_;
-    const Node& n = nodes_.at(name);
+    const Node& n = node_at(name);
 
     rpc::WsSessionConfig c;
-    c.name = name;
+    c.name = std::string(name);
     c.url = n.ep.ws_url;
     c.user_agent = cfg_.user_agent;
     c.expected_chain_id = cfg_.chain_id;
@@ -210,14 +224,14 @@ void ProviderPool::start_session(const std::string& name) {
     h.on_head = [w, gen](const rpc::Head& head) {
         auto p = w.lock();
         if (!p || p->session_gen_ != gen) return;
-        ++p->nodes_.at(p->session_name_).ws_messages["heads"];
+        ++p->node_at(p->session_name_).ws_messages["heads"];
         p->detector_.on_ws_head(head.number, Clock::now());
         if (p->handlers_.on_head) p->handlers_.on_head(head, p->session_name_);
     };
     h.on_log = [w, gen](const rpc::Log& log) {
         auto p = w.lock();
         if (!p || p->session_gen_ != gen) return;
-        ++p->nodes_.at(p->session_name_).ws_messages["logs"];
+        ++p->node_at(p->session_name_).ws_messages["logs"];
         if (p->handlers_.on_log) p->handlers_.on_log(log, p->session_name_);
     };
     h.on_closed = [w, gen](const rpc::WsClosed& closed) {
@@ -227,14 +241,14 @@ void ProviderPool::start_session(const std::string& name) {
     };
 
     session_ = rpc::WsSession::create(exec_, std::move(c), std::move(h));
-    session_name_ = name;
+    session_name_ = std::string(name);
     session_->start();
 }
 
 void ProviderPool::end_session(rpc::WsClosed c) {
     const auto now = Clock::now();
     const std::string name = session_name_;
-    Node& n = nodes_.at(name);
+    Node& n = node_at(name);
     const auto live = ws_ready_ ? std::chrono::duration_cast<ms>(now - ws_ready_at_) : ms{0};
 
     end_session_quiet();
@@ -250,13 +264,14 @@ void ProviderPool::end_session(rpc::WsClosed c) {
     if (!active) return;                // nothing usable: tick() retries as providers recover
     // Apply backoff delay respecting Retry-After hint before reconnecting.
     const auto hint = c.retry_after ? std::chrono::duration_cast<ms>(*c.retry_after) : ms{0};
-    schedule_restart(*active, std::max(nodes_.at(*active).backoff.next(), hint));
+    schedule_restart(*active, std::max(node_at(*active).backoff.next(), hint));
 }
 
-void ProviderPool::schedule_restart(const std::string& name, ms delay) {
+void ProviderPool::schedule_restart(std::string_view name, ms delay) {
     const auto gen = session_gen_;
+    std::string target(name);
     restart_timer_.expires_after(delay);
-    restart_timer_.async_wait([w = weak_from_this(), gen, name](const boost::system::error_code& ec) {
+    restart_timer_.async_wait([w = weak_from_this(), gen, name = std::move(target)](const boost::system::error_code& ec) {
         if (ec) return;
         auto p = w.lock();
         if (!p || !p->running_ || p->session_gen_ != gen || p->session_) return;
@@ -270,11 +285,11 @@ void ProviderPool::schedule_restart(const std::string& name, ms delay) {
 // ---------------------------------------------------------------------------------------------------------------
 
 // Keeps why a provider went to Cooldown / Disabled / Fatal; other failure kinds are transient and not worth keeping.
-void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kind, int http_status,
-                                  std::optional<std::int64_t> rpc_code, const std::string& message) {
+void ProviderPool::remember_fault(std::string_view provider, rpc::FailKind kind, int http_status,
+                                  std::optional<std::int64_t> rpc_code, std::string_view message) {
     if (kind != rpc::FailKind::QuotaExhausted && kind != rpc::FailKind::AuthFatal && kind != rpc::FailKind::ConfigFatal)
         return;
-    nodes_.at(provider).fault = {http_status, rpc_code, message.substr(0, 200)};
+    node_at(provider).fault = {http_status, rpc_code, std::string(message.substr(0, 200))};
 }
 
 std::optional<std::uint32_t> ProviderPool::ms_since_head() const noexcept {
@@ -295,7 +310,7 @@ std::vector<ProviderHealth> ProviderPool::health() const {
         h.name = name;
         h.state = ps.state;
         if (ps.state == State::Cooldown || ps.state == State::Disabled || ps.state == State::Fatal) {
-            const auto& f = nodes_.at(name).fault;
+            const auto& f = node_at(name).fault;
             h.http_status = f.http_status;
             h.rpc_code = f.rpc_code;
             h.fault_message = f.message;
@@ -372,10 +387,10 @@ void ProviderPool::tick() {
     }
 
     for (const auto& name : names_) {
-        if (probing_.count(name) != 0) continue;
+        if (probing_.contains(name)) continue;
         const State st = book_.state(name).state;
         if (st == State::Fatal) continue;
-        Node& n = nodes_.at(name);
+        Node& n = node_at(name);
         bool due;
         if (st == State::Up) {
             if (http_only_ || active == name || cur == name) continue;  // carries real traffic: that is its health signal
@@ -406,7 +421,7 @@ void ProviderPool::tick() {
 }
 
 // Folds the outcome of real traffic into the provider's health. RangeTooLarge is not a provider failure.
-void ProviderPool::note(const std::string& provider, const RpcOutcome& o) {
+void ProviderPool::note(std::string_view provider, const RpcOutcome& o) {
     const auto now = Clock::now();
     std::optional<Transition> t;
     if (o.ok) {
@@ -428,11 +443,11 @@ void ProviderPool::note(const std::string& provider, const RpcOutcome& o) {
 // ---------------------------------------------------------------------------------------------------------------
 
 // One attempt on one provider. Never throws for provider/network trouble: that is reported in the outcome.
-net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::string body, std::uint64_t id) {
-    const auto self = shared_from_this();
+net::awaitable<RpcOutcome> ProviderPool::call_on(std::shared_ptr<ProviderPool> self, std::string provider,
+                                                 std::string body, std::uint64_t id) {
     RpcOutcome o;
     o.provider = provider;
-    Node& n = nodes_.at(provider);
+    Node& n = self->node_at(provider);
     if (!n.http) throw std::logic_error("ProviderPool: provider '" + provider + "' has no http_url");
     for (const char* m : {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber", "eth_chainId"}) {
         if (body.find(m) != std::string::npos) {
@@ -449,22 +464,22 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
     }
     const rpc::HttpResult& r = r_res.value();
 
-    const auto apply = [&](const rpc::ErrorInfo& info, const std::string& what) {
+    const auto apply = [&](const rpc::ErrorInfo& info, std::string_view what) {
         const auto c = rpc::classify(info);
         o.kind = c.kind;
         o.range_limit = c.range_limit;
         o.retry_after = c.retry_after;
         o.http_status = info.http_status;
         o.rpc_code = info.rpc_code;
-        o.error = what + ": " + info.message;
+        o.error = std::string(what) + ": " + info.message;
     };
 
     if (r.status < 200 || r.status >= 300) {
-        apply(rpc::error_info_from_http(r, dec_), "http " + std::to_string(r.status));
+        apply(rpc::error_info_from_http(r, self->dec_), "http " + std::to_string(r.status));
         co_return o;
     }
 
-    auto m_res = dec_.try_decode(r.body);
+    auto m_res = self->dec_.try_decode(r.body);
     if (m_res.has_error()) {
         o.kind = rpc::FailKind::Retry;
         o.error = "undecodable response: " + m_res.error().message;
@@ -496,32 +511,35 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
 }
 
 net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
-    const auto self = shared_from_this();
-    std::unordered_set<std::string> tried;
+    return call_impl(shared_from_this(), std::move(build));
+}
+
+net::awaitable<RpcOutcome> ProviderPool::call_impl(std::shared_ptr<ProviderPool> self, RequestBuilder build) {
+    StringSet tried;
     RpcOutcome last;
-    if (stopped_) {
+    if (self->stopped_) {
         last.error = "pool stopped";
         co_return last;
     }
     last.error = "no getLogs provider is usable";
     for (;;) {
-        if (stopped_) {
+        if (self->stopped_) {
             last.ok = false;
             last.error = "pool stopped";
             co_return last;
         }
         // Pick next usable HTTP provider, skipping already tried endpoints during this request.
-        const auto p = book_.pick_getlogs(Clock::now(), tried);
+        const auto p = self->book_.pick_getlogs(Clock::now(), tried);
         if (!p) co_return last;
         tried.insert(*p);
-        const auto id = next_id_++;
-        auto o = co_await call_on(*p, build(id), id);
-        if (stopped_) {
+        const auto id = self->next_id_++;
+        auto o = co_await call_on(self, *p, build(id), id);
+        if (self->stopped_) {
             o.ok = false;
             o.error = "pool stopped";
             co_return o;
         }
-        note(*p, o);
+        self->note(*p, o);
         // Return immediately on success or RangeTooLarge (caller adjusts range without provider failover).
         if (o.ok || o.kind == rpc::FailKind::RangeTooLarge) co_return o;
         last = std::move(o);
@@ -529,52 +547,62 @@ net::awaitable<RpcOutcome> ProviderPool::call(RequestBuilder build) {
 }
 
 net::awaitable<RpcOutcome> ProviderPool::call_to(std::string provider, RequestBuilder build) {
-    const auto self = shared_from_this();
-    Node& n = nodes_.at(provider);  // nodes_ is never modified after construction: the reference stays valid
-    if (stopped_) {
+    return call_to_impl(shared_from_this(), std::move(provider), std::move(build));
+}
+
+net::awaitable<RpcOutcome> ProviderPool::call_to_impl(std::shared_ptr<ProviderPool> self, std::string provider,
+                                                      RequestBuilder build) {
+    Node& n_init = self->node_at(provider);
+    if (self->stopped_) {
         RpcOutcome o;
         o.provider = provider;
         o.error = "pool stopped";
         co_return o;
     }
-    const auto wait = n.bucket.reserve(Clock::now());
+    const auto wait = n_init.bucket.reserve(Clock::now());
     if (wait > Clock::duration::zero()) {
-        ++n.throttled;
-        auto timer = std::make_shared<net::steady_timer>(exec_, wait);
-        n.wait_timers.push_back(timer);
+        ++n_init.throttled;
+        auto timer = std::make_shared<net::steady_timer>(self->exec_, wait);
+        n_init.wait_timers.push_back(timer);
         struct TimerGuard {
-            std::vector<std::shared_ptr<net::steady_timer>>& list;
+            std::shared_ptr<ProviderPool> pool;
+            std::string provider;
             std::shared_ptr<net::steady_timer> t;
-            TimerGuard(std::vector<std::shared_ptr<net::steady_timer>>& l, std::shared_ptr<net::steady_timer> tm)
-                : list(l), t(std::move(tm)) {}
-            ~TimerGuard() { list.erase(std::remove(list.begin(), list.end(), t), list.end()); }
+            TimerGuard(std::shared_ptr<ProviderPool> p, std::string prov, std::shared_ptr<net::steady_timer> tm)
+                : pool(std::move(p)), provider(std::move(prov)), t(std::move(tm)) {}
+            ~TimerGuard() noexcept {
+                if (const auto it = pool->nodes_.find(provider); it != pool->nodes_.end()) {
+                    auto& list = it->second.wait_timers;
+                    list.erase(std::remove(list.begin(), list.end(), t), list.end());
+                }
+            }
             TimerGuard(const TimerGuard&) = delete;
             TimerGuard& operator=(const TimerGuard&) = delete;
             TimerGuard(TimerGuard&&) = delete;
             TimerGuard& operator=(TimerGuard&&) = delete;
-        } guard(n.wait_timers, timer);
+        } guard(self, provider, timer);
         boost::system::error_code ec;
         co_await timer->async_wait(net::redirect_error(net::use_awaitable, ec));
-        if (stopped_ || ec) {
+        if (self->stopped_ || ec) {
             RpcOutcome o;
             o.provider = provider;
             o.error = "pool stopped";
             co_return o;
         }
     }
-    const auto id = next_id_++;
-    auto o = co_await call_on(provider, build(id), id);
-    if (stopped_) {
+    const auto id = self->next_id_++;
+    auto o = co_await call_on(self, provider, build(id), id);
+    if (self->stopped_) {
         o.ok = false;
         o.error = "pool stopped";
         co_return o;
     }
-    note(provider, o);
+    self->note(provider, o);
     co_return o;
 }
 
 void ProviderPool::report_bad(std::string_view provider, std::string_view reason) {
-    ++nodes_.at(std::string(provider)).inconsistent;
+    ++node_at(provider).inconsistent;
     if (const auto t = book_.on_failure(provider, rpc::FailKind::Retry, std::nullopt, Clock::now())) {
         emit_transition(*t, "bad response: " + std::string(reason));
         reconcile();
@@ -582,16 +610,20 @@ void ProviderPool::report_bad(std::string_view provider, std::string_view reason
 }
 
 net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string provider, Tag tag) {
-    const auto self = shared_from_this();
-    if (stopped_) co_return std::nullopt;
-    const auto id = next_id_++;
+    return read_tag_impl(shared_from_this(), std::move(provider), tag);
+}
+
+net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag_impl(std::shared_ptr<ProviderPool> self,
+                                                                       std::string provider, Tag tag) {
+    if (self->stopped_) co_return std::nullopt;
+    const auto id = self->next_id_++;
     // Fetch block by tag name ("safe" or "finalized") via eth_getBlockByNumber.
-    auto o = co_await call_on(provider, rpc::build_get_block_by_number(id, tag_name(tag), false), id);
-    if (stopped_) co_return std::nullopt;
+    auto o = co_await call_on(self, provider, rpc::build_get_block_by_number(id, tag_name(tag), false), id);
+    if (self->stopped_) co_return std::nullopt;
 
     std::optional<rpc::Head> head;
     if (o.ok) {
-        auto blk_r = dec_.try_parse_block(o.result_raw);
+        auto blk_r = self->dec_.try_parse_block(o.result_raw);
         if (blk_r.has_error()) {
             o.ok = false;
             o.kind = rpc::FailKind::Retry;
@@ -606,7 +638,7 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
             }
         }
     }
-    note(provider, o);
+    self->note(provider, o);
     if (!o.ok) co_return std::nullopt;
 
     TagSnapshot s;
@@ -615,51 +647,51 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
     s.hash = head->hash;
     s.at = Clock::now();
     // Cache tag snapshot in node record to avoid redundant network calls.
-    nodes_.at(provider).tags[tag_index(tag)] = s;
-    if (running_ && handlers_.on_tag) handlers_.on_tag(provider, tag, s.number, s.hash);
+    self->node_at(provider).tags[tag_index(tag)] = s;
+    if (self->running_ && self->handlers_.on_tag) self->handlers_.on_tag(provider, tag, s.number, s.hash);
     co_return s;
 }
 
 std::optional<TagSnapshot> ProviderPool::cached_tag(std::string_view provider, Tag tag) const {
-    return nodes_.at(std::string(provider)).tags[tag_index(tag)];
+    return node_at(provider).tags[tag_index(tag)];
 }
 
-net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<ProviderPool> self, std::string provider) {
-    const auto id = next_id_++;
+net::awaitable<void> ProviderPool::probe(std::shared_ptr<ProviderPool> self, std::string provider) {
+    const auto id = self->next_id_++;
     // Probe node liveness via lightweight eth_blockNumber call.
-    auto o = co_await call_on(provider, rpc::build_block_number(id), id);
+    auto o = co_await call_on(self, provider, rpc::build_block_number(id), id);
     if (o.ok) {
-        auto q_r = dec_.try_parse_quantity(o.result_raw);
+        auto q_r = self->dec_.try_parse_quantity(o.result_raw);
         if (q_r.has_error()) {
             o.ok = false;
             o.kind = rpc::FailKind::Retry;
             o.error = "undecodable block number: " + q_r.error().message;
         }
     }
-    probing_.erase(provider);
-    if (!running_) co_return;
+    self->probing_.erase(provider);
+    if (!self->running_) co_return;
 
     const auto now = Clock::now();
     std::optional<Transition> t;
     if (o.ok) {
         // Successful probe restores Down provider to Up.
-        t = book_.on_probe_result(provider, true, now);
+        t = self->book_.on_probe_result(provider, true, now);
     } else {
         switch (o.kind) {
             case rpc::FailKind::QuotaExhausted:
             case rpc::FailKind::AuthFatal:
             case rpc::FailKind::ConfigFatal:
-                remember_fault(provider, o.kind, o.http_status, o.rpc_code, o.error);
-                t = book_.on_failure(provider, o.kind, o.retry_after, now);
+                self->remember_fault(provider, o.kind, o.http_status, o.rpc_code, o.error);
+                t = self->book_.on_failure(provider, o.kind, o.retry_after, now);
                 break;
             default:
-                t = book_.on_probe_result(provider, false, now);
+                t = self->book_.on_probe_result(provider, false, now);
                 break;
         }
     }
     if (t) {
-        emit_transition(*t, o.ok ? "probe ok" : "probe failed: " + o.error);
-        reconcile();
+        self->emit_transition(*t, o.ok ? "probe ok" : "probe failed: " + o.error);
+        self->reconcile();
     }
 }
 
@@ -674,11 +706,11 @@ net::awaitable<void> ProviderPool::poll(std::shared_ptr<ProviderPool> self, std:
         Done& operator=(Done&&) = delete;
     } done(self);
 
-    const auto id = next_id_++;
-    auto o = co_await call_on(provider, rpc::build_block_number(id), id);
+    const auto id = self->next_id_++;
+    auto o = co_await call_on(self, provider, rpc::build_block_number(id), id);
     std::optional<std::uint64_t> head;
     if (o.ok) {
-        auto q_r = dec_.try_parse_quantity(o.result_raw);
+        auto q_r = self->dec_.try_parse_quantity(o.result_raw);
         if (q_r.has_error()) {
             o.ok = false;
             o.kind = rpc::FailKind::Retry;
@@ -687,18 +719,19 @@ net::awaitable<void> ProviderPool::poll(std::shared_ptr<ProviderPool> self, std:
             head = q_r.value();
         }
     }
-    if (!running_) co_return;
-    note(provider, o);
+    if (!self->running_) co_return;
+    self->note(provider, o);
     if (!head) co_return;
     // Feed latest HTTP head block to StaleDetector for cross-provider divergence checking.
-    if (last_getlogs_ == provider) detector_.on_http_head(*head, Clock::now());
+    if (self->last_getlogs_ == provider) self->detector_.on_http_head(*head, Clock::now());
 
-    const auto safe = co_await read_tag(provider, Tag::Safe);
-    if (running_ && safe && last_getlogs_ == provider) detector_.on_http_safe(safe->number, Clock::now());
+    const auto safe = co_await read_tag_impl(self, provider, Tag::Safe);
+    if (self->running_ && safe && self->last_getlogs_ == provider)
+        self->detector_.on_http_safe(safe->number, Clock::now());
 
-    if (running_ && Clock::now() >= next_finalized_) {
-        next_finalized_ = Clock::now() + cfg_.finalized_poll;
-        co_await read_tag(provider, Tag::Finalized);
+    if (self->running_ && Clock::now() >= self->next_finalized_) {
+        self->next_finalized_ = Clock::now() + self->cfg_.finalized_poll;
+        co_await read_tag_impl(self, provider, Tag::Finalized);
     }
 }
 
@@ -713,9 +746,10 @@ net::awaitable<void> ProviderPool::crosscheck(std::shared_ptr<ProviderPool> self
         Done& operator=(Done&&) = delete;
     } done(self);
 
-    const auto safe = co_await read_tag(provider, Tag::Safe);
+    const auto safe = co_await read_tag_impl(self, provider, Tag::Safe);
     // Only meaningful while that provider is still the WS provider (the detector was reset when it changed).
-    if (running_ && safe && book_.active_ws() == provider) detector_.on_ws_safe(safe->number, Clock::now());
+    if (self->running_ && safe && self->book_.active_ws() == provider)
+        self->detector_.on_ws_safe(safe->number, Clock::now());
 }
 
 }  // namespace evml::provider

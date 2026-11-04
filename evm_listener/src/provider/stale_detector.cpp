@@ -5,7 +5,7 @@
 namespace evml::provider {
 
 namespace {
-std::uint64_t distance(std::uint64_t a, std::uint64_t b) { return a > b ? a - b : b - a; }
+constexpr std::uint64_t distance(std::uint64_t a, std::uint64_t b) noexcept { return a > b ? a - b : b - a; }
 }  // namespace
 
 StaleDetector::StaleDetector(TimePoint start, StaleThresholds t)

@@ -201,31 +201,36 @@ bool has_foreign_db_keys(const std::map<int, std::uint64_t>& keyspace_db_keys, i
 
 // "ipv6" / "ipv4" / "unresolved": the first address getaddrinfo returns, which is the one a plain connect tries first
 // (Railway's private network `*.railway.internal` is AAAA only).
-std::string address_family(const std::string& host, int port) {
+std::string address_family(std::string_view host, int port) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* raw_res = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &raw_res) != 0 || !raw_res) return "unresolved";
+    const std::string host_str(host);
+    if (getaddrinfo(host_str.c_str(), std::to_string(port).c_str(), &hints, &raw_res) != 0 || !raw_res)
+        return "unresolved";
     const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> res(raw_res, &::freeaddrinfo);
     return res->ai_family == AF_INET6 ? "ipv6" : res->ai_family == AF_INET ? "ipv4" : "other";
 }
 
-bool is_auth_error(const std::string& msg) {
+bool is_auth_error(std::string_view msg) {
     return starts_with(msg, "WRONGPASS") || starts_with(msg, "NOAUTH") || starts_with(msg, "ERR AUTH") ||
            starts_with(msg, "ERR Client sent AUTH") || starts_with(msg, "ERR invalid password");
 }
 
-bool is_transient_reply(const std::string& msg) {
-    return starts_with(msg, "LOADING") || starts_with(msg, "BUSY") || starts_with(msg, "MASTERDOWN") || starts_with(msg, "TRYAGAIN");
+bool is_transient_reply(std::string_view msg) {
+    return starts_with(msg, "LOADING") || starts_with(msg, "BUSY") || starts_with(msg, "MASTERDOWN") ||
+           starts_with(msg, "TRYAGAIN");
 }
 
 // CONFIG GET <name> -> the value, or nullopt when the server refuses CONFIG (managed Redis often does).
-std::optional<std::string> config_get(sw::redis::Redis& redis, const std::string& name) {
+std::optional<std::string> config_get(sw::redis::Redis& redis, std::string_view name) {
     try {
-        const auto reply = redis.command<std::vector<std::string>>("CONFIG", "GET", name);
+        const auto reply =
+            redis.command<std::vector<std::string>>("CONFIG", "GET", sw::redis::StringView(name.data(), name.size()));
         if (reply.size() != 2 || reply[0] != name)
-            throw StartupFatal("CONFIG GET " + name + " returned an unexpected reply of " + std::to_string(reply.size()) + " elements");
+            throw StartupFatal("CONFIG GET " + std::string(name) + " returned an unexpected reply of " +
+                               std::to_string(reply.size()) + " elements");
         return reply[1];
     } catch (const sw::redis::ReplyError& e) {
         if (is_transient_reply(e.what())) throw;  // not a denial: the wait loop retries

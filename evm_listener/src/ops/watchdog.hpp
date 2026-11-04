@@ -66,7 +66,7 @@ public:
 
     /// @brief Name of the heartbeat that is stale right now ("io_tick" / "sink_loop"), or nullopt when healthy.
     /// Same rule as the abort (stall_ms, pause baselines) and safe from any thread: backs `/healthz`.
-    [[nodiscard]] std::optional<std::string_view> stale_heartbeat() const noexcept;
+    [[nodiscard]] std::optional<std::string_view> stale_heartbeat() const;
 
     /// @brief Mark both beats fresh and reset baselines to now. start() calls it; tests call it before check_once().
     void arm();

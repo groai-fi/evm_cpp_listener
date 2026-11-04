@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/error.hpp"
 #include "pipeline/sink.hpp"
 #include "sink/keys.hpp"
 
@@ -90,10 +91,12 @@ struct EmitParams {
 // JSON codecs for the values stored in Redis. Malformed input throws core::DecodeError.
 /// @brief Serializes log fields to JSON string: [["field1","val1"],["field2","val2"]].
 [[nodiscard]] std::string pack_fields(const std::vector<pipeline::Field>& fields);   // [[k,v],...]
+[[nodiscard]] core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json);
 /// @brief Deserializes log fields from JSON string; throws core::DecodeError on parse failure.
 [[nodiscard]] std::vector<pipeline::Field> unpack_fields(std::string_view json);
 /// @brief Serializes contract address manifest array to JSON string.
 [[nodiscard]] std::string pack_manifest(const std::vector<std::string>& manifest);   // ckpt.contracts value: ["addr:start:class",...]
+[[nodiscard]] core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json);
 /// @brief Deserializes contract address manifest array from JSON string.
 [[nodiscard]] std::vector<std::string> unpack_manifest(std::string_view json);
 
