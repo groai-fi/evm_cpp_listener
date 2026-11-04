@@ -27,7 +27,8 @@ class RedisppConn final : public RedisConn {
 public:
     /// @brief Constructs RedisppConn configured with URL and bounded I/O timeouts.
     RedisppConn(const std::string& url, const Keys& keys,
-                std::chrono::milliseconds io_timeout = std::chrono::milliseconds(2000));
+                std::chrono::milliseconds io_timeout = std::chrono::milliseconds(2000),
+                std::string client_name = "");
 
     /// @brief Executes batch of ScriptCalls via EVALSHA on redis++ pipeline.
     std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>& calls) override;
@@ -41,6 +42,8 @@ public:
     void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override;
     /// @brief Queries stream consumer group statistics using XINFO, XRANGE, XPENDING, and TIME.
     GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override;
+    /// @brief Collects runtime tenancy facts (`INFO keyspace`, bounded `SCAN`, `CLIENT LIST`).
+    TenancyFacts read_tenancy_facts() override;
 
 private:
     sw::redis::Redis redis_;

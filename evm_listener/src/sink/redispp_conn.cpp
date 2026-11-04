@@ -10,10 +10,14 @@ namespace evml::sink {
 
 namespace {
 
-sw::redis::Redis make_redis(const std::string& url, std::chrono::milliseconds io_timeout) {
+sw::redis::Redis make_redis(const std::string& url, std::chrono::milliseconds io_timeout,
+                            const std::string& client_name) {
     sw::redis::ConnectionOptions opts = sw::redis::Uri(url).connection_options();
     opts.connect_timeout = io_timeout;
     opts.socket_timeout = io_timeout;
+    if (!client_name.empty()) {
+        opts.name = sanitize_client_name(client_name);
+    }
     sw::redis::ConnectionPoolOptions pool;
     pool.size = 1;
     return sw::redis::Redis(opts, pool);
@@ -99,8 +103,13 @@ std::optional<std::string> flat_str(const redisReply& arr, const std::string& ke
 
 }  // namespace
 
-RedisppConn::RedisppConn(const std::string& url, const Keys& keys, std::chrono::milliseconds io_timeout)
-    : redis_(make_redis(url, io_timeout)), keys_(keys) {}
+RedisppConn::RedisppConn(const std::string& url, const Keys& keys, std::chrono::milliseconds io_timeout,
+                         std::string client_name)
+    : redis_(make_redis(url, io_timeout, client_name)), keys_(keys) {}
+
+TenancyFacts RedisppConn::read_tenancy_facts() {
+    return guarded([&] { return gather_runtime_tenancy_facts(redis_); });
+}
 
 void RedisppConn::load_scripts() {
     guarded([&] {

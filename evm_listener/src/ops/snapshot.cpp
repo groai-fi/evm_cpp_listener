@@ -114,7 +114,8 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
     }
     s.any_healthy_provider = any_up;
 
-    const Counters cur{d.safe_reorgs, in.sink.below_finalized_total, in.ws_missed_total, in.provider_inconsistent_total};
+    const Counters cur{d.safe_reorgs, in.sink.below_finalized_total, in.ws_missed_total,
+                       in.sink.tenancy_violations_total, in.provider_inconsistent_total};
     if (prev_) {
         if (cur.safe_reorgs > prev_->safe_reorgs) {
             AlertEvent e;
@@ -140,6 +141,11 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
                          {"total", cur.ws_missed},
                          {"provider", in.ws_provider}};
             s.events.push_back(std::move(e));
+        }
+        if (cur.tenancy_violations > prev_->tenancy_violations) {
+            s.events.push_back(redis_tenancy_violation_event(
+                "foreign keys or databases detected in dedicated Redis instance",
+                cur.tenancy_violations - prev_->tenancy_violations, cur.tenancy_violations));
         }
         for (const auto& [name, total] : cur.inconsistent) {
             const auto it = prev_->inconsistent.find(name);

@@ -186,6 +186,11 @@ RedisSinkOptions validated(RedisSinkOptions o) {
         bad("heartbeat_ttl_s must outlive heartbeat_ms (0 would never expire, a shorter TTL makes the key flap)");
     if (!o.consumer_groups.empty() && o.consumer_lag_interval_ms == 0)
         bad("consumer_lag_interval_ms must be > 0 when consumer_groups is not empty");
+    if (o.expected_db < 0) bad("expected_db must be >= 0");
+    if (o.tenancy_check_interval_ms > 0 && o.deploy_env != "local" && o.deploy_env != "staging" &&
+        o.deploy_env != "production") {
+        bad("deploy_env must be local, staging, or production");
+    }
     if (!o.steady_now) o.steady_now = [] { return RedisSinkOptions::Clock::now(); };
     if (!o.wall_ms) {
         o.wall_ms = [] {
@@ -245,6 +250,9 @@ RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn
     next_probe_ = now();
     next_heartbeat_ = now();
     next_lag_probe_ = now();
+    if (opts_.tenancy_check_interval_ms > 0) {
+        next_tenancy_check_ = now() + std::chrono::milliseconds(opts_.tenancy_check_interval_ms);
+    }
 }
 
 RedisSink::~RedisSink() { stop(); }
@@ -436,6 +444,7 @@ RedisSink::TimePoint RedisSink::wake_time() const {
     if (mode_.load() == SinkMode::Degraded) t = std::min(t, next_probe_);
     if (opts_.heartbeat_ms > 0) t = std::min(t, next_heartbeat_);
     if (leasing() && !opts_.consumer_groups.empty()) t = std::min(t, next_lag_probe_);
+    if (opts_.tenancy_check_interval_ms > 0 && mode_.load() != SinkMode::Degraded) t = std::min(t, next_tenancy_check_);
     return t;
 }
 
@@ -492,6 +501,7 @@ SinkStatus RedisSink::status() const {
     s.consumer_lag_failures_total = consumer_lag_failures_total_.load();
     s.fast_emitted_total = fast_emitted_total_.load();
     s.fast_dropped_total = fast_dropped_total_.load();
+    s.tenancy_violations_total = tenancy_violations_total_.load();
     return s;
 }
 
@@ -512,6 +522,7 @@ bool RedisSink::pump() {
         if (is_terminal(mode_.load())) return drain_terminal() || worked;
         worked |= service_heartbeat();
         worked |= service_consumer_lag();
+        worked |= service_tenancy();
 
         // While anything older sits outside the queue (Degraded: unsent; Replaying: spilled), the queue is not allowed
         // to be sent around it: it joins the spill, in order (plan 4.4). Reads in it resolve to nullopt.
@@ -930,6 +941,31 @@ bool RedisSink::service_consumer_lag() {
         // writer, but it is not silent: counted, and logged at ERROR.
         ++consumer_lag_failures_total_;
         core::log::error("sink", "consumer lag probe failed, the sink keeps writing", {{"error", e.what()}});
+    }
+    return true;
+}
+
+bool RedisSink::service_tenancy() {
+    if (opts_.tenancy_check_interval_ms == 0 || mode_.load() == SinkMode::Degraded || now() < next_tenancy_check_) {
+        return false;
+    }
+    next_tenancy_check_ = now() + std::chrono::milliseconds(opts_.tenancy_check_interval_ms);
+    try {
+        TenancyFacts facts = lease_->read_tenancy_facts();
+        facts.tenant_marker = format_tenant_marker(opts_.deploy_env);
+        (void)evaluate_tenancy(facts, opts_.deploy_env, opts_.expected_db);
+    } catch (const StartupFatal& e) {
+        ++tenancy_violations_total_;
+        core::log::error("sink", "redis tenancy violation detected at runtime",
+                         {{"event", "REDIS_TENANCY_VIOLATION"},
+                          {"reason", e.what()},
+                          {"foreign_prefixes", e.foreign_prefixes},
+                          {"db", e.db},
+                          {"marker", e.marker}});
+    } catch (const ConnError& e) {
+        core::log::warn("sink", "runtime tenancy check failed", {{"error", e.what()}});
+    } catch (const std::exception& e) {
+        core::log::error("sink", "runtime tenancy check failed, the sink keeps writing", {{"error", e.what()}});
     }
     return true;
 }

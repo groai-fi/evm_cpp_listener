@@ -98,12 +98,23 @@ struct RedisMisconfig {
 
 /// Something that happened since the last snapshot (host-fed).
 struct AlertEvent {
-    enum class Kind { ProviderFailover, SafeReorg, SinkFenced, SinkInvariant, WsMissedLogs, ProviderInconsistent, LeaderChanged };
+    enum class Kind {
+        ProviderFailover,
+        SafeReorg,
+        SinkFenced,
+        SinkInvariant,
+        WsMissedLogs,
+        ProviderInconsistent,
+        LeaderChanged,
+        RedisTenancyViolation
+    };
     Kind kind{Kind::ProviderFailover};
     std::string subject;  // provider name for ProviderInconsistent (rate-limit key); empty otherwise
     std::string message;  // one line
     boost::json::object details;
 };
+
+AlertEvent redis_tenancy_violation_event(std::string message, std::uint64_t new_violations, std::uint64_t total);
 
 struct OpsSnapshot {
     AlertClock::time_point now{};

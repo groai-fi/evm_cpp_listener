@@ -349,6 +349,10 @@ int check_redis(const Config& cfg) {
     opts.sleep = [](std::chrono::milliseconds) {};
 
     try {
+        const std::string deploy_env = sink::resolve_deploy_env(core::env::get("EVML_DEPLOY_ENV"), redis_url);
+        opts.shard = cfg.shard.id;
+        opts.deploy_env = deploy_env;
+        opts.host_id = cfg.shard.host_id;
         const auto rep = sink::await_redis_ready(redis_url, opts);
         if (!rep) {
             std::cerr << "FAIL  redis unreachable (address_family=" << wait_family << "): " << wait_error << "\n";
@@ -361,8 +365,19 @@ int check_redis(const Config& cfg) {
         for (const auto& w : rep->warnings) std::cout << "warn  " << w << "\n";
         return kExitOk;
     } catch (const sink::StartupFatal& e) {
+        if (e.tenancy_violation) {
+            core::log::init("info");
+            core::log::error("tools", "redis tenancy violation",
+                             {{"event", "REDIS_TENANCY_VIOLATION"},
+                              {"reason", e.what()},
+                              {"foreign_prefixes", e.foreign_prefixes},
+                              {"db", e.db},
+                              {"marker", e.marker}});
+            std::cerr << "FATAL " << e.what() << "\n";
+            return kExitUsage;
+        }
         std::cerr << "FATAL " << e.what() << "\n";
-        return kExitFailure;
+        return kExitUsage;
     } catch (const std::exception& e) {
         std::cerr << "FAIL  " << e.what() << "\n";
         return kExitFailure;
@@ -427,9 +442,14 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
 
     sink::StartupOptions so;
     so.require_noeviction = cfg.sink.require_noeviction;
+    so.shard = cfg.shard.id;
+    so.host_id = cfg.shard.host_id;
     so.stop = [&] { return std::chrono::steady_clock::now() >= deadline; };
     so.sleep = sleep_until_deadline;
+    int expected_db = 0;
     try {
+        so.deploy_env = sink::resolve_deploy_env(core::env::get("EVML_DEPLOY_ENV"), redis_url);
+        expected_db = sink::parse_redis_db(redis_url);
         const auto rep = sink::await_redis_ready(redis_url, so);
         if (!rep) {
             std::cerr << "FAIL  redis unreachable within timeout\n";
@@ -443,7 +463,8 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     const sink::Keys keys{cfg.shard.id};
     std::string token;
     if (cfg.lease.enabled) {
-        sink::RedisppConn conn(redis_url, keys);
+        sink::RedisppConn conn(redis_url, keys, std::chrono::milliseconds(2000),
+                               "evml:" + cfg.shard.host_id + ":acquire");
         sink::AcquireOptions ao;
         ao.host_id = cfg.shard.host_id;
         ao.ttl_ms = cfg.lease.ttl_ms;
@@ -463,8 +484,13 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     }
 
     auto sopts = sink::RedisSinkOptions::from_config(cfg.sink, cfg.lease, token);
-    sink::RedisSink sink(std::move(sopts), keys, std::make_unique<sink::RedisppConn>(redis_url, keys),
-                         std::make_unique<sink::RedisppConn>(redis_url, keys));
+    sopts.deploy_env = so.deploy_env;
+    sopts.expected_db = expected_db;
+    sink::RedisSink sink(std::move(sopts), keys,
+                         std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
+                                                             "evml:" + cfg.shard.host_id + ":data"),
+                         std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
+                                                             "evml:" + cfg.shard.host_id + ":lease"));
     sink.start();
 
     net::io_context ioc;
@@ -635,7 +661,8 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
     std::unordered_map<std::string, std::size_t> source_counts;
 
     try {
-        sink::RedisppConn conn(redis_url, keys);
+        sink::RedisppConn conn(redis_url, keys, std::chrono::milliseconds(2000),
+                               "evml:" + cfg.shard.host_id + ":audit");
         const auto ck = conn.read_checkpoint();
         if (!ck.finalized || to_block > *ck.finalized) {
             std::cerr << "FAIL  to_block (" << to_block << ") exceeds ckpt.finalized ("

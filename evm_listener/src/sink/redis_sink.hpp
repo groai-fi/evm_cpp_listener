@@ -74,6 +74,11 @@ struct RedisSinkOptions {
     std::vector<core::ConsumerGroupCfg> consumer_groups;
     std::uint32_t consumer_lag_interval_ms{60000};
 
+    // Dedicated-Redis runtime tenancy re-check (every 300 s, alert-only: never fences or stops the sink).
+    std::string deploy_env{"local"};
+    int expected_db{0};
+    std::uint32_t tenancy_check_interval_ms{300000};
+
     // Process watchdog (plan 60 5.1): when non-null, every sink-loop iteration also stores its steady-clock ms here. The
     // storage belongs to the Watchdog (process lifetime) and must outlive this sink; null = no watchdog.
     std::atomic<std::uint64_t>* loop_beat{nullptr};
@@ -99,6 +104,7 @@ struct SinkStatus {
     std::uint64_t reconnects_total{};
     std::uint64_t fast_emitted_total{};       // evml_fast_emitted_total: fast-stream events acknowledged by Redis
     std::uint64_t fast_dropped_total{};       // evml_fast_dropped_total: fast-stream events dropped on backpressure/outage/fencing
+    std::uint64_t tenancy_violations_total{};
     // Age of the oldest accepted write that is neither acked nor discarded (queue, current batch or spill); 0 when
     // nothing is pending. Measured on the injected steady clock. Plan 60 §5.3.3 `oldest_record_age_s`.
     std::uint64_t oldest_record_age_s{};
@@ -262,6 +268,7 @@ private:
     bool service_lease();
     bool service_heartbeat();
     bool service_consumer_lag();
+    bool service_tenancy();
     LeaseResult renew_lease();
     bool drain_terminal();
     bool queue_to_spill();
@@ -301,6 +308,7 @@ private:
     TimePoint next_renew_;
     TimePoint next_heartbeat_;
     TimePoint next_lag_probe_;
+    TimePoint next_tenancy_check_{};
     TimePoint next_probe_;
     std::uint32_t probe_attempt_{0};
     std::uint32_t reload_streak_{0};  // consecutive NOSCRIPT batches (a flush racing every reload is not plausible)
@@ -323,6 +331,7 @@ private:
     std::atomic<std::uint64_t> reconnects_total_{0};
     std::atomic<std::uint64_t> fast_emitted_total_{0};
     std::atomic<std::uint64_t> fast_dropped_total_{0};
+    std::atomic<std::uint64_t> tenancy_violations_total_{0};
     std::atomic<std::uint64_t> heartbeat_ms_{0};
     mutable std::mutex fatal_mu_;
     std::string fatal_message_;

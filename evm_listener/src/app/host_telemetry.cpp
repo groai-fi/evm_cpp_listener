@@ -52,6 +52,18 @@ void HostTelemetry::stop() {
 
 void HostTelemetry::push_event(ops::AlertEvent ev) { snapshots_.push_event(std::move(ev)); }
 
+void HostTelemetry::emit_event_now(ops::AlertEvent ev, std::uint64_t /*ts_ms*/) {
+    ops::OpsSnapshot s;
+    s.now = std::chrono::steady_clock::now();
+    s.events.push_back(std::move(ev));
+    for (const auto& a : engine_.evaluate(s)) {
+        if (!a.resolved) ++alerts_fired_total_[a.title];
+        log::warn("alert", "alert raised",
+                  {{"severity", ops::to_string(a.severity)}, {"title", a.title}, {"message", a.message}});
+        if (alerts_) alerts_->send(a);
+    }
+}
+
 void HostTelemetry::ops_tick(const TelemetryContext& ctx, std::chrono::steady_clock::time_point now,
                              std::uint64_t ts_ms, const std::optional<ops::RedisMisconfig>& redis_misconfig,
                              std::int64_t redis_wait_since_ns, const std::string& redis_wait_family) {
@@ -112,6 +124,8 @@ void HostTelemetry::set_sink_counters(const sink::SinkStatus& sk) {
     metrics_.counter_total("evml_fast_dropped_total",
                            "Fast-stream tip events dropped due to backpressure, outage, or fencing", {},
                            sk.fast_dropped_total);
+    metrics_.counter_total("evml_redis_tenancy_violations_total", "Runtime Redis tenancy check violations", {},
+                           sk.tenancy_violations_total);
 }
 
 void HostTelemetry::set_sweeper_counters(const pipeline::SweepStats& sw) {

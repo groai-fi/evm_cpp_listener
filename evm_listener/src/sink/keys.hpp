@@ -40,6 +40,8 @@ public:
     std::string epoch() const { return prefix_ + "epoch"; }
     /// @brief Heartbeat key for given host: evml:{shard}:hb:<host_id>.
     std::string hb(const std::string& host_id) const { return prefix_ + "hb:" + host_id; }
+    /// @brief Dedicated-Redis tenant marker key: evml:{shard}:tenant.
+    std::string tenant() const { return prefix_ + "tenant"; }
     // `dedup_key` is the Emission's "dedup:<event_id>".
     /// @brief Per-event deduplication key: evml:{shard}:dedup:<event_id>.
     std::string dedup(const std::string& dedup_key) const { return prefix_ + dedup_key; }

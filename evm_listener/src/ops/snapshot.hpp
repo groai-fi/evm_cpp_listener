@@ -77,6 +77,7 @@ private:
         std::uint64_t safe_reorgs{0};
         std::uint64_t below_finalized{0};
         std::uint64_t ws_missed{0};
+        std::uint64_t tenancy_violations{0};
         std::map<std::string, std::uint64_t> inconsistent;
     };
     std::optional<Counters> prev_;  // nullopt until the first leader build of a term

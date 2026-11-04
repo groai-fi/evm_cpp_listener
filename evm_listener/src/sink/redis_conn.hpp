@@ -10,6 +10,7 @@
 #include "pipeline/sink.hpp"
 #include "sink/consumer_lag.hpp"
 #include "sink/lua_scripts.hpp"
+#include "sink/redis_startup.hpp"
 
 namespace evml::sink {
 
@@ -80,6 +81,9 @@ public:
     // stream or group is reported in the result, not thrown. Throws ConnError on transport failure.
     /// @brief Collects consumer group metrics from Redis stream introspection commands.
     virtual GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) = 0;
+
+    /// @brief Collects dedicated-Redis runtime tenancy facts (`INFO keyspace`, bounded `SCAN`, `CLIENT LIST`).
+    virtual TenancyFacts read_tenancy_facts() { return {}; }
 };
 
 }  // namespace evml::sink

@@ -332,15 +332,19 @@ private:
         freeze_timer_.cancel();
         sleep_timer_.cancel();
         if (ops_) ops_->stop();
-        telemetry_.stop();
         if (rt_ && rt_->pool) rt_->pool->stop();
         grace_timer_.expires_after(kShutdownGrace);
-        grace_timer_.async_wait([this](const boost::system::error_code&) { ioc_.stop(); });
+        grace_timer_.async_wait([this](const boost::system::error_code&) {
+            telemetry_.stop();
+            ioc_.stop();
+        });
     }
 
     const core::Config& cfg_;
     HostOptions opt_;
     std::string redis_url_;
+    std::string deploy_env_{"local"};
+    int expected_db_{0};
     net::io_context ioc_;
     ops::Watchdog wd_;
     HostTelemetry telemetry_;
@@ -417,10 +421,15 @@ void Host::acquire_thread_main(bool first) {
         while (std::chrono::steady_clock::now() < end && !stop()) std::this_thread::sleep_for(50ms);
     };
     try {
+        const std::string deploy_env = sink::resolve_deploy_env(core::env::get("EVML_DEPLOY_ENV"), redis_url_);
+        const int expected_db = sink::parse_redis_db(redis_url_);
         std::optional<sink::StartupReport> report;
         if (first) {
             sink::StartupOptions so;
             so.require_noeviction = cfg_.sink.require_noeviction;
+            so.shard = cfg_.shard.id;
+            so.deploy_env = deploy_env;
+            so.host_id = cfg_.shard.host_id;
             so.on_waiting = [this](const std::string& error, const std::string& family, std::chrono::milliseconds waited) {
                 log::warn("host", "redis unreachable, waiting",
                           {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
@@ -445,7 +454,8 @@ void Host::acquire_thread_main(bool first) {
         if (cfg_.lease.enabled) {
             phase_ = Phase::Standby;
             const sink::Keys keys(cfg_.shard.id);
-            sink::RedisppConn conn(redis_url_, keys);
+            sink::RedisppConn conn(redis_url_, keys, std::chrono::milliseconds(2000),
+                                   "evml:" + cfg_.shard.host_id + ":acquire");
             sink::AcquireOptions ao;
             ao.host_id = cfg_.shard.host_id;
             ao.ttl_ms = cfg_.lease.ttl_ms;
@@ -465,9 +475,26 @@ void Host::acquire_thread_main(bool first) {
         } else {
             grant.token = sink::lease_disabled_token();
         }
-        net::post(ioc_, [this, report, grant = std::move(grant)] { start_runtime(report, grant); });
+        net::post(ioc_, [this, deploy_env, expected_db, report, grant = std::move(grant)] {
+            deploy_env_ = deploy_env;
+            expected_db_ = expected_db;
+            start_runtime(report, grant);
+        });
     } catch (const sink::StartupFatal& e) {
-        net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitUsage, "redis startup check failed: " + msg); });
+        if (e.tenancy_violation) {
+            log::error("host", "redis tenancy violation",
+                       {{"event", "REDIS_TENANCY_VIOLATION"},
+                        {"reason", e.what()},
+                        {"foreign_prefixes", e.foreign_prefixes},
+                        {"db", e.db},
+                        {"marker", e.marker}});
+        }
+        net::post(ioc_, [this, msg = std::string(e.what()), tv = e.tenancy_violation] {
+            if (tv) {
+                telemetry_.emit_event_now(ops::redis_tenancy_violation_event(msg, 1, 1), wall_ms());
+            }
+            begin_shutdown(kExitUsage, "redis startup check failed: " + msg);
+        });
     } catch (const std::exception& e) {
         net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitFailure, "redis startup failed: " + msg); });
     }
@@ -494,10 +521,15 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         sopts.host_id = cfg_.shard.host_id;
         sopts.heartbeat_ms = cfg_.ops.heartbeat_s * 1000;
         sopts.heartbeat_ttl_s = std::max<std::uint32_t>(sopts.heartbeat_ttl_s, cfg_.ops.heartbeat_s * 3);
+        sopts.deploy_env = deploy_env_;
+        sopts.expected_db = expected_db_;
         next_heartbeat_ = {};
-        rt_->sink = std::make_unique<sink::RedisSink>(std::move(sopts), rt_->keys,
-                                                      std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys),
-                                                      std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys));
+        rt_->sink = std::make_unique<sink::RedisSink>(
+            std::move(sopts), rt_->keys,
+            std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys, std::chrono::milliseconds(2000),
+                                                "evml:" + cfg_.shard.host_id + ":data"),
+            std::make_unique<sink::RedisppConn>(redis_url_, rt_->keys, std::chrono::milliseconds(2000),
+                                                "evml:" + cfg_.shard.host_id + ":lease"));
         rt_->sink->start();
         wd_.set_sink_registered(true);
 

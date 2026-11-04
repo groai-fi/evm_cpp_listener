@@ -55,6 +55,7 @@ public:
     void stop();
 
     void push_event(ops::AlertEvent ev);
+    void emit_event_now(ops::AlertEvent ev, std::uint64_t ts_ms);
     void ops_tick(const TelemetryContext& ctx, std::chrono::steady_clock::time_point now, std::uint64_t ts_ms,
                   const std::optional<ops::RedisMisconfig>& redis_misconfig, std::int64_t redis_wait_since_ns,
                   const std::string& redis_wait_family);

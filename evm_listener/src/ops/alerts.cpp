@@ -29,11 +29,20 @@ EventInfo event_info(AlertEvent::Kind k) {
         case AlertEvent::Kind::WsMissedLogs: return {Severity::Warning, "WS Missed Logs", false};
         case AlertEvent::Kind::ProviderInconsistent: return {Severity::Warning, "Provider Inconsistent", false};
         case AlertEvent::Kind::LeaderChanged: return {Severity::Warning, "Leader Changed", true};
+        case AlertEvent::Kind::RedisTenancyViolation: return {Severity::Critical, "Redis Tenancy Violation", true};
     }
     return {Severity::Warning, "?", false};
 }
 
 }  // namespace
+
+AlertEvent redis_tenancy_violation_event(std::string message, std::uint64_t new_violations, std::uint64_t total) {
+    AlertEvent e;
+    e.kind = AlertEvent::Kind::RedisTenancyViolation;
+    e.message = std::move(message);
+    e.details = {{"new_violations", new_violations}, {"total", total}};
+    return e;
+}
 
 const char* to_string(Severity s) {
     switch (s) {
