@@ -14,7 +14,10 @@ Checks: >
   performance-move-const-arg,
   performance-no-automatic-move,
   performance-trivially-destructible,
-  misc-redundant-expression
+  misc-redundant-expression,
+  bugprone-exception-escape,
+  bugprone-use-after-move,
+  bugprone-dangling-handle
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'evm_listener/(src|tests)/.*'
 FormatStyle: file
