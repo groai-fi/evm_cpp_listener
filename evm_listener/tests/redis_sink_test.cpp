@@ -2128,5 +2128,43 @@ TEST_CASE("redis sink: runtime 300 s tenancy check increments tenancy_violations
     CHECK(r.sink->mode() == SinkMode::Connected);
 }
 
+TEST_CASE("lease: try_acquire_lease_result and try_release_lease return ConnError on malformed replies", "[unit][sink]") {
+    struct ReplyConn : RedisConn {
+        CallOutcome reply{ScriptOk{"GARBAGE"}};
+        void load_scripts() override {}
+        std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>&) override { return {reply}; }
+        std::vector<ReleasedEntry> read_released(std::uint64_t, std::uint64_t) override { return {}; }
+        Checkpoint read_checkpoint() override { return {}; }
+        void set_with_ttl(std::string_view, std::string_view, std::uint32_t) override {}
+        GroupFacts read_group_facts(std::string_view, std::string_view) override { return {}; }
+    };
 
+    const Keys keys("8453:prod");
+    ReplyConn conn;
 
+    // Malformed acquire reply (missing newline) -> ConnError
+    conn.reply = ScriptOk{"no-newline-token"};
+    const auto acq_bad = try_acquire_lease_result(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(acq_bad.has_error());
+    CHECK_THAT(acq_bad.error().what(), ContainsSubstring("lease acquire: unexpected reply missing newline"));
+
+    // Valid acquire reply -> LeaseGrant
+    conn.reply = ScriptOk{"2|hostA|n1\n1|hostB|n0"};
+    const auto acq_ok = try_acquire_lease_result(conn, keys, "hostA", "n1", 15000);
+    REQUIRE(acq_ok.has_value());
+    REQUIRE(acq_ok->has_value());
+    CHECK((*acq_ok)->token == "2|hostA|n1");
+    CHECK((*acq_ok)->epoch_n == 2);
+    CHECK((*acq_ok)->old_host == "hostB");
+
+    // Unexpected release reply -> ConnError (no exception thrown)
+    conn.reply = ScriptOk{"GARBAGE"};
+    const auto rel_bad = try_release_lease(conn, keys, "2|hostA|n1");
+    REQUIRE(rel_bad.has_error());
+    CHECK_THAT(rel_bad.error().what(), ContainsSubstring("lease release: unexpected reply"));
+
+    // Empty nil release reply -> ConnError
+    conn.reply = ScriptOk{std::nullopt};
+    const auto rel_nil = try_release_lease(conn, keys, "2|hostA|n1");
+    REQUIRE(rel_nil.has_error());
+}

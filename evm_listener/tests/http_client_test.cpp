@@ -182,6 +182,16 @@ TEST_CASE("http client: headers that could break the request are rejected and ne
     net::io_context ioc;
     HttpClient client(ioc.get_executor());
     const auto fails = [&](HttpClient::Headers h) {
+        const auto get_res = run(ioc, client.try_get("http://127.0.0.1:9/", h));
+        REQUIRE(get_res.has_error());
+        CHECK_FALSE(get_res.error().message.empty());
+        CHECK(get_res.error().message.find(kSecret) == std::string::npos);
+
+        const auto post_res = run(ioc, client.try_post_json("http://127.0.0.1:9/", "{}", h));
+        REQUIRE(post_res.has_error());
+        CHECK_FALSE(post_res.error().message.empty());
+        CHECK(post_res.error().message.find(kSecret) == std::string::npos);
+
         try {
             run(ioc, client.get("http://127.0.0.1:9/", h));
         } catch (const std::invalid_argument& e) {
