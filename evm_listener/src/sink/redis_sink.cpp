@@ -17,7 +17,16 @@
 
 namespace evml::sink {
 
-using namespace detail;
+using detail::CkptInitItem;
+using detail::CkptItem;
+using detail::ContractsItem;
+using detail::EmitItem;
+using detail::FastEmitItem;
+using detail::FinalTrimItem;
+using detail::QueueItem;
+using detail::ReadItem;
+using detail::StampedWrite;
+using detail::WriteItem;
 
 namespace {
 
@@ -59,13 +68,13 @@ std::string describe(const WriteItem& item) {
 
 // ---- spill record codec: one JSON object per item; the spill's `kind` byte names the item type ----
 
-enum : std::uint8_t { kEmit = 1, kCkpt = 2, kCkptInit = 3, kContracts = 4, kFinalTrim = 5 };
+enum class SpillTag : std::uint8_t { Emit = 1, Ckpt = 2, CkptInit = 3, Contracts = 4, FinalTrim = 5 };
 
 std::pair<std::uint8_t, std::string> encode(const WriteItem& item) {
     boost::json::object o;
     std::uint8_t kind = 0;
     std::visit(overloaded{[&](const EmitItem& i) {
-                              kind = kEmit;
+                              kind = static_cast<std::uint8_t>(SpillTag::Emit);
                               o["stream"] = core::to_string(i.e.stream);
                               o["type"] = pipeline::to_string(i.e.type);
                               o["id"] = i.e.event_id;
@@ -77,21 +86,21 @@ std::pair<std::uint8_t, std::string> encode(const WriteItem& item) {
                               throw std::logic_error("RedisSink: FastEmitItem must never be written to spill");
                           },
                           [&](const CkptItem& i) {
-                              kind = kCkpt;
+                              kind = static_cast<std::uint8_t>(SpillTag::Ckpt);
                               o["kind"] = i.kind == pipeline::CheckpointKind::Safe ? "safe" : "finalized";
                               o["block"] = i.block;
                           },
                           [&](const CkptInitItem& i) {
-                              kind = kCkptInit;
+                              kind = static_cast<std::uint8_t>(SpillTag::CkptInit);
                               o["c0"] = i.c0;
                               o["manifest"] = pack_manifest(i.manifest);
                           },
                           [&](const ContractsItem& i) {
-                              kind = kContracts;
+                              kind = static_cast<std::uint8_t>(SpillTag::Contracts);
                               o["manifest"] = pack_manifest(i.manifest);
                           },
                           [&](const FinalTrimItem& i) {
-                              kind = kFinalTrim;
+                              kind = static_cast<std::uint8_t>(SpillTag::FinalTrim);
                               o["block"] = i.block;
                           }},
                item);
@@ -123,8 +132,8 @@ WriteItem decode(const SpillRecord& rec) {
     const auto& o = v.as_object();
     const std::string& raw = rec.payload;
 
-    switch (rec.kind) {
-        case kEmit: {
+    switch (static_cast<SpillTag>(rec.kind)) {
+        case SpillTag::Emit: {
             EmitItem i;
             const std::string stream = to_str(need(o, "stream", raw), "stream", raw);
             if (stream == core::to_string(core::StreamKind::Events)) i.e.stream = core::StreamKind::Events;
@@ -140,7 +149,7 @@ WriteItem decode(const SpillRecord& rec) {
             if (const auto* released = o.if_contains("released")) i.e.released_block = to_u64(*released, "released", raw);
             return i;
         }
-        case kCkpt: {
+        case SpillTag::Ckpt: {
             CkptItem i;
             const std::string kind = to_str(need(o, "kind", raw), "kind", raw);
             if (kind == "safe") i.kind = pipeline::CheckpointKind::Safe;
@@ -149,24 +158,24 @@ WriteItem decode(const SpillRecord& rec) {
             i.block = to_u64(need(o, "block", raw), "block", raw);
             return i;
         }
-        case kCkptInit: {
+        case SpillTag::CkptInit: {
             CkptInitItem i;
             i.c0 = to_u64(need(o, "c0", raw), "c0", raw);
             i.manifest = unpack_manifest(to_str(need(o, "manifest", raw), "manifest", raw));
             return i;
         }
-        case kContracts: {
+        case SpillTag::Contracts: {
             ContractsItem i;
             i.manifest = unpack_manifest(to_str(need(o, "manifest", raw), "manifest", raw));
             return i;
         }
-        case kFinalTrim: {
+        case SpillTag::FinalTrim: {
             FinalTrimItem i;
             i.block = to_u64(need(o, "block", raw), "block", raw);
             return i;
         }
-        default: throw core::DecodeError("spill record: unknown kind " + std::to_string(rec.kind) + ": " + raw);
     }
+    throw core::DecodeError("spill record: unknown kind " + std::to_string(rec.kind) + ": " + raw);
 }
 
 RedisSinkOptions validated(RedisSinkOptions o) {
@@ -204,17 +213,6 @@ RedisSinkOptions validated(RedisSinkOptions o) {
 
 }  // namespace
 
-const char* to_string(SinkMode m) {
-    switch (m) {
-        case SinkMode::Connected: return "connected";
-        case SinkMode::Degraded: return "degraded";
-        case SinkMode::Replaying: return "replaying";
-        case SinkMode::Fenced: return "fenced";
-        case SinkMode::Failed: return "failed";
-    }
-    throw std::logic_error("to_string: unknown SinkMode");
-}
-
 RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token) {
     if (lease.enabled == (token == kNoFence))
         throw std::invalid_argument(lease.enabled ? "RedisSinkOptions: [lease] is enabled but the token disables fencing"
@@ -234,7 +232,7 @@ RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const 
 }
 
 struct RedisSink::Verdict {
-    enum class Kind { Ack, Fenced, NoScript, Transient, Fatal } kind{Kind::Ack};
+    enum class Kind : std::uint8_t { Ack, Fenced, NoScript, Transient, Fatal } kind{Kind::Ack};
     std::string message;
 };
 
@@ -244,7 +242,8 @@ RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn
       data_(std::move(data)),
       lease_(std::move(lease)),
       spill_(opts_.spill_dir, opts_.spill_max_bytes, opts_.spill_segment_bytes),
-      rng_(std::random_device{}()) {
+      rng_(std::random_device{}()),
+      read_gate_(std::make_shared<ReadGate>(this)) {
     if (!data_ || !lease_) throw std::invalid_argument("RedisSink: both connections are required");
     next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);  // the lease was acquired just now
     next_probe_ = now();
@@ -259,11 +258,11 @@ RedisSink::~RedisSink() { stop(); }
 
 // ---- producer side (any thread) ----
 
-bool RedisSink::saturated() const {
+bool RedisSink::saturated() const noexcept {
     return queue_depth_.load() >= opts_.queue_capacity || spill_saturated_.load() || is_terminal(mode_.load());
 }
 
-bool RedisSink::readable() const { return mode_.load() == SinkMode::Connected && !stop_.load(); }
+bool RedisSink::readable() const noexcept { return mode_.load() == SinkMode::Connected && !stop_.load(); }
 
 /// @brief Enqueues write item into thread-safe buffer; drops writes if already terminal.
 void RedisSink::enqueue(WriteItem item) {
@@ -309,8 +308,13 @@ void RedisSink::final_trim(std::uint64_t block) { enqueue(FinalTrimItem{block});
 
 /// @brief Dispatches read operation as a queue barrier, guaranteeing earlier writes are acked first.
 template <class T, class Op>
-boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
-    if (!readable()) co_return std::nullopt;  // degraded / replaying / terminal: nothing to wait for (rev 6, A)
+boost::asio::awaitable<std::optional<T>> RedisSink::read(std::shared_ptr<ReadGate> gate, Op op) {
+    {
+        std::lock_guard glk(gate->mu);
+        if (gate->sink == nullptr || !gate->sink->readable()) {
+            co_return std::nullopt;  // degraded / replaying / terminal: nothing to wait for (rev 6, A)
+        }
+    }
 
     using Channel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, std::optional<T>)>;
     auto ex = co_await boost::asio::this_coro::executor;
@@ -328,27 +332,35 @@ boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
     auto state = std::make_shared<State>(ex, channel);
     struct Guard {
         std::shared_ptr<State> state;
+        explicit Guard(std::shared_ptr<State> s) : state(std::move(s)) {}
         ~Guard() {
             std::lock_guard lk(state->mu);
             state->active = false;
             state->ex = nullptr;
         }
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+        Guard(Guard&&) = delete;
+        Guard& operator=(Guard&&) = delete;
     } guard{state};
 
     ReadItem item;
-    item.run = [state, op](RedisConn& conn) {
+    item.run = [state, op](RedisConn& conn) -> core::Result<void, ConnError> {
         {
             std::lock_guard lk(state->mu);
-            if (!state->active) return;
+            if (!state->active) return {};
         }
-        std::optional<T> res(op(conn));
+        auto r = op(conn);
+        if (!r) return r.error();
+        std::optional<T> res(std::move(*r));
         std::lock_guard lk(state->mu);
-        if (!state->active) return;
+        if (!state->active) return {};
         state->active = false;
         boost::asio::post(state->ex, [weak_ch = state->weak_ch, res = std::move(res)]() mutable {
             if (auto ch = weak_ch.lock()) ch->try_send(boost::system::error_code{}, std::move(res));
         });
         state->ex = nullptr;
+        return {};
     };
     item.abandon = [state] {
         std::lock_guard lk(state->mu);
@@ -360,24 +372,33 @@ boost::asio::awaitable<std::optional<T>> RedisSink::read(Op op) {
         state->ex = nullptr;
     };
 
+    bool enqueued = false;
     {
-        std::lock_guard lk(mu_);
-        // Invalidate read if sink entered terminal mode or stopped before enqueueing.
-        if (is_terminal(mode_.load()) || stop_.load()) co_return std::nullopt;
-        queue_.emplace_back(std::move(item));
+        std::lock_guard glk(gate->mu);
+        if (gate->sink != nullptr) {
+            {
+                std::lock_guard lk(gate->sink->mu_);
+                // Invalidate read if sink entered terminal mode or stopped before enqueueing.
+                if (!is_terminal(gate->sink->mode_.load()) && !gate->sink->stop_.load()) {
+                    gate->sink->queue_.emplace_back(std::move(item));
+                    enqueued = true;
+                }
+            }
+            if (enqueued) gate->sink->cv_.notify_one();
+        }
     }
-    cv_.notify_one();
+    if (!enqueued) co_return std::nullopt;
     co_return co_await channel->async_receive(boost::asio::use_awaitable);
 }
 
 boost::asio::awaitable<std::optional<pipeline::Checkpoint>> RedisSink::load_checkpoint() {
-    co_return co_await read<pipeline::Checkpoint>([](RedisConn& c) { return c.read_checkpoint(); });
+    return read<pipeline::Checkpoint>(read_gate_, [](RedisConn& c) { return c.try_read_checkpoint(); });
 }
 
 boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> RedisSink::released_range(std::uint64_t from,
                                                                                                       std::uint64_t to) {
-    co_return co_await read<std::vector<pipeline::ReleasedEntry>>(
-        [from, to](RedisConn& c) { return c.read_released(from, to); });
+    return read<std::vector<pipeline::ReleasedEntry>>(
+        read_gate_, [from, to](RedisConn& c) { return c.try_read_released(from, to); });
 }
 
 // ---- thread lifecycle ----
@@ -388,6 +409,10 @@ void RedisSink::start() {
 }
 
 void RedisSink::stop() {
+    {
+        std::lock_guard glk(read_gate_->mu);
+        read_gate_->sink = nullptr;
+    }
     {
         std::lock_guard lk(mu_);
         stop_.store(true);
@@ -417,7 +442,7 @@ void RedisSink::set_heartbeat(std::string payload) {
 /// @brief Flushes pending items up to timeout, joins sink worker, and releases leadership lease.
 RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
     // Wait for in-flight batches and spill items to finish writing to Redis.
-    wait_idle(budget);
+    (void)wait_idle(budget);
     stop();  // joins the sink thread: from here the lease connection is ours alone
     DrainResult r;
     r.unflushed = pending_.load();
@@ -428,9 +453,12 @@ RedisSink::DrainResult RedisSink::drain(std::chrono::milliseconds budget) {
     // Explicitly release leader lease so standby replica takes over immediately without waiting for TTL.
     if (leasing() && mode_.load() != SinkMode::Fenced) {
         try {
-            r.lease_released = release_lease(*lease_, keys_, opts_.token);
-        } catch (const ConnError& e) {
-            core::log::warn("sink", "lease release failed, a standby waits for the TTL", {{"error", e.what()}});
+            if (auto rel = try_release_lease(*lease_, keys_, opts_.token); rel) {
+                r.lease_released = *rel;
+            } else {
+                core::log::warn("sink", "lease release failed, a standby waits for the TTL",
+                                {{"error", rel.error().what()}});
+            }
         } catch (const std::exception& e) {
             core::log::error("sink", "lease release failed", {{"error", e.what()}});
         }
@@ -702,10 +730,10 @@ bool RedisSink::refill_from_spill() {
 
 void RedisSink::execute_read(ReadItem& item) {
     try {
-        item.run(*data_);
-    } catch (const ConnError& e) {
-        item.abandon();
-        go_degraded(std::string("read failed: ") + e.what());
+        if (auto r = item.run(*data_); !r) {
+            item.abandon();
+            go_degraded(std::string("read failed: ") + r.error().what());
+        }
     } catch (...) {
         item.abandon();
         throw;  // schema violation or a bug: pump() fails the sink
@@ -792,15 +820,14 @@ bool RedisSink::send_held() {
     calls.reserve(held_.size());
     for (const auto& sw : held_) calls.push_back(to_call(sw.item));
 
-    std::vector<CallOutcome> outcomes;
-    try {
-        // Dispatches entire batch over data connection in a single network round-trip.
-        outcomes = data_->pipeline(calls);
-    } catch (const ConnError& e) {
+    // Dispatches entire batch over data connection in a single network round-trip.
+    auto outcomes_res = data_->try_pipeline(calls);
+    if (!outcomes_res) {
         // The outcome of every call is unknown: the whole batch stays held and is re-sent (dedup makes that safe).
-        go_degraded(e.what());
+        go_degraded(outcomes_res.error().what());
         return true;
     }
+    const std::vector<CallOutcome>& outcomes = *outcomes_res;
     if (outcomes.size() != calls.size())
         throw std::logic_error("RedisConn::pipeline returned " + std::to_string(outcomes.size()) + " outcomes for " +
                                std::to_string(calls.size()) + " calls");
@@ -856,11 +883,9 @@ bool RedisSink::send_held() {
                 go_degraded("scripts keep disappearing right after a reload");
                 break;
             }
-            try {
-                // Redis flushed script cache; reload all SHA1 Lua scripts and retry on next pump.
-                data_->load_scripts();  // the next pump re-sends from the failed item
-            } catch (const ConnError& e) {
-                go_degraded(std::string("script reload failed: ") + e.what());
+            // Redis flushed script cache; reload all SHA1 Lua scripts and retry on next pump.
+            if (auto lr = data_->try_load_scripts(); !lr) {
+                go_degraded(std::string("script reload failed: ") + lr.error().what());
             }
             break;
         case Verdict::Kind::Fenced: handle_fenced(); break;
@@ -873,21 +898,24 @@ bool RedisSink::send_held() {
 // ---- lease ----
 
 /// @brief Sends lease renewal script on lease connection; retries once if script needs reloading.
-RedisSink::LeaseResult RedisSink::renew_lease() {
+core::Result<RedisSink::LeaseResult, ConnError> RedisSink::renew_lease() {
     const ScriptCall call = lease_renew_call(keys_, opts_.token, opts_.lease_ttl_ms);
     for (int attempt = 0; attempt < 2; ++attempt) {
         // Dispatches renewal over dedicated lease connection so high event load never starves renewal.
-        const std::vector<CallOutcome> outcomes = lease_->pipeline({call});
-        if (outcomes.size() != 1) throw std::logic_error("RedisConn::pipeline returned the wrong number of outcomes for renew");
+        auto outcomes_res = lease_->try_pipeline({call});
+        if (!outcomes_res) return outcomes_res.error();
+        const std::vector<CallOutcome>& outcomes = *outcomes_res;
+        if (outcomes.size() != 1)
+            throw std::logic_error("RedisConn::pipeline returned the wrong number of outcomes for renew");
 
         if (const auto* f = std::get_if<ScriptFail>(&outcomes.front())) {
             if (f->kind == FailKind::NoScript && attempt == 0) {
                 // Redis script cache flushed; reload script on lease connection and retry immediately.
-                lease_->load_scripts();
+                if (auto lr = lease_->try_load_scripts(); !lr) return lr.error();
                 continue;
             }
             if (f->kind == FailKind::Fatal) throw std::runtime_error("lease renew failed: " + f->message);
-            throw ConnError("lease renew: " + f->message);
+            return ConnError("lease renew: " + f->message);
         }
         const auto& value = std::get<ScriptOk>(outcomes.front()).value;
         if (value == "OK") return LeaseResult::Ok;
@@ -895,19 +923,20 @@ RedisSink::LeaseResult RedisSink::renew_lease() {
         if (value == "FENCED") return LeaseResult::Fenced;
         throw std::runtime_error("lease renew: unexpected reply '" + value.value_or("<nil>") + "'");
     }
-    throw ConnError("lease renew: scripts still missing after a reload");
+    return ConnError("lease renew: scripts still missing after a reload");
 }
 
 bool RedisSink::service_lease() {
     if (!leasing() || now() < next_renew_) return false;
     next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
-    try {
-        if (renew_lease() == LeaseResult::Fenced) enter_fenced();
-    } catch (const ConnError& e) {
+    auto r = renew_lease();
+    if (!r) {
         // Not fatal and not a demotion: if the key expires meanwhile, the next write answers FENCED and handle_fenced()
         // asks again (RESUMED when nobody took over).
         ++renew_failures_total_;
-        core::log::warn("sink", "lease renew failed", {{"error", e.what()}});
+        core::log::warn("sink", "lease renew failed", {{"error", r.error().what()}});
+    } else if (*r == LeaseResult::Fenced) {
+        enter_fenced();
     }
     return true;
 }
@@ -928,14 +957,17 @@ bool RedisSink::service_consumer_lag() {
         snapshot.reserve(opts_.consumer_groups.size());
         const std::uint64_t probed_at_ms = opts_.wall_ms();
         for (const auto& g : opts_.consumer_groups) {
-            snapshot.push_back(evaluate_consumer_lag(g, lease_->read_group_facts(keys_.stream(g.stream), g.group)));
+            auto facts_res = lease_->try_read_group_facts(keys_.stream(g.stream), g.group);
+            if (!facts_res) {
+                ++consumer_lag_failures_total_;  // the previous snapshot stays; probed_at_ms tells the host how old it is
+                core::log::warn("sink", "consumer lag probe failed", {{"error", facts_res.error().what()}});
+                return true;
+            }
+            snapshot.push_back(evaluate_consumer_lag(g, *facts_res));
             snapshot.back().probed_at_ms = probed_at_ms;
         }
         std::lock_guard lk(lag_mu_);
         lag_snapshot_ = std::move(snapshot);
-    } catch (const ConnError& e) {
-        ++consumer_lag_failures_total_;  // the previous snapshot stays; probed_at_ms tells the host how old it is
-        core::log::warn("sink", "consumer lag probe failed", {{"error", e.what()}});
     } catch (const std::exception& e) {
         // A reply we cannot read (permissions, wrong type, parse error). The probe is read-only and must never stop the
         // writer, but it is not silent: counted, and logged at ERROR.
@@ -951,7 +983,12 @@ bool RedisSink::service_tenancy() {
     }
     next_tenancy_check_ = now() + std::chrono::milliseconds(opts_.tenancy_check_interval_ms);
     try {
-        TenancyFacts facts = lease_->read_tenancy_facts();
+        auto facts_res = lease_->try_read_tenancy_facts();
+        if (!facts_res) {
+            core::log::warn("sink", "runtime tenancy check failed", {{"error", facts_res.error().what()}});
+            return true;
+        }
+        TenancyFacts facts = std::move(*facts_res);
         facts.tenant_marker = format_tenant_marker(opts_.deploy_env);
         (void)evaluate_tenancy(facts, opts_.deploy_env, opts_.expected_db);
     } catch (const StartupFatal& e) {
@@ -962,8 +999,6 @@ bool RedisSink::service_tenancy() {
                           {"foreign_prefixes", e.foreign_prefixes},
                           {"db", e.db},
                           {"marker", e.marker}});
-    } catch (const ConnError& e) {
-        core::log::warn("sink", "runtime tenancy check failed", {{"error", e.what()}});
     } catch (const std::exception& e) {
         core::log::error("sink", "runtime tenancy check failed, the sink keeps writing", {{"error", e.what()}});
     }
@@ -982,10 +1017,10 @@ bool RedisSink::service_heartbeat() {
     }
     if (payload.empty()) return false;
     try {
-        lease_->set_with_ttl(keys_.hb(opts_.host_id), payload, opts_.heartbeat_ttl_s);
-    } catch (const ConnError& e) {
-        ++heartbeat_failures_total_;
-        core::log::warn("sink", "heartbeat write failed", {{"error", e.what()}});
+        if (auto res = lease_->try_set_with_ttl(keys_.hb(opts_.host_id), payload, opts_.heartbeat_ttl_s); !res) {
+            ++heartbeat_failures_total_;
+            core::log::warn("sink", "heartbeat write failed", {{"error", res.error().what()}});
+        }
     } catch (const std::exception& e) {
         ++heartbeat_failures_total_;  // not silent, but a heartbeat must never stop the writer
         core::log::error("sink", "heartbeat write failed, the sink keeps writing", {{"error", e.what()}});
@@ -998,15 +1033,15 @@ void RedisSink::handle_fenced() {
     if (!leasing()) throw std::runtime_error("a write script answered FENCED, but fencing is disabled (token 0 never fences)");
     if (++fence_streak_ > 1)
         throw std::runtime_error("a write was fenced again right after renew accepted the token: lease state is inconsistent");
-    try {
-        // Immediate renewal query verifies whether another host took leadership or token expired.
-        const LeaseResult r = renew_lease();
-        next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
-        if (r == LeaseResult::Fenced) enter_fenced();
-        // Ok / Resumed: the batch is still held; the next pump re-sends it from the fenced item.
-    } catch (const ConnError& e) {
-        go_degraded(std::string("renew after FENCED failed: ") + e.what());
+    // Immediate renewal query verifies whether another host took leadership or token expired.
+    auto r = renew_lease();
+    if (!r) {
+        go_degraded(std::string("renew after FENCED failed: ") + r.error().what());
+        return;
     }
+    next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
+    if (*r == LeaseResult::Fenced) enter_fenced();
+    // Ok / Resumed: the batch is still held; the next pump re-sends it from the fenced item.
 }
 
 /// @brief Transitions to terminal Fenced mode, discarding queue and disk spill to avoid stale dual writes.
@@ -1083,21 +1118,23 @@ void RedisSink::schedule_next_probe() {
 /// @brief Attempts reconnect by verifying lease renewal first, reloading scripts, and transitioning to Replaying.
 bool RedisSink::try_reconnect() {
     if (now() < next_probe_) return false;
-    try {
-        // First op after an outage is a renewal (plan 4.8): it detects a takeover before any write is attempted.
-        // Verifies leader fencing status before attempting data writes to prevent writing under expired term.
-        if (leasing()) {
-            const LeaseResult r = renew_lease();
-            next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
-            if (r == LeaseResult::Fenced) {
-                enter_fenced();
-                return true;
-            }
+    // First op after an outage is a renewal (plan 4.8): it detects a takeover before any write is attempted.
+    // Verifies leader fencing status before attempting data writes to prevent writing under expired term.
+    if (leasing()) {
+        auto r = renew_lease();
+        if (!r) {
+            go_degraded(r.error().what());
+            return true;
         }
-        // Loads SHA1 Lua scripts into Redis script cache to confirm data connection health.
-        data_->load_scripts();  // proves the data connection works, and restores scripts after a Redis restart
-    } catch (const ConnError& e) {
-        go_degraded(e.what());
+        next_renew_ = now() + std::chrono::milliseconds(opts_.renew_ms);
+        if (*r == LeaseResult::Fenced) {
+            enter_fenced();
+            return true;
+        }
+    }
+    // Loads SHA1 Lua scripts into Redis script cache to confirm data connection health.
+    if (auto lr = data_->try_load_scripts(); !lr) {
+        go_degraded(lr.error().what());
         return true;
     }
     ++reconnects_total_;

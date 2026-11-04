@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <thread>
 
@@ -41,6 +42,8 @@ public:
     ~Watchdog();
     Watchdog(const Watchdog&) = delete;
     Watchdog& operator=(const Watchdog&) = delete;
+    Watchdog(Watchdog&&) = delete;
+    Watchdog& operator=(Watchdog&&) = delete;
 
     /// @brief Start the thread. Both beats count as fresh at this instant. @throws std::logic_error if already started.
     void start();
@@ -53,7 +56,7 @@ public:
     void beat_sink();
     /// @brief Storage the sink loop stores its steady-clock ms into (RedisSinkOptions::loop_beat). Owned by the watchdog,
     /// so it outlives every per-leadership sink.
-    std::atomic<std::uint64_t>* sink_beat_slot() { return &sink_beat_; }
+    [[nodiscard]] std::atomic<std::uint64_t>* sink_beat_slot() noexcept { return &sink_beat_; }
     /// @brief Sink beat is checked only while registered (leader). Registering resets its baseline to now; unregister
     /// BEFORE destroying the sink.
     void set_sink_registered(bool registered);
@@ -61,9 +64,9 @@ public:
     /// @brief Called by the io thread each tick; atomics only.
     void publish_state(const State& s);
 
-    /// @brief Name of the heartbeat that is stale right now ("io_tick" / "sink_loop"), or nullptr when healthy.
+    /// @brief Name of the heartbeat that is stale right now ("io_tick" / "sink_loop"), or nullopt when healthy.
     /// Same rule as the abort (stall_ms, pause baselines) and safe from any thread: backs `/healthz`.
-    const char* stale_heartbeat() const;
+    [[nodiscard]] std::optional<std::string_view> stale_heartbeat() const noexcept;
 
     /// @brief Mark both beats fresh and reset baselines to now. start() calls it; tests call it before check_once().
     void arm();
@@ -71,7 +74,7 @@ public:
     void check_once();
 
     /// @brief True once the abort callback has been invoked (only observable when on_abort returns, i.e. in tests).
-    bool fired() const { return fired_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool fired() const noexcept { return fired_.load(std::memory_order_acquire); }
 
 private:
     void run();

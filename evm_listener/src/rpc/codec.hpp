@@ -10,6 +10,7 @@
 #include <simdjson.h>
 
 #include "core/config.hpp"
+#include "core/error.hpp"
 #include "core/hex.hpp"
 
 namespace evml::rpc {
@@ -67,30 +68,41 @@ using Message = std::variant<Response, Notification>;
 /// - NOT thread-safe: Maintains internal reusable padded buffer and parser state.
 /// - Allocate one Decoder instance per worker connection/session.
 /// Error Handling:
-/// - Throws evml::core::DecodeError naming the missing or malformed field.
+/// - try_* methods return core::Result<T> without throwing exceptions.
+/// - decode/parse_* wrappers throw evml::core::DecodeError naming the missing or malformed field.
 /// - Never silently falls back or defaults missing required fields.
 class Decoder {
 public:
+    /// @brief Dissects a raw JSON string into a Response or Notification without throwing.
+    [[nodiscard]] core::Result<Message> try_decode(std::string_view json) noexcept;
     /// @brief Dissects a raw JSON string into a Response or Notification.
-    Message decode(std::string_view json);
+    [[nodiscard]] Message decode(std::string_view json);
 
     // Typed extractors over a Response::result_raw.
+    /// @brief Parses an array of Log objects from eth_getLogs result JSON without throwing.
+    [[nodiscard]] core::Result<std::vector<Log>> try_parse_logs(std::string_view result_raw) noexcept;
     /// @brief Parses an array of Log objects from eth_getLogs result JSON.
-    std::vector<Log> parse_logs(std::string_view result_raw);
+    [[nodiscard]] std::vector<Log> parse_logs(std::string_view result_raw);
+    /// @brief Parses a Head block header from eth_getBlockByNumber result JSON without throwing.
+    [[nodiscard]] core::Result<std::optional<Head>> try_parse_block(std::string_view result_raw) noexcept;
     /// @brief Parses a Head block header from eth_getBlockByNumber result JSON (null returns nullopt).
-    std::optional<Head> parse_block(std::string_view result_raw);
+    [[nodiscard]] std::optional<Head> parse_block(std::string_view result_raw);
+    /// @brief Parses a hex quantity (e.g., "0x1b4") into an unsigned 64-bit integer without throwing.
+    [[nodiscard]] core::Result<std::uint64_t> try_parse_quantity(std::string_view result_raw) noexcept;
     /// @brief Parses a hex quantity (e.g., "0x1b4") into an unsigned 64-bit integer.
-    std::uint64_t parse_quantity(std::string_view result_raw);
+    [[nodiscard]] std::uint64_t parse_quantity(std::string_view result_raw);
+    /// @brief Parses a raw string scalar from result JSON without throwing.
+    [[nodiscard]] core::Result<std::string> try_parse_string(std::string_view result_raw) noexcept;
     /// @brief Parses a raw string scalar from result JSON.
-    std::string parse_string(std::string_view result_raw);
+    [[nodiscard]] std::string parse_string(std::string_view result_raw);
 
     /// @brief Attempts to extract RpcError from an HTTP error body.
     /// Supports standard {"error":{...}} and bare {"code":...,"message":...} formats (Alchemy 429).
     /// @return Extracted RpcError, or nullopt if body is not valid JSON-RPC error.
-    std::optional<RpcError> try_parse_error_body(std::string_view body);
+    [[nodiscard]] std::optional<RpcError> try_parse_error_body(std::string_view body) noexcept;
 
 private:
-    simdjson::padded_string_view load(std::string_view json);
+    [[nodiscard]] simdjson::padded_string_view load(std::string_view json);
 
     simdjson::ondemand::parser parser_;
     std::string buf_;
@@ -98,22 +110,22 @@ private:
 
 // Outbound builders (Boost.JSON). Ids are caller-supplied monotonic uint64.
 /// @brief Builds "eth_blockNumber" JSON-RPC request string.
-std::string build_block_number(std::uint64_t id);
+[[nodiscard]] std::string build_block_number(std::uint64_t id);
 /// @brief Builds "eth_chainId" JSON-RPC request string.
-std::string build_chain_id(std::uint64_t id);
+[[nodiscard]] std::string build_chain_id(std::uint64_t id);
 /// @brief Builds "eth_subscribe" request string for specified feed (e.g. "newHeads").
-std::string build_subscribe(std::uint64_t id, std::string_view kind);
+[[nodiscard]] std::string build_subscribe(std::uint64_t id, std::string_view kind);
 /// @brief Builds "eth_subscribe" request for logs matching the given filter.
 /// @warning Throws std::invalid_argument if filter contains no addresses or topic0s.
-std::string build_subscribe_logs(std::uint64_t id, const core::LogFilter& filter);
+[[nodiscard]] std::string build_subscribe_logs(std::uint64_t id, const core::LogFilter& filter);
 /// @brief Builds "eth_unsubscribe" request for an active subscription ID.
-std::string build_unsubscribe(std::uint64_t id, std::string_view subscription_id);
+[[nodiscard]] std::string build_unsubscribe(std::uint64_t id, std::string_view subscription_id);
 /// @brief Builds "eth_getBlockByNumber" request (block tag or "0x..." hex number).
-std::string build_get_block_by_number(std::uint64_t id, std::string_view block, bool full_tx);
+[[nodiscard]] std::string build_get_block_by_number(std::uint64_t id, std::string_view block, bool full_tx);
 /// @brief Builds "eth_getCode" request for bytecode inspection.
-std::string build_get_code(std::uint64_t id, const Address20& address, std::string_view block);
+[[nodiscard]] std::string build_get_code(std::uint64_t id, const Address20& address, std::string_view block);
 /// @brief Builds "eth_getLogs" request spanning [from_block, to_block].
 /// @warning Throws std::invalid_argument if from_block > to_block or filter is empty.
-std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block, const core::LogFilter& filter);
+[[nodiscard]] std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block, const core::LogFilter& filter);
 
 }  // namespace evml::rpc

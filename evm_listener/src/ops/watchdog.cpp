@@ -103,14 +103,14 @@ void Watchdog::publish_state(const State& s) {
     state_[6].store(s.sink_mode, std::memory_order_relaxed);
 }
 
-const char* Watchdog::stale_heartbeat() const {
+std::optional<std::string_view> Watchdog::stale_heartbeat() const noexcept {
     const std::uint64_t now = opts_.now();
     const std::uint64_t baseline = baseline_ms_.load(std::memory_order_relaxed);
     if (age_ms(now, io_beat_.load(std::memory_order_relaxed), baseline) > opts_.stall_ms) return "io_tick";
     if (sink_registered_.load(std::memory_order_acquire) &&
         age_ms(now, sink_beat_.load(std::memory_order_relaxed), baseline) > opts_.stall_ms)
         return "sink_loop";
-    return nullptr;
+    return std::nullopt;
 }
 
 void Watchdog::check_once() {
@@ -124,10 +124,10 @@ void Watchdog::check_once() {
         return;
     }
     const std::uint64_t baseline = baseline_ms_.load(std::memory_order_relaxed);
-    if (const char* which = stale_heartbeat()) {
-        const std::uint64_t beat = std::string_view(which) == "io_tick" ? io_beat_.load(std::memory_order_relaxed)
-                                                                         : sink_beat_.load(std::memory_order_relaxed);
-        fire(which, age_ms(now, beat, baseline));
+    if (const auto which = stale_heartbeat()) {
+        const std::uint64_t beat =
+            *which == "io_tick" ? io_beat_.load(std::memory_order_relaxed) : sink_beat_.load(std::memory_order_relaxed);
+        fire(which->data(), age_ms(now, beat, baseline));
     }
 }
 

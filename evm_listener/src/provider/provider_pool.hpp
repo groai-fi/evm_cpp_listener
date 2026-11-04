@@ -77,7 +77,7 @@ struct PoolConfig {
 };
 
 /// @brief Block tag identifiers for chain progression queries.
-enum class Tag { Safe, Finalized };
+enum class Tag : std::uint8_t { Safe, Finalized };
 
 /// @brief Event callbacks fired by the provider pool for streaming blocks, logs, transitions, and connection events.
 struct PoolHandlers {
@@ -143,8 +143,8 @@ public:
     // Throws std::invalid_argument for an inconsistent config (unknown/duplicate names, missing URLs, empty chains,
     // no subscription) and rpc::TransportError for a malformed URL.
     /// @brief Factory creating and validating a new ProviderPool instance.
-    static std::shared_ptr<ProviderPool> create(boost::asio::any_io_executor executor, PoolConfig cfg,
-                                                PoolHandlers handlers);
+    [[nodiscard]] static std::shared_ptr<ProviderPool> create(boost::asio::any_io_executor executor, PoolConfig cfg,
+                                                              PoolHandlers handlers);
 
     /// @brief Starts background tick timer, initiates WebSocket session, and schedules periodic probes.
     void start();  // throws std::logic_error if called twice
@@ -168,7 +168,8 @@ public:
 
     // Next usable getLogs provider that is not in `exclude`, in failover order. nullopt = none left.
     /// @brief Picks the best usable getLogs provider outside the exclude set.
-    std::optional<std::string> pick_getlogs_excluding(const std::unordered_set<std::string>& exclude) const {
+    [[nodiscard]] std::optional<std::string> pick_getlogs_excluding(
+        const std::unordered_set<std::string>& exclude) const {
         if (stopped_) return std::nullopt;
         return book_.pick_getlogs(Clock::now(), exclude);
     }
@@ -177,19 +178,23 @@ public:
     // Counts as a Retry failure toward Down (after policy.failover_after) and bumps inconsistency_total().
     // Throws std::out_of_range for an unknown provider.
     /// @brief Books a data-quality failure against the provider.
-    void report_bad(const std::string& provider, const std::string& reason);
+    void report_bad(std::string_view provider, std::string_view reason);
 
     /// @brief Number of report_bad() calls for the provider (provider_inconsistency_total).
-    std::uint64_t inconsistency_total(const std::string& provider) const { return nodes_.at(provider).inconsistent; }
+    [[nodiscard]] std::uint64_t inconsistency_total(std::string_view provider) const {
+        return nodes_.at(std::string(provider)).inconsistent;
+    }
     /// @brief Number of call_to() calls that had to wait for a token (getlogs_throttled_total).
-    std::uint64_t throttled_total(const std::string& provider) const { return nodes_.at(provider).throttled; }
+    [[nodiscard]] std::uint64_t throttled_total(std::string_view provider) const {
+        return nodes_.at(std::string(provider)).throttled;
+    }
     /// @brief Total HTTP JSON-RPC requests sent to the provider, keyed by method name.
-    const std::map<std::string, std::uint64_t>& rpc_requests_total(const std::string& provider) const {
-        return nodes_.at(provider).rpc_requests;
+    [[nodiscard]] const std::map<std::string, std::uint64_t>& rpc_requests_total(std::string_view provider) const {
+        return nodes_.at(std::string(provider)).rpc_requests;
     }
     /// @brief Total WebSocket subscription notifications received from the provider, keyed by stream ("heads", "logs").
-    const std::map<std::string, std::uint64_t>& ws_messages_total(const std::string& provider) const {
-        return nodes_.at(provider).ws_messages;
+    [[nodiscard]] const std::map<std::string, std::uint64_t>& ws_messages_total(std::string_view provider) const {
+        return nodes_.at(std::string(provider)).ws_messages;
     }
 
     // Fresh `safe`/`finalized` read from ONE provider (caches it). nullopt on any failure (counted against the
@@ -198,27 +203,30 @@ public:
     boost::asio::awaitable<std::optional<TagSnapshot>> read_tag(std::string provider, Tag tag);
     // Last successful read_tag from that provider. Never mixes providers.
     /// @brief Returns cached block tag snapshot previously fetched from specified provider.
-    std::optional<TagSnapshot> cached_tag(const std::string& provider, Tag tag) const;
+    [[nodiscard]] std::optional<TagSnapshot> cached_tag(std::string_view provider, Tag tag) const;
 
     /// @brief Returns name of currently active WebSocket provider.
-    const std::optional<std::string>& active_ws() const { return book_.active_ws(); }
+    [[nodiscard]] const std::optional<std::string>& active_ws() const noexcept { return book_.active_ws(); }
     /// @brief Returns name of primary getLogs provider currently selected.
-    std::optional<std::string> current_getlogs() const {
+    [[nodiscard]] std::optional<std::string> current_getlogs() const {
         if (stopped_) return std::nullopt;
         return book_.pick_getlogs(Clock::now());
     }
     /// @brief Returns current health state of named provider.
-    State state(const std::string& provider) const { return book_.state(provider).state; }
+    [[nodiscard]] State state(std::string_view provider) const { return book_.state(provider).state; }
     /// @brief newHeads silence, in ms, since the last head (or pool start before the first one). Never reset on WS
     /// failover; also counts while no WS provider is active. nullopt = the pool is not running or does not subscribe to heads.
-    std::optional<std::uint32_t> ms_since_head() const;
+    [[nodiscard]] std::optional<std::uint32_t> ms_since_head() const noexcept;
     /// @brief Health of every provider, in config order. Pure read; call on the pool's executor.
-    std::vector<ProviderHealth> health() const;
+    [[nodiscard]] std::vector<ProviderHealth> health() const;
     /// @brief Returns measured block height divergence between WebSocket and HTTP providers.
-    std::optional<std::uint64_t> divergence() const { return detector_.divergence(); }
+    [[nodiscard]] std::optional<std::uint64_t> divergence() const noexcept { return detector_.divergence(); }
 
+    ~ProviderPool() = default;
     ProviderPool(const ProviderPool&) = delete;
     ProviderPool& operator=(const ProviderPool&) = delete;
+    ProviderPool(ProviderPool&&) = delete;
+    ProviderPool& operator=(ProviderPool&&) = delete;
 
 private:
     struct Private {};
@@ -232,7 +240,7 @@ private:
 
     struct Node {
         Node(ProviderEndpoint e, std::unique_ptr<rpc::HttpRpcClient> h, rpc::Backoff b, TokenBucket tb)
-            : ep(std::move(e)), http(std::move(h)), backoff(std::move(b)), bucket(tb) {}
+            : ep(std::move(e)), http(std::move(h)), backoff(b), bucket(tb) {}
         ProviderEndpoint ep;
         std::unique_ptr<rpc::HttpRpcClient> http;
         rpc::Backoff backoff;
@@ -242,7 +250,7 @@ private:
         std::map<std::string, std::uint64_t> rpc_requests{
             {"eth_getLogs", 0}, {"eth_getBlockByNumber", 0}, {"eth_blockNumber", 0}, {"eth_chainId", 0}};
         std::map<std::string, std::uint64_t> ws_messages{{"heads", 0}, {"logs", 0}};
-        std::vector<boost::asio::steady_timer*> wait_timers;
+        std::vector<std::shared_ptr<boost::asio::steady_timer>> wait_timers;
         // The last Quota / Auth / Config failure, kept so health() can say why a provider is in Cooldown / Disabled.
         struct Fault {
             int http_status{0};

@@ -4,20 +4,11 @@
 
 namespace evml::chain {
 
-const char* to_string(GateSignal s) {
-    switch (s) {
-        case GateSignal::None: return "none";
-        case GateSignal::SafeRegression: return "safe_regression";
-        case GateSignal::SafeHashMismatch: return "safe_hash_mismatch";
-        case GateSignal::FinalizedAnomaly: return "finalized_anomaly";
-    }
-    return "unknown";
-}
-
 // Inspects safe block tag updates; detects safe regressions and block hash mismatches from the same provider.
-GateSignal FinalityGate::on_safe(const std::string& provider, std::uint64_t number, const core::Hash32& hash) {
+GateSignal FinalityGate::on_safe(std::string_view provider, std::uint64_t number, const core::Hash32& hash) {
+    const std::string prov(provider);
     GateSignal sig = GateSignal::None;
-    const auto it = safe_by_provider_.find(provider);
+    const auto it = safe_by_provider_.find(prov);
     if (it != safe_by_provider_.end()) {
         if (number < it->second.number) {
             // Safe block height regressed on same provider: potential L1 reorg or provider reorganization
@@ -35,16 +26,17 @@ GateSignal FinalityGate::on_safe(const std::string& provider, std::uint64_t numb
             }
         }
     }
-    safe_by_provider_[provider] = {number, hash};  // always track the provider's latest reality
+    safe_by_provider_[prov] = {number, hash};  // always track the provider's latest reality
     latest_safe_ = number;
     return sig;
 }
 
 // Inspects finalized block tag updates; ignores stale heights from load-balanced nodes and flags hash conflicts.
 // Watch out: Permanently freezes the gate on same-height hash mismatch (requires operator investigation).
-GateSignal FinalityGate::on_finalized(const std::string& provider, std::uint64_t number, const core::Hash32& hash) {
+GateSignal FinalityGate::on_finalized(std::string_view provider, std::uint64_t number, const core::Hash32& hash) {
+    const std::string prov(provider);
     GateSignal sig = GateSignal::None;
-    const auto it = finalized_by_provider_.find(provider);
+    const auto it = finalized_by_provider_.find(prov);
     if (it != finalized_by_provider_.end()) {
         if (number < it->second.number) {
             // Load-balanced RPC gateway routed poll to a lagging backend node; ignore stale height so G_f stays monotonic
@@ -53,27 +45,27 @@ GateSignal FinalityGate::on_finalized(const std::string& provider, std::uint64_t
         if (number == it->second.number && !(hash == it->second.hash)) {
             // Finalized block changed canonical hash: catastrophic violation of EVM finality
             sig = GateSignal::FinalizedAnomaly;
-            frozen_reason_ = provider + ": finalized block " + std::to_string(number) + " changed hash";
+            frozen_reason_ = prov + ": finalized block " + std::to_string(number) + " changed hash";
         }
     }
     if (sig == GateSignal::None) {
         for (const auto& [other, seen] : finalized_by_provider_) {
             if (other != provider && seen.number == number && !(seen.hash == hash)) {
                 sig = GateSignal::FinalizedAnomaly;
-                frozen_reason_ = provider + ": finalized block " + std::to_string(number) +
+                frozen_reason_ = prov + ": finalized block " + std::to_string(number) +
                                  " hash disagrees with " + other;
                 break;
             }
         }
     }
     if (sig == GateSignal::FinalizedAnomaly) frozen_ = true; // Invariant I5: freeze release permanently
-    finalized_by_provider_[provider] = {number, hash};
+    finalized_by_provider_[prov] = {number, hash};
     latest_finalized_ = number;
     return sig;
 }
 
 // Invariant I2 (Dual Finality): returns latest finalized tag clamped to safe tag (G_f <= G_s).
-std::optional<std::uint64_t> FinalityGate::finalized() const {
+std::optional<std::uint64_t> FinalityGate::finalized() const noexcept {
     if (!latest_finalized_) return std::nullopt;
     if (!latest_safe_) return latest_finalized_;
     return std::min(*latest_finalized_, *latest_safe_); // Clamp G_f to G_s

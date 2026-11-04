@@ -65,7 +65,7 @@ struct HeadEvent {
 };
 
 struct Runtime {
-    Runtime(const core::Config& cfg, const std::string& shard, std::size_t ring_size, std::size_t pending_max)
+    Runtime(const core::Config& cfg, std::string_view shard, std::size_t ring_size, std::size_t pending_max)
         : keys(shard), ring(ring_size), ws_reconciler(cfg, pending_max) {}
     sink::Keys keys;
     std::unique_ptr<sink::RedisSink> sink;
@@ -82,7 +82,7 @@ struct Runtime {
     std::optional<HeadEvent> deferred_head;
 };
 
-class Host {
+class Host : public std::enable_shared_from_this<Host> {
 public:
     Host(const core::Config& cfg, const HostOptions& opt)
         : cfg_(cfg),
@@ -101,11 +101,12 @@ public:
     int run();
 
 private:
-    enum class Phase : int { WaitingRedis, Standby, Leader };
+    enum class Phase : std::uint8_t { WaitingRedis, Standby, Leader };
 
     void start_runtime(const std::optional<sink::StartupReport>& rep, const sink::LeaseGrant& grant);
-    net::awaitable<void> pipeline_loop();
-    net::awaitable<void> walk_fork(std::uint64_t epoch, HeadEvent e);
+    static net::awaitable<void> pipeline_loop(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt);
+    static net::awaitable<void> walk_fork(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt, std::uint64_t epoch,
+                                          HeadEvent e);
     void acquire_thread_main(bool first);
 
     std::string state_name() const {
@@ -196,15 +197,15 @@ private:
         }
         if (rt_->ring.on_head(e.ref) != chain::HeadKind::NeedWalk) return;
         rt_->walking = true;
-        net::co_spawn(ioc_, walk_fork(head_epoch_, e), net::detached);
+        net::co_spawn(ioc_, walk_fork(shared_from_this(), rt_, head_epoch_, e), net::detached);
     }
-    void resync_ring(const chain::BlockRef& head, const std::string& why) {
+    void resync_ring(const chain::BlockRef& head, std::string_view why) {
         log::warn("host", "head ring resync", {{"why", why}, {"head", std::to_string(head.number)}});
         rt_->ring.reset();
-        rt_->ring.on_head(head);
+        (void)rt_->ring.on_head(head);
         if (rt_->source) rt_->source->clear_cache();
         rt_->ws_reconciler.on_ring_resync(head.number);
-        rt_->driver->on_safe_reorg_signal("head ring resync: " + why);
+        rt_->driver->on_safe_reorg_signal("head ring resync: " + std::string(why));
     }
     void on_tag(const std::string& provider, provider::Tag tag, std::uint64_t number, const core::Hash32& hash) {
         if (!rt_ || !rt_->driver || !rt_->pool) return;
@@ -281,7 +282,7 @@ private:
         else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Fenced)
             demote("sink fenced: another term holds the lease");
     }
-    void demote(const std::string& why) {
+    void demote(std::string_view why) {
         if (demoting_ || stopping_ || !rt_ || !rt_->driver) return;
         demoting_ = true;
         const auto st = rt_->sink->status();
@@ -306,14 +307,14 @@ private:
         if (opt_.on_event) opt_.on_event("demoted");
         launch_acquire(false);
     }
-    void request_exit(int code, const std::string& why) {
+    void request_exit(int code, std::string_view why) {
         if (exit_set_) return;
         exit_set_ = true;
         exit_code_ = code;
         if (code == kExitOk) log::info("host", "shutting down", {{"reason", why}});
         else log::error("host", "shutting down", {{"reason", why}, {"exit_code", std::to_string(code)}});
     }
-    void begin_shutdown(int code, const std::string& why) {
+    void begin_shutdown(int code, std::string_view why) {
         if (stopping_.exchange(true)) return;
         request_exit(code, why);
         if (rt_ && rt_->driver) {
@@ -365,7 +366,7 @@ private:
     bool finished_{false}, exit_set_{false};
     int exit_code_{0};
     pipeline::PipelineState last_state_{pipeline::PipelineState::Init};
-    std::unique_ptr<Runtime> rt_;  // declared last: destroyed first, before the io_context it posts to
+    std::shared_ptr<Runtime> rt_;  // declared last: destroyed first, before the io_context it posts to
 };
 
 int Host::run() {
@@ -468,7 +469,7 @@ void Host::acquire_thread_main(bool first) {
                     std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count());
             };
             ao.on_reachable = [this] { redis_wait_since_ns_.store(0); };
-            const auto g = sink::acquire_lease_blocking(conn, keys, ao);
+            auto g = sink::acquire_lease_blocking(conn, keys, ao);
             redis_wait_since_ns_.store(0);
             if (!g) return;
             grant = std::move(*g);
@@ -514,7 +515,7 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         }
 
         bump_head_epoch();
-        rt_ = std::make_unique<Runtime>(cfg_, cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
+        rt_ = std::make_shared<Runtime>(cfg_, cfg_.shard.id, cfg_.chain.hash_ring_size, cfg_.chain.pending_max_logs);
 
         auto sopts = sink::RedisSinkOptions::from_config(cfg_.sink, cfg_.lease, grant.token);
         sopts.loop_beat = wd_.sink_beat_slot();
@@ -573,48 +574,48 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         phase_ = Phase::Leader;
         log::info("host", "leadership term started", {{"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
         if (opt_.on_event) opt_.on_event("leader");
-        net::co_spawn(ioc_, pipeline_loop(), net::detached);
+        net::co_spawn(ioc_, pipeline_loop(shared_from_this(), rt_), net::detached);
     } catch (const std::exception& e) {
         begin_shutdown(kExitFailure, std::string("pipeline startup failed: ") + e.what());
     }
 }
 
-net::awaitable<void> Host::pipeline_loop() {
-    auto& driver = *rt_->driver;
+net::awaitable<void> Host::pipeline_loop(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt) {
     try {
         for (;;) {
-            const auto r = co_await driver.tick();
-            if (driver.status().state == pipeline::PipelineState::Live) {
-                rt_->ws_reconciler.on_live_tick(driver.status().c_s, rt_->pool && rt_->pool->active_ws().has_value());
+            const auto r = co_await rt->driver->tick();
+            if (rt->driver->status().state == pipeline::PipelineState::Live) {
+                rt->ws_reconciler.on_live_tick(rt->driver->status().c_s, rt->pool && rt->pool->active_ws().has_value());
             }
-            if (r.done || stopping_ || demoting_) break;
+            if (r.done || self->stopping_ || self->demoting_) break;
             if (r.wait.count() > 0) {
-                sleep_timer_.expires_after(r.wait);
+                self->sleep_timer_.expires_after(r.wait);
                 boost::system::error_code ec;
-                co_await sleep_timer_.async_wait(net::redirect_error(net::use_awaitable, ec));
+                co_await self->sleep_timer_.async_wait(net::redirect_error(net::use_awaitable, ec));
             }
         }
     } catch (const std::exception& e) {
-        request_exit(kExitFailure, std::string("pipeline tick threw: ") + e.what());
+        self->request_exit(kExitFailure, std::string("pipeline tick threw: ") + e.what());
     }
-    const auto st = driver.status();
-    if (st.state == pipeline::PipelineState::Failed) request_exit(kExitUsage, "pipeline failed: " + st.fatal);
-    if (demoting_ && !stopping_) {
-        net::post(ioc_, [this] { end_term(); });
+    const auto st = rt->driver->status();
+    if (st.state == pipeline::PipelineState::Failed) self->request_exit(kExitUsage, "pipeline failed: " + st.fatal);
+    if (self->demoting_ && !self->stopping_) {
+        net::post(self->ioc_, [self] { self->end_term(); });
         co_return;
     }
-    finish();
+    self->finish();
 }
 
-net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
-    const auto alive = [this, epoch] { return epoch == head_epoch_ && rt_ && rt_->driver; };
-    const auto pool = rt_->pool;
+net::awaitable<void> Host::walk_fork(std::shared_ptr<Host> self, std::shared_ptr<Runtime> rt, std::uint64_t epoch,
+                                     HeadEvent e) {
+    const auto alive = [self, epoch] { return epoch == self->head_epoch_ && self->rt_ && self->rt_->driver; };
+    const auto pool = rt->pool;
     try {
         rpc::Decoder dec;
         std::optional<chain::ReorgInfo> info;
         std::string why;
         for (int attempt = 0; attempt < kWalkAttempts && !info && why.empty(); ++attempt) {
-            auto walk = rt_->ring.begin_walk(e.ref);
+            auto walk = rt->ring.begin_walk(e.ref);
             std::size_t fetched = 0;
             while (walk.state() == chain::ForkWalk::State::NeedBlock) {
                 if (++fetched > kMaxWalkBlocks) {
@@ -630,7 +631,12 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                     why = "block " + std::to_string(n) + " from " + e.provider + " failed: " + o.error;
                     break;
                 }
-                const auto b = dec.parse_block(o.result_raw);
+                const auto b_res = dec.try_parse_block(o.result_raw);
+                if (!b_res) {
+                    why = "undecodable block " + std::to_string(n) + " from " + e.provider + ": " + b_res.error().what();
+                    break;
+                }
+                const auto& b = *b_res;
                 if (!b) {
                     why = e.provider + " has no block " + std::to_string(n);
                     break;
@@ -638,45 +644,45 @@ net::awaitable<void> Host::walk_fork(std::uint64_t epoch, HeadEvent e) {
                 walk.feed(chain::BlockRef{b->number, b->hash, b->parent_hash, b->timestamp});
             }
             if (!why.empty()) break;
-            if (walk.state() == chain::ForkWalk::State::Done) info = rt_->ring.apply(walk);
+            if (walk.state() == chain::ForkWalk::State::Done) info = rt->ring.apply(walk);
             else if (walk.state() == chain::ForkWalk::State::BeyondRing) why = "fork deeper than the head ring";
         }
         if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
 
-        rt_->walking = false;
+        rt->walking = false;
         if (info) {
-            const auto c_s = rt_->driver->status().c_s;
+            const auto c_s = rt->driver->status().c_s;
             log::info("host", "head chain resolved",
                       {{"fork_point", std::to_string(info->fork_point)}, {"depth", std::to_string(info->depth)},
                        {"old_top", std::to_string(info->old_top)}, {"c_s", std::to_string(c_s)}});
-            rt_->ws_reconciler.on_fork_resolved(*info, e.ref.number);
-            if (info->depth > 0 && rt_->source) rt_->source->clear_cache();
+            rt->ws_reconciler.on_fork_resolved(*info, e.ref.number);
+            if (info->depth > 0 && rt->source) rt->source->clear_cache();
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
                 log::warn("host", "head fork below C_s", {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
-                rt_->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " + std::to_string(c_s));
+                rt->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " + std::to_string(c_s));
             }
         } else {
-            resync_ring(e.ref, why);
+            self->resync_ring(e.ref, why);
         }
-        if (rt_->deferred_head) {
-            HeadEvent next = std::move(*rt_->deferred_head);
-            rt_->deferred_head.reset();
-            handle_head(next);
+        if (rt->deferred_head) {
+            HeadEvent next = std::move(*rt->deferred_head);
+            rt->deferred_head.reset();
+            self->handle_head(next);
         }
     } catch (const std::exception& ex) {
         if (!alive()) co_return;
-        rt_->walking = false;
-        rt_->deferred_head.reset();
+        rt->walking = false;
+        rt->deferred_head.reset();
         log::error("host", "head walk threw", {{"error", ex.what()}});
-        resync_ring(e.ref, std::string("head walk threw: ") + ex.what());
+        self->resync_ring(e.ref, std::string("head walk threw: ") + ex.what());
     }
 }
 
 }  // namespace
 
 int run_host(const core::Config& cfg, const HostOptions& opt) {
-    Host host(cfg, opt);
-    return host.run();
+    auto host = std::make_shared<Host>(cfg, opt);
+    return host->run();
 }
 
 int run_listener(const core::Config& cfg, std::optional<std::chrono::seconds> test_freeze_io_after) {

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "core/config.hpp"
 
@@ -19,11 +20,13 @@ struct StreamId {
 
     // Throws std::runtime_error on anything that is not "<digits>-<digits>" (never defaulted).
     /// @brief Parses stream ID string; throws std::runtime_error if format is invalid.
-    static StreamId parse(const std::string& s);
+    [[nodiscard]] static StreamId parse(std::string_view s);
 
-    friend bool operator==(const StreamId&, const StreamId&) = default;
-    friend bool operator<(const StreamId& a, const StreamId& b) { return a.ms != b.ms ? a.ms < b.ms : a.seq < b.seq; }
-    friend bool operator>(const StreamId& a, const StreamId& b) { return b < a; }
+    [[nodiscard]] friend constexpr bool operator==(const StreamId&, const StreamId&) noexcept = default;
+    [[nodiscard]] friend constexpr bool operator<(const StreamId& a, const StreamId& b) noexcept {
+        return a.ms != b.ms ? a.ms < b.ms : a.seq < b.seq;
+    }
+    [[nodiscard]] friend constexpr bool operator>(const StreamId& a, const StreamId& b) noexcept { return b < a; }
 };
 
 // What the probe read from Redis for one {stream, group}, before any judgement (so the judgement is a pure function).
@@ -59,6 +62,6 @@ struct ConsumerLag {
 };
 
 /// @brief Evaluates consumer group health, computing lag ages and detecting retention trims.
-ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const GroupFacts& facts);
+[[nodiscard]] ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const GroupFacts& facts);
 
 }  // namespace evml::sink

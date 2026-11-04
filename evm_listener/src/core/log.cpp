@@ -38,10 +38,11 @@ const char* level_name(spdlog::level::level_enum l) {
 }
 
 /// @brief Parses user-supplied log level string, failing fast on unknown strings.
-spdlog::level::level_enum parse_level(const std::string& s) {
-    const auto l = spdlog::level::from_str(s);
+spdlog::level::level_enum parse_level(std::string_view s) {
+    const std::string str(s);
+    const auto l = spdlog::level::from_str(str);
     // spdlog from_str maps unrecognized strings to 'off', which would silence all logs; reject explicitly
-    if (l == spdlog::level::off && s != "off") throw std::invalid_argument("unknown log level: " + s);
+    if (l == spdlog::level::off && s != "off") throw std::invalid_argument("unknown log level: " + str);
     return l;
 }
 
@@ -81,7 +82,7 @@ std::string json_escape(std::string_view s) {
 }
 
 /// @brief Configures a standalone logger with raw pattern matching single-line JSON format.
-std::shared_ptr<spdlog::logger> make_logger(std::shared_ptr<spdlog::sinks::sink> sink, const std::string& level) {
+std::shared_ptr<spdlog::logger> make_logger(std::shared_ptr<spdlog::sinks::sink> sink, std::string_view level) {
     auto logger = std::make_shared<spdlog::logger>("evml", std::move(sink));
     // Use %v (raw payload) pattern because emit() constructs self-contained JSON records
     logger->set_pattern("%v");
@@ -90,7 +91,7 @@ std::shared_ptr<spdlog::logger> make_logger(std::shared_ptr<spdlog::sinks::sink>
 }
 
 /// @brief Installs the process-wide stdout logger.
-void init(const std::string& level) {
+void init(std::string_view level) {
     g_logger = make_logger(std::make_shared<spdlog::sinks::stdout_sink_mt>(), level);
     // Ensure warnings and errors are immediately visible in stdout streams without buffering lag
     g_logger->flush_on(spdlog::level::warn);

@@ -23,20 +23,20 @@ public:
 
     // Delay before the next attempt; advances the attempt counter.
     /// @brief Generates jittered delay duration and increments consecutive attempt counter.
-    ms next();
+    ms next() noexcept;
 
     // Upper bound of the jitter window for the *next* call (for tests/metrics).
     /// @brief Computes upper bound window for current attempt count without advancing.
-    ms window() const;
+    [[nodiscard]] ms window() const noexcept;
 
     // Session ended after being Live for `live_for`: resets the counter iff live_for >= min_live.
     /// @brief Resets attempt counter to 0 if connection remained live for at least `min_live`.
-    void report_live(ms live_for);
+    void report_live(ms live_for) noexcept;
 
     /// @brief Manually resets consecutive attempt count to 0.
-    void reset() { attempt_ = 0; }
+    void reset() noexcept { attempt_ = 0; }
     /// @brief Current consecutive attempt count.
-    std::uint32_t attempt() const { return attempt_; }
+    [[nodiscard]] std::uint32_t attempt() const noexcept { return attempt_; }
 
 private:
     ms base_, cap_, min_live_;

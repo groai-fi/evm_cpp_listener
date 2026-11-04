@@ -21,7 +21,7 @@ Backoff::Backoff(std::uint64_t seed, ms base, ms cap, ms min_live)
 
 /// @brief Computes deterministic upper bound window for current attempt count: min(cap, base * 2^attempt).
 /// @return Upper bound duration in milliseconds.
-Backoff::ms Backoff::window() const {
+Backoff::ms Backoff::window() const noexcept {
     // Clamp shift exponent to 40 to prevent 64-bit signed integer overflow on large attempt counts
     const std::uint32_t shift = std::min<std::uint32_t>(attempt_, 40);
     const std::int64_t base = base_.count();
@@ -34,7 +34,7 @@ Backoff::ms Backoff::window() const {
 /// @brief Draws a full-jitter delay uniformly in [0, window()] and increments attempt counter.
 /// @return Full-jitter sleep delay in milliseconds.
 /// @note Full jitter distributes reconnection load across the interval, avoiding thundering herd.
-Backoff::ms Backoff::next() {
+Backoff::ms Backoff::next() noexcept {
     // Compute current backoff upper window
     const auto w = window();
     // Uniform integer distribution across [0, window] interval for full jitter
@@ -48,7 +48,7 @@ Backoff::ms Backoff::next() {
 /// @brief Resets attempt counter if the session stayed healthy for at least min_live.
 /// @param live_for Duration the connection stayed continuously active and healthy.
 /// @note Prevents rapid flap-reconnect cycles from resetting backoff escalation prematurely.
-void Backoff::report_live(ms live_for) {
+void Backoff::report_live(ms live_for) noexcept {
     // Only reset consecutive counter when connection proved sustained stability
     if (live_for >= min_live_) attempt_ = 0;
 }

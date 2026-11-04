@@ -93,9 +93,9 @@ void load_dotenv() {
 }
 
 /// @brief Looks up environment variable; returns default value if unset.
-std::string get(const std::string& key, const std::string& default_val) {
+std::string get(const std::string& key, std::string_view default_val) {
     const char* v = std::getenv(key.c_str());
-    return v ? std::string(v) : default_val;
+    return v ? std::string(v) : std::string(default_val);
 }
 
 /// @brief Looks up environment variable; throws ConfigError if missing or empty.

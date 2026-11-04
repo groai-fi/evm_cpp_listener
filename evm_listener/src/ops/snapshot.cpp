@@ -7,27 +7,29 @@ namespace evml::ops {
 
 namespace json = boost::json;
 
-AlertEvent provider_failover_event(const std::optional<std::string>& from, const std::string& to, std::string_view reason) {
+AlertEvent provider_failover_event(const std::optional<std::string>& from, std::string_view to, std::string_view reason) {
     AlertEvent e;
     e.kind = AlertEvent::Kind::ProviderFailover;
     const std::string verb = reason == "switch_back" ? "switched back" : "failed over";
-    e.message = "the WS provider " + verb + " from " + from.value_or("none") + " to " + to;
-    e.details = {{"from", from ? json::value(*from) : json::value(nullptr)}, {"to", to}, {"reason", std::string(reason)}};
+    e.message = "the WS provider " + verb + " from " + from.value_or("none") + " to " + std::string(to);
+    e.details = {{"from", from ? json::value(*from) : json::value(nullptr)},
+                 {"to", std::string(to)},
+                 {"reason", std::string(reason)}};
     return e;
 }
 
-AlertEvent leader_changed_event(const std::string& old_host, const std::string& new_host) {
+AlertEvent leader_changed_event(std::string_view old_host, std::string_view new_host) {
     AlertEvent e;
     e.kind = AlertEvent::Kind::LeaderChanged;
-    e.message = "leadership moved from " + old_host + " to " + new_host;
-    e.details = {{"old_host", old_host}, {"new_host", new_host}};
+    e.message = "leadership moved from " + std::string(old_host) + " to " + std::string(new_host);
+    e.details = {{"old_host", std::string(old_host)}, {"new_host", std::string(new_host)}};
     return e;
 }
 
-AlertEvent sink_fenced_event(const std::string& why, std::uint64_t discarded_records) {
+AlertEvent sink_fenced_event(std::string_view why, std::uint64_t discarded_records) {
     AlertEvent e;
     e.kind = AlertEvent::Kind::SinkFenced;
-    e.message = why;
+    e.message = std::string(why);
     e.details = {{"discarded_records", discarded_records}};
     return e;
 }
@@ -80,7 +82,7 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         f.found = !c.missing;
         f.undelivered_age_s = static_cast<double>(c.undelivered_age_s);
         f.pending_age_s = static_cast<double>(c.pending_age_s);
-        f.lag = c.lag ? static_cast<std::int64_t>(*c.lag) : -1;
+        f.lag = c.lag;
         f.retention_s = in.retention_s;
         f.trimmed_unread = c.trimmed_unread;
         f.last_delivered_id = c.last_delivered_id;

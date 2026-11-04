@@ -56,13 +56,14 @@ struct SnapshotInputs {
 
 /// @brief The Provider Failover event (plan 60 §5.3.3, details `from`, `to`, `reason`). `from` is null when no WS
 /// provider was active before; `reason` is the pool's reason name (e.g. "failover" or "switch_back").
-AlertEvent provider_failover_event(const std::optional<std::string>& from, const std::string& to, std::string_view reason);
+[[nodiscard]] AlertEvent provider_failover_event(const std::optional<std::string>& from, std::string_view to,
+                                                 std::string_view reason);
 
 /// @brief The Leader Changed event (plan 60 §5.3.3, details `old_host`, `new_host`): fired by the new leader on acquire.
-AlertEvent leader_changed_event(const std::string& old_host, const std::string& new_host);
+[[nodiscard]] AlertEvent leader_changed_event(std::string_view old_host, std::string_view new_host);
 
 /// @brief The Sink Fenced event (plan 60 §5.3.3): the sink was fenced by another term and discarded its queue and spill.
-AlertEvent sink_fenced_event(const std::string& why, std::uint64_t discarded_records);
+[[nodiscard]] AlertEvent sink_fenced_event(std::string_view why, std::uint64_t discarded_records);
 
 class SnapshotBuilder {
 public:

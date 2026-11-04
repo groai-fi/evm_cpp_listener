@@ -18,12 +18,12 @@ void validate_event_signature(std::string_view sig);
 /// @brief Computes standard 256-bit Keccak (SHA-3 family) hash of byte sequence.
 /// @param data Input byte buffer to hash.
 /// @return 32-byte digest as Hash32.
-Hash32 keccak256(std::string_view data);
+[[nodiscard]] Hash32 keccak256(std::string_view data);
 
 /// @brief Computes EVM topic0 hash from a canonical event signature string.
 /// @param canonical_signature Canonical event signature (e.g., "Swap(address,uint256,uint256)").
 /// @return 32-byte event topic0 hash.
 /// @warning Throws ConfigError if signature fails validation.
-Hash32 topic0(std::string_view canonical_signature);
+[[nodiscard]] Hash32 topic0(std::string_view canonical_signature);
 
 }  // namespace evml::core

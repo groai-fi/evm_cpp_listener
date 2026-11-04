@@ -31,7 +31,7 @@ public:
 
     // The SHA1 SCRIPT LOAD returned for `s`.
     /// @brief Returns cached SHA1 hash string for given script enum.
-    const std::string& sha(Script s) const { return shas_[static_cast<std::size_t>(s)]; }
+    [[nodiscard]] const std::string& sha(Script s) const noexcept { return shas_[static_cast<std::size_t>(s)]; }
 
 private:
     void load_all();

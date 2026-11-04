@@ -120,6 +120,71 @@ bool code_at(const Config& cfg, const Address20& addr, const std::string& block,
     throw std::runtime_error("eth_getCode " + addr.to_hex() + " @" + block + " failed on every provider:" + failures);
 }
 
+struct ProbeState {
+    boost::asio::io_context ioc;
+    Config cfg;
+    unsigned seconds{0};
+    std::shared_ptr<provider::ProviderPool> pool;
+    std::size_t heads{0}, logs{0};
+    std::uint64_t last_head{0};
+    std::string head_from;
+    bool ok{false};
+
+    ProbeState(Config c, unsigned s) : cfg(std::move(c)), seconds(s) {}
+};
+
+boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
+    namespace net = boost::asio;
+    net::steady_timer t(st->ioc);
+    t.expires_after(std::chrono::seconds(st->seconds));
+    co_await t.async_wait(net::use_awaitable);
+
+    std::cout << "streamed: " << st->heads << " heads (last " << st->last_head << " via " << st->head_from
+              << "), " << st->logs << " logs\n";
+    bool good = st->heads > 0;
+    // Verify historical getLogs query across the 2 blocks preceding the latest streamed head.
+    if (st->last_head >= 2) {
+        const auto from = st->last_head - 2, to = st->last_head;
+        const auto filter = st->cfg.filter();
+        const auto o = co_await st->pool->call(
+            [&filter, from, to](std::uint64_t id) { return rpc::build_get_logs(id, from, to, filter); });
+        if (o.ok) {
+            rpc::Decoder dec;
+            const auto parsed = dec.try_parse_logs(o.result_raw);
+            if (parsed) {
+                std::cout << "getLogs:   ok via " << o.provider << ", blocks " << from << ".." << to << ": "
+                          << parsed->size() << " logs\n";
+            } else {
+                std::cout << "getLogs:   decode FAILED via " << o.provider << ": " << parsed.error().what() << "\n";
+                good = false;
+            }
+        } else {
+            std::cout << "getLogs:   FAILED (" << rpc::to_string(o.kind) << ") via " << o.provider << ": "
+                      << o.error << "\n";
+            good = false;
+        }
+        // Verify that both safe and finalized block tags can be resolved.
+        for (const auto tag : {provider::Tag::Safe, provider::Tag::Finalized}) {
+            const auto who = st->pool->current_getlogs();
+            std::optional<provider::TagSnapshot> s;
+            if (who) s = co_await st->pool->read_tag(*who, tag);
+            std::cout << (tag == provider::Tag::Safe ? "safe:      " : "finalized: ");
+            if (s) {
+                std::cout << s->number << " via " << s->provider << "\n";
+            } else {
+                std::cout << "FAILED\n";
+                good = false;
+            }
+        }
+    } else {
+        std::cout << "getLogs:   skipped (no head received)\n";
+    }
+    st->ok = good;
+    // Tear down pool resources and shut down Boost.Asio event loop.
+    st->pool->stop();
+    st->ioc.stop();
+}
+
 }  // namespace
 
 /// @brief Prints human-readable configuration summary with all secrets and endpoint tokens redacted.
@@ -245,21 +310,16 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     namespace net = boost::asio;
     core::log::init("info");
 
-    struct Stats {
-        std::size_t heads{0}, logs{0};
-        std::uint64_t last_head{0};
-        std::string head_from;
-        bool ok{false};
-    } st;
+    auto st = std::make_shared<ProbeState>(cfg, seconds);
 
     provider::PoolHandlers h;
     // Track streamed block heads and logging provider identity.
-    h.on_head = [&st](const rpc::Head& x, const std::string& p) {
-        ++st.heads;
-        st.last_head = x.number;
-        st.head_from = p;
+    h.on_head = [st](const rpc::Head& x, const std::string& p) {
+        ++st->heads;
+        st->last_head = x.number;
+        st->head_from = p;
     };
-    h.on_log = [&st](const rpc::Log&, const std::string&) { ++st.logs; };
+    h.on_log = [st](const rpc::Log&, const std::string&) { ++st->logs; };
     h.on_ws_active_changed = [](const std::optional<std::string>&, const std::optional<std::string>& p,
                                 std::string_view why) {
         std::cout << "ws active: " << (p ? *p : std::string("none")) << " (" << why << ")\n";
@@ -272,60 +332,13 @@ int probe_transport(const Config& cfg, unsigned seconds) {
                   << provider::to_string(t.to) << " (" << why << ")\n";
     };
 
-    net::io_context ioc;
-    auto pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
-    pool->start();
+    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
+    st->pool->start();
 
     // Spawn coroutine to stream heads for `seconds` and issue post-stream verification queries.
-    net::co_spawn(
-        ioc,
-        [&]() -> net::awaitable<void> {
-            net::steady_timer t(ioc);
-            t.expires_after(std::chrono::seconds(seconds));
-            co_await t.async_wait(net::use_awaitable);
-
-            std::cout << "streamed: " << st.heads << " heads (last " << st.last_head << " via " << st.head_from
-                      << "), " << st.logs << " logs\n";
-            bool good = st.heads > 0;
-            // Verify historical getLogs query across the 2 blocks preceding the latest streamed head.
-            if (st.last_head >= 2) {
-                const auto from = st.last_head - 2, to = st.last_head;
-                const auto filter = cfg.filter();
-                const auto o = co_await pool->call(
-                    [&](std::uint64_t id) { return rpc::build_get_logs(id, from, to, filter); });
-                if (o.ok) {
-                    rpc::Decoder dec;
-                    std::cout << "getLogs:   ok via " << o.provider << ", blocks " << from << ".." << to << ": "
-                              << dec.parse_logs(o.result_raw).size() << " logs\n";
-                } else {
-                    std::cout << "getLogs:   FAILED (" << rpc::to_string(o.kind) << ") via " << o.provider << ": "
-                              << o.error << "\n";
-                    good = false;
-                }
-                // Verify that both safe and finalized block tags can be resolved.
-                for (const auto tag : {provider::Tag::Safe, provider::Tag::Finalized}) {
-                    const auto who = pool->current_getlogs();
-                    std::optional<provider::TagSnapshot> s;
-                    if (who) s = co_await pool->read_tag(*who, tag);
-                    std::cout << (tag == provider::Tag::Safe ? "safe:      " : "finalized: ");
-                    if (s) {
-                        std::cout << s->number << " via " << s->provider << "\n";
-                    } else {
-                        std::cout << "FAILED\n";
-                        good = false;
-                    }
-                }
-            } else {
-                std::cout << "getLogs:   skipped (no head received)\n";
-            }
-            st.ok = good;
-            // Tear down pool resources and shut down Boost.Asio event loop.
-            pool->stop();
-            ioc.stop();
-        },
-        net::detached);
-    ioc.run();
-    return st.ok ? kExitOk : kExitFailure;
+    net::co_spawn(st->ioc, run_probe_coro(st), net::detached);
+    st->ioc.run();
+    return st->ok ? kExitOk : kExitFailure;
 }
 
 int check_redis(const Config& cfg) {
@@ -405,6 +418,236 @@ Config single_contract_config(const Config& base, const core::ContractCfg& targe
 std::uint64_t wall_now_ms() {
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+struct BackfillState {
+    boost::asio::io_context ioc;
+    Config cfg;
+    core::ContractCfg target;
+    sink::RedisSink& sink;
+    std::shared_ptr<provider::ProviderPool> pool;
+    std::unique_ptr<PoolLogSource> source;
+    pipeline::SweeperOptions sw_opt;
+    pipeline::EventContext ectx;
+    int rc{kExitOk};
+    std::optional<std::vector<std::string>> ck_contracts;
+
+    BackfillState(Config c, core::ContractCfg t, sink::RedisSink& s, pipeline::SweeperOptions sw,
+                  pipeline::EventContext ec)
+        : cfg(std::move(c)), target(std::move(t)), sink(s), sw_opt(std::move(sw)), ectx(std::move(ec)) {}
+};
+
+boost::asio::awaitable<bool> drive_backfill_sweeper(std::shared_ptr<BackfillState> st,
+                                                    std::shared_ptr<pipeline::Sweeper> sw, std::uint64_t ceiling,
+                                                    core::Finality kind) {
+    namespace net = boost::asio;
+    rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
+    std::uint32_t retries = 0;
+    for (;;) {
+        if (st->sink.mode() == sink::SinkMode::Fenced || st->sink.mode() == sink::SinkMode::Failed) {
+            std::cerr << "FAIL  sink entered " << sink::to_string(st->sink.mode()) << " during backfill\n";
+            co_return false;
+        }
+        const pipeline::StepResult r = co_await sw->backfill_step(ceiling, kind);
+        if (r.status == pipeline::StepStatus::NoWork) co_return true;
+        if (r.status == pipeline::StepStatus::Advanced) {
+            backoff.reset();
+            retries = 0;
+            continue;
+        }
+        if (r.status == pipeline::StepStatus::Stalled) {
+            std::cerr << "FAIL  backfill stalled: " << r.detail << "\n";
+            co_return false;
+        }
+        if (r.status == pipeline::StepStatus::Retry && ++retries > 10) {
+            std::cerr << "FAIL  backfill exceeded retry limit: " << r.detail << "\n";
+            co_return false;
+        }
+        net::steady_timer timer(st->ioc);
+        timer.expires_after(r.status == pipeline::StepStatus::Paused ? std::chrono::milliseconds(100)
+                                                                     : backoff.next());
+        co_await timer.async_wait(net::use_awaitable);
+    }
+}
+
+boost::asio::awaitable<void> run_backfill_coro(std::shared_ptr<BackfillState> st) {
+    const auto ck = co_await st->sink.load_checkpoint();
+    if (!ck || !ck->safe || !ck->finalized || !ck->contracts || *ck->finalized > *ck->safe) {
+        std::cerr << "FAIL  checkpoint is missing or incomplete in Redis\n";
+        st->rc = kExitFailure;
+        st->pool->stop();
+        st->ioc.stop();
+        co_return;
+    }
+    st->ck_contracts = ck->contracts;
+    const std::uint64_t c_f = *ck->finalized;
+    const std::uint64_t c_s = *ck->safe;
+
+    if (st->target.start_block && *st->target.start_block <= c_s) {
+        const std::uint64_t start = *st->target.start_block;
+        const std::uint64_t start_cursor = start > 0 ? start - 1 : 0;
+        if (start <= c_f) {
+            const auto final_cfg = single_contract_config(st->cfg, st->target, core::Finality::Finalized);
+            auto sw = std::make_shared<pipeline::Sweeper>(final_cfg, st->ectx, *st->source, st->sink, wall_now_ms,
+                                                          st->sw_opt);
+            sw->set_cursors(start_cursor, start_cursor);
+            if (!(co_await drive_backfill_sweeper(st, sw, c_f, core::Finality::Finalized))) {
+                st->rc = kExitFailure;
+                st->pool->stop();
+                st->ioc.stop();
+                co_return;
+            }
+        }
+        if (st->target.finality == core::Finality::Safe && c_s > c_f) {
+            const std::uint64_t safe_cursor = std::max<std::uint64_t>(start_cursor, c_f);
+            if (safe_cursor < c_s) {
+                const auto safe_cfg = single_contract_config(st->cfg, st->target, core::Finality::Safe);
+                auto sw = std::make_shared<pipeline::Sweeper>(safe_cfg, st->ectx, *st->source, st->sink, wall_now_ms,
+                                                              st->sw_opt);
+                sw->set_cursors(safe_cursor, std::min(safe_cursor, c_f));
+                if (!(co_await drive_backfill_sweeper(st, sw, c_s, core::Finality::Safe))) {
+                    st->rc = kExitFailure;
+                    st->pool->stop();
+                    st->ioc.stop();
+                    co_return;
+                }
+            }
+        }
+    }
+    st->pool->stop();
+    st->ioc.stop();
+}
+
+struct AuditFetchState {
+    boost::asio::io_context ioc;
+    Config cfg;
+    std::uint64_t from_block{0};
+    std::uint64_t to_block{0};
+    core::LogFilter filter;
+    std::shared_ptr<provider::ProviderPool> pool;
+    std::unique_ptr<PoolLogSource> source;
+    std::unordered_map<std::string, pipeline::AimdPager> pagers;
+    std::vector<rpc::Log> canonical_logs;
+    std::string audit_provider;
+    bool fetch_ok{true};
+    std::string fetch_err;
+
+    AuditFetchState(Config c, std::uint64_t from_b, std::uint64_t to_b, core::LogFilter f)
+        : cfg(std::move(c)), from_block(from_b), to_block(to_b), filter(std::move(f)) {}
+
+    pipeline::AimdPager& pager_for(const std::string& provider) {
+        const auto it = pagers.find(provider);
+        if (it != pagers.end()) return it->second;
+        for (const auto& p : cfg.getlogs_chain) {
+            if (p.name == provider) {
+                return pagers.emplace(provider, pipeline::AimdPager(p.max_getlogs_range, cfg.backfill.min_range))
+                    .first->second;
+            }
+        }
+        return pagers.emplace(provider, pipeline::AimdPager(500, cfg.backfill.min_range)).first->second;
+    }
+};
+
+boost::asio::awaitable<void> run_audit_coro(std::shared_ptr<AuditFetchState> st) {
+    namespace net = boost::asio;
+    if (st->filter.addresses.empty()) {
+        st->pool->stop();
+        st->ioc.stop();
+        co_return;
+    }
+
+    rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
+    std::uint64_t next_from = st->from_block;
+    while (next_from <= st->to_block) {
+        bool page_done = false;
+        for (std::uint32_t attempt = 1; attempt <= 10 && !page_done; ++attempt) {
+            const auto first = st->source->current_provider();
+            if (!first) {
+                st->fetch_err = "no usable getLogs provider";
+                break;
+            }
+            auto* pg = &st->pager_for(*first);
+            for (;;) {
+                const std::uint64_t span_max = pg->range();
+                const std::uint64_t page_to =
+                    next_from + std::min<std::uint64_t>(span_max - 1, st->to_block - next_from);
+                const pipeline::BlockRange r{next_from, page_to};
+
+                const pipeline::LogResult res = co_await st->source->get_logs(r, st->filter);
+                if (res.ok) {
+                    if (const auto bad = pipeline::validate_logs(res.logs, r.from, r.to, st->cfg, std::nullopt)) {
+                        st->source->report_bad(res.provider, *bad);
+                        st->fetch_err = res.provider + ": " + *bad;
+                        break;
+                    }
+                    pg->on_success();
+                    if (st->audit_provider.empty()) st->audit_provider = res.provider;
+                    st->canonical_logs.insert(st->canonical_logs.end(), res.logs.begin(), res.logs.end());
+                    next_from = r.to + 1;
+                    page_done = true;
+                    backoff.reset();
+                    break;
+                }
+
+                if (res.kind != rpc::FailKind::RangeTooLarge) {
+                    auto& failed = st->pager_for(res.provider);
+                    const std::uint64_t span = r.to - r.from + 1;
+                    if ((res.kind == rpc::FailKind::Retry || res.kind == rpc::FailKind::RateLimited) &&
+                        span > failed.min()) {
+                        (void)failed.on_range_too_large(std::nullopt);
+                    }
+                    st->fetch_err = "getLogs failed on " + res.provider + ": " + res.error;
+                    break;
+                }
+
+                pg = &st->pager_for(res.provider);
+                if (pg->on_range_too_large(res.range_limit) == pipeline::AimdPager::Shrink::Shrunk) continue;
+
+                // At minimum range and still too large: split by address.
+                std::vector<rpc::Log> merged;
+                std::string last_provider = res.provider;
+                bool split_ok = true;
+                for (const auto& addr : st->filter.addresses) {
+                    core::LogFilter one{std::vector<core::Address20>{addr}, st->filter.topic0s};
+                    const pipeline::LogResult r2 = co_await st->source->get_logs(r, one);
+                    if (!r2.ok) {
+                        st->fetch_err = "getLogs split failed on " + r2.provider + ": " + r2.error;
+                        split_ok = false;
+                        break;
+                    }
+                    if (const auto bad = pipeline::validate_logs(r2.logs, r.from, r.to, st->cfg, std::nullopt)) {
+                        st->source->report_bad(r2.provider, *bad);
+                        st->fetch_err = r2.provider + ": " + *bad;
+                        split_ok = false;
+                        break;
+                    }
+                    last_provider = r2.provider;
+                    merged.insert(merged.end(), r2.logs.begin(), r2.logs.end());
+                }
+                if (!split_ok) break;
+                std::sort(merged.begin(), merged.end(), [](const rpc::Log& a, const rpc::Log& b) {
+                    return std::tie(a.block_number, a.log_index) < std::tie(b.block_number, b.log_index);
+                });
+                if (st->audit_provider.empty()) st->audit_provider = last_provider;
+                st->canonical_logs.insert(st->canonical_logs.end(), merged.begin(), merged.end());
+                next_from = r.to + 1;
+                page_done = true;
+                backoff.reset();
+                break;
+            }
+            if (!page_done && attempt < 10) {
+                net::steady_timer timer(st->ioc);
+                timer.expires_after(backoff.next());
+                co_await timer.async_wait(net::use_awaitable);
+            }
+        }
+        if (!page_done) {
+            st->fetch_ok = false;
+            break;
+        }
+    }
+    st->pool->stop();
+    st->ioc.stop();
 }
 
 }  // namespace
@@ -493,112 +736,32 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
                                                              "evml:" + cfg.shard.host_id + ":lease"));
     sink.start();
 
-    net::io_context ioc;
-    auto pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
-    pool->start_http_only();
-    PoolLogSource source(pool, nullptr);
-
     pipeline::SweeperOptions sw_opt;
     sw_opt.min_range = cfg.backfill.min_range;
     sw_opt.max_page_logs = std::max<std::size_t>(1, cfg.sink.queue_capacity / 2);
     const pipeline::EventContext ectx{cfg.shard.id, cfg.shard.host_id, core::version_string()};
 
-    int rc = kExitOk;
-    std::optional<std::vector<std::string>> ck_contracts;
+    auto st = std::make_shared<BackfillState>(cfg, *target, sink, sw_opt, ectx);
+    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), pool_cfg, {});
+    st->pool->start_http_only();
+    st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
-    net::co_spawn(
-        ioc,
-        [&]() -> net::awaitable<void> {
-            const auto ck = co_await sink.load_checkpoint();
-            if (!ck || !ck->safe || !ck->finalized || !ck->contracts || *ck->finalized > *ck->safe) {
-                std::cerr << "FAIL  checkpoint is missing or incomplete in Redis\n";
-                rc = kExitFailure;
-                pool->stop();
-                ioc.stop();
-                co_return;
-            }
-            ck_contracts = ck->contracts;
-            const std::uint64_t c_f = *ck->finalized;
-            const std::uint64_t c_s = *ck->safe;
+    net::co_spawn(st->ioc, run_backfill_coro(st), net::detached);
+    st->ioc.run();
 
-            const auto drive = [&](auto step_fn) -> net::awaitable<bool> {
-                rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
-                std::uint32_t retries = 0;
-                for (;;) {
-                    if (sink.mode() == sink::SinkMode::Fenced || sink.mode() == sink::SinkMode::Failed) {
-                        std::cerr << "FAIL  sink entered " << sink::to_string(sink.mode()) << " during backfill\n";
-                        co_return false;
-                    }
-                    const pipeline::StepResult r = co_await step_fn();
-                    if (r.status == pipeline::StepStatus::NoWork) co_return true;
-                    if (r.status == pipeline::StepStatus::Advanced) {
-                        backoff.reset();
-                        retries = 0;
-                        continue;
-                    }
-                    if (r.status == pipeline::StepStatus::Stalled) {
-                        std::cerr << "FAIL  backfill stalled: " << r.detail << "\n";
-                        co_return false;
-                    }
-                    if (r.status == pipeline::StepStatus::Retry && ++retries > 10) {
-                        std::cerr << "FAIL  backfill exceeded retry limit: " << r.detail << "\n";
-                        co_return false;
-                    }
-                    net::steady_timer timer(ioc);
-                    timer.expires_after(r.status == pipeline::StepStatus::Paused ? std::chrono::milliseconds(100)
-                                                                                 : backoff.next());
-                    co_await timer.async_wait(net::use_awaitable);
-                }
-            };
-
-            if (target->start_block && *target->start_block <= c_s) {
-                const std::uint64_t start = *target->start_block;
-                const std::uint64_t start_cursor = start > 0 ? start - 1 : 0;
-                if (start <= c_f) {
-                    const auto final_cfg = single_contract_config(cfg, *target, core::Finality::Finalized);
-                    pipeline::Sweeper sw(final_cfg, ectx, source, sink, wall_now_ms, sw_opt);
-                    sw.set_cursors(start_cursor, start_cursor);
-                    if (!(co_await drive([&] { return sw.backfill_step(c_f, core::Finality::Finalized); }))) {
-                        rc = kExitFailure;
-                        pool->stop();
-                        ioc.stop();
-                        co_return;
-                    }
-                }
-                if (target->finality == core::Finality::Safe && c_s > c_f) {
-                    const std::uint64_t safe_cursor = std::max<std::uint64_t>(start_cursor, c_f);
-                    if (safe_cursor < c_s) {
-                        const auto safe_cfg = single_contract_config(cfg, *target, core::Finality::Safe);
-                        pipeline::Sweeper sw(safe_cfg, ectx, source, sink, wall_now_ms, sw_opt);
-                        sw.set_cursors(safe_cursor, std::min(safe_cursor, c_f));
-                        if (!(co_await drive([&] { return sw.backfill_step(c_s, core::Finality::Safe); }))) {
-                            rc = kExitFailure;
-                            pool->stop();
-                            ioc.stop();
-                            co_return;
-                        }
-                    }
-                }
-            }
-            pool->stop();
-            ioc.stop();
-        },
-        net::detached);
-    ioc.run();
-
-    if (rc != kExitOk || !ck_contracts) {
-        sink.drain(std::chrono::seconds(5));
+    if (st->rc != kExitOk || !st->ck_contracts) {
+        (void)sink.drain(std::chrono::seconds(5));
         return kExitFailure;
     }
 
     // Update the manifest only after the last page is acknowledged (§5.6a).
     if (!sink.wait_idle(std::chrono::seconds(30)) || sink.mode() != sink::SinkMode::Connected) {
         std::cerr << "FAIL  sink did not acknowledge backfill emissions\n";
-        sink.drain(std::chrono::seconds(5));
+        (void)sink.drain(std::chrono::seconds(5));
         return kExitFailure;
     }
 
-    std::vector<std::string> updated = *ck_contracts;
+    std::vector<std::string> updated = *st->ck_contracts;
     const std::string prefix = target->address.to_hex() + ":";
     updated.erase(
         std::remove_if(updated.begin(), updated.end(), [&](const std::string& e) { return e.rfind(prefix, 0) == 0; }),
@@ -776,140 +939,22 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
         }
     }
 
-    net::io_context ioc;
-    auto pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
-    pool->start_http_only();
-    PoolLogSource source(pool, nullptr);
+    auto st = std::make_shared<AuditFetchState>(cfg, from_block, to_block, cfg.filter());
+    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), pool_cfg, {});
+    st->pool->start_http_only();
+    st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
-    std::unordered_map<std::string, pipeline::AimdPager> pagers;
-    const auto pager_for = [&](const std::string& provider) -> pipeline::AimdPager& {
-        const auto it = pagers.find(provider);
-        if (it != pagers.end()) return it->second;
-        for (const auto& p : cfg.getlogs_chain) {
-            if (p.name == provider) {
-                return pagers.emplace(provider, pipeline::AimdPager(p.max_getlogs_range, cfg.backfill.min_range))
-                    .first->second;
-            }
-        }
-        return pagers.emplace(provider, pipeline::AimdPager(500, cfg.backfill.min_range)).first->second;
-    };
+    net::co_spawn(st->ioc, run_audit_coro(st), net::detached);
+    st->ioc.run();
 
-    const core::LogFilter filter = cfg.filter();
-    std::vector<rpc::Log> canonical_logs;
-    bool fetch_ok = true;
-    std::string fetch_err;
-
-    net::co_spawn(
-        ioc,
-        [&]() -> net::awaitable<void> {
-            if (filter.addresses.empty()) {
-                pool->stop();
-                ioc.stop();
-                co_return;
-            }
-
-            rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
-            std::uint64_t next_from = from_block;
-            while (next_from <= to_block) {
-                bool page_done = false;
-                for (std::uint32_t attempt = 1; attempt <= 10 && !page_done; ++attempt) {
-                    const auto first = source.current_provider();
-                    if (!first) {
-                        fetch_err = "no usable getLogs provider";
-                        break;
-                    }
-                    auto* pg = &pager_for(*first);
-                    for (;;) {
-                        const std::uint64_t span_max = pg->range();
-                        const std::uint64_t page_to =
-                            next_from + std::min<std::uint64_t>(span_max - 1, to_block - next_from);
-                        const pipeline::BlockRange r{next_from, page_to};
-
-                        const pipeline::LogResult res = co_await source.get_logs(r, filter);
-                        if (res.ok) {
-                            if (const auto bad = pipeline::validate_logs(res.logs, r.from, r.to, cfg, std::nullopt)) {
-                                source.report_bad(res.provider, *bad);
-                                fetch_err = res.provider + ": " + *bad;
-                                break;
-                            }
-                            pg->on_success();
-                            if (report.audit_provider.empty()) report.audit_provider = res.provider;
-                            canonical_logs.insert(canonical_logs.end(), res.logs.begin(), res.logs.end());
-                            next_from = r.to + 1;
-                            page_done = true;
-                            backoff.reset();
-                            break;
-                        }
-
-                        if (res.kind != rpc::FailKind::RangeTooLarge) {
-                            auto& failed = pager_for(res.provider);
-                            const std::uint64_t span = r.to - r.from + 1;
-                            if ((res.kind == rpc::FailKind::Retry || res.kind == rpc::FailKind::RateLimited) &&
-                                span > failed.min()) {
-                                failed.on_range_too_large(std::nullopt);
-                            }
-                            fetch_err = "getLogs failed on " + res.provider + ": " + res.error;
-                            break;
-                        }
-
-                        pg = &pager_for(res.provider);
-                        if (pg->on_range_too_large(res.range_limit) == pipeline::AimdPager::Shrink::Shrunk) continue;
-
-                        // At minimum range and still too large: split by address.
-                        std::vector<rpc::Log> merged;
-                        std::string last_provider = res.provider;
-                        bool split_ok = true;
-                        for (const auto& addr : filter.addresses) {
-                            core::LogFilter one{std::vector<core::Address20>{addr}, filter.topic0s};
-                            const pipeline::LogResult r2 = co_await source.get_logs(r, one);
-                            if (!r2.ok) {
-                                fetch_err = "getLogs split failed on " + r2.provider + ": " + r2.error;
-                                split_ok = false;
-                                break;
-                            }
-                            if (const auto bad = pipeline::validate_logs(r2.logs, r.from, r.to, cfg, std::nullopt)) {
-                                source.report_bad(r2.provider, *bad);
-                                fetch_err = r2.provider + ": " + *bad;
-                                split_ok = false;
-                                break;
-                            }
-                            last_provider = r2.provider;
-                            merged.insert(merged.end(), r2.logs.begin(), r2.logs.end());
-                        }
-                        if (!split_ok) break;
-                        std::sort(merged.begin(), merged.end(), [](const rpc::Log& a, const rpc::Log& b) {
-                            return std::tie(a.block_number, a.log_index) < std::tie(b.block_number, b.log_index);
-                        });
-                        if (report.audit_provider.empty()) report.audit_provider = last_provider;
-                        canonical_logs.insert(canonical_logs.end(), merged.begin(), merged.end());
-                        next_from = r.to + 1;
-                        page_done = true;
-                        backoff.reset();
-                        break;
-                    }
-                    if (!page_done && attempt < 10) {
-                        net::steady_timer timer(ioc);
-                        timer.expires_after(backoff.next());
-                        co_await timer.async_wait(net::use_awaitable);
-                    }
-                }
-                if (!page_done) {
-                    fetch_ok = false;
-                    break;
-                }
-            }
-            pool->stop();
-            ioc.stop();
-        },
-        net::detached);
-    ioc.run();
-
-    if (!fetch_ok) {
-        std::cerr << "FAIL  audit-stream canonical fetch failed: " << fetch_err << "\n";
+    report.audit_provider = st->audit_provider;
+    if (!st->fetch_ok) {
+        std::cerr << "FAIL  audit-stream canonical fetch failed: " << st->fetch_err << "\n";
         return finish(kExitFailure);
     }
 
-    report.canonical_logs = canonical_logs.size();
+    report.canonical_logs = st->canonical_logs.size();
+    const auto& canonical_logs = st->canonical_logs;
     std::unordered_set<std::string> canonical_ids;
     std::vector<std::string> missing_samples;
     std::vector<std::string> phantom_samples;

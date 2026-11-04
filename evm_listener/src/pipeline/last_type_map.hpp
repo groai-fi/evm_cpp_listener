@@ -5,6 +5,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "pipeline/event.hpp"
@@ -25,16 +26,17 @@ public:
     // Evaluates whether an event emission should proceed based on its type relative to the prior emission.
     // Returns true to admit emission; returns false if identical to the previous type (duplicate suppression).
     // Watch out: Transitions between log and revert are admitted to allow reorg retractions and re-releases (Invariant I6).
-    bool admit(const std::string& event_id, EventType type) {
-        const auto it = index_.find(event_id);
+    bool admit(std::string_view event_id, EventType type) {
+        std::string key(event_id);
+        const auto it = index_.find(key);
         if (it != index_.end()) {
             order_.splice(order_.begin(), order_, it->second); // Move to head of LRU list
             if (it->second->second == type) return false;      // Duplicate detected: same type
             it->second->second = type;                         // State transition (e.g. Log -> Revert)
             return true;
         }
-        order_.emplace_front(event_id, type);
-        index_.emplace(event_id, order_.begin());
+        order_.emplace_front( key, type);
+        index_.emplace(std::move(key), order_.begin());
         // Evict oldest entry if capacity limit reached
         if (order_.size() > capacity_) {
             index_.erase(order_.back().first);
@@ -43,12 +45,12 @@ public:
         return true;
     }
 
-    std::optional<EventType> last(const std::string& event_id) const {
-        const auto it = index_.find(event_id);
+    [[nodiscard]] std::optional<EventType> last(std::string_view event_id) const {
+        const auto it = index_.find(std::string(event_id));
         if (it == index_.end()) return std::nullopt;
         return it->second->second;
     }
-    std::size_t size() const { return order_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept { return order_.size(); }
 
 private:
     using Entry = std::pair<std::string, EventType>;

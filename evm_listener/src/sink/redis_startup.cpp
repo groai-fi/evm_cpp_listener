@@ -7,6 +7,7 @@
 #include <cctype>
 #include <charconv>
 #include <iterator>
+#include <memory>
 #include <random>
 #include <set>
 #include <thread>
@@ -204,11 +205,10 @@ std::string address_family(const std::string& host, int port) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) return "unresolved";
-    const std::string family = res->ai_family == AF_INET6 ? "ipv6" : res->ai_family == AF_INET ? "ipv4" : "other";
-    freeaddrinfo(res);
-    return family;
+    addrinfo* raw_res = nullptr;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &raw_res) != 0 || !raw_res) return "unresolved";
+    const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> res(raw_res, &::freeaddrinfo);
+    return res->ai_family == AF_INET6 ? "ipv6" : res->ai_family == AF_INET ? "ipv4" : "other";
 }
 
 bool is_auth_error(const std::string& msg) {
@@ -455,14 +455,14 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
 }
 
 /// @brief Connects to Redis and loops until server is ready and validated.
-std::optional<StartupReport> await_redis_ready(const std::string& redis_url, const StartupOptions& opts) {
+std::optional<StartupReport> await_redis_ready(std::string_view redis_url, const StartupOptions& opts) {
     const int expected_db = parse_redis_db(redis_url);
     if (!is_valid_deploy_env(opts.deploy_env)) {
         throw StartupFatal("invalid EVML_DEPLOY_ENV '" + opts.deploy_env + "': must be local, staging, or production");
     }
     sw::redis::ConnectionOptions copts;
     try {
-        copts = sw::redis::Uri(redis_url).connection_options();
+        copts = sw::redis::Uri(std::string(redis_url)).connection_options();
     } catch (const sw::redis::Error& e) {
         throw StartupFatal(std::string("invalid Redis URL: ") + e.what());  // the URL itself is never echoed (credentials)
     }
@@ -517,7 +517,7 @@ std::optional<StartupReport> await_redis_ready(const std::string& redis_url, con
         // Exponential backoff with random full jitter while awaiting Redis startup.
         const auto ceiling = std::min<std::chrono::milliseconds::rep>(
             opts.probe_max.count(), opts.probe_min.count() << std::min<std::uint32_t>(attempt, 20));
-        sleep(std::chrono::milliseconds(ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % (ceiling + 1)) : 0));
+        sleep(std::chrono::milliseconds(ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % static_cast<std::uint64_t>(ceiling + 1)) : 0));
     }
 }
 

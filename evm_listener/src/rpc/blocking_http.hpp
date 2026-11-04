@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace evml::rpc {
 
@@ -26,7 +27,7 @@ struct HttpResponse {
 /// @param user_agent User-Agent string sent in request headers.
 /// @return HttpResponse containing status code and response body.
 /// @warning Throws TransportError on connection failure, timeout, or TLS verification failure.
-HttpResponse http_post_json(const std::string& url, const std::string& body, std::chrono::milliseconds timeout,
-                            const std::string& user_agent);
+[[nodiscard]] HttpResponse http_post_json(std::string_view url, std::string_view body,
+                                          std::chrono::milliseconds timeout, std::string_view user_agent);
 
 }  // namespace evml::rpc

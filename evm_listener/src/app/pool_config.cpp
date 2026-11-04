@@ -6,7 +6,7 @@
 namespace evml::app {
 
 /// @brief Constructs runtime ProviderPool configuration from validated core::Config.
-provider::PoolConfig make_pool_config(const core::Config& cfg, const std::string& user_agent) {
+provider::PoolConfig make_pool_config(const core::Config& cfg, std::string_view user_agent) {
     using std::chrono::milliseconds;
     provider::PoolConfig p;
 
@@ -40,7 +40,7 @@ provider::PoolConfig make_pool_config(const core::Config& cfg, const std::string
 
     // Assign core chain identity and transport telemetry attributes.
     p.chain_id = cfg.chain.chain_id;
-    p.user_agent = user_agent;
+    p.user_agent = std::string(user_agent);
     p.subscribe_heads = true;
     p.logs = cfg.filter();
 

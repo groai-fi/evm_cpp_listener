@@ -5,17 +5,6 @@
 
 namespace evml::provider {
 
-const char* to_string(State s) {
-    switch (s) {
-        case State::Up: return "up";
-        case State::Down: return "down";
-        case State::Cooldown: return "cooldown";
-        case State::Disabled: return "disabled";
-        case State::Fatal: return "fatal";
-    }
-    return "unknown";
-}
-
 namespace {
 bool has_duplicates(const std::vector<std::string>& v) {
     auto c = v;

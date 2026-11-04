@@ -23,7 +23,7 @@ public:
 
     /// Reserves one token and returns how long the caller must wait before using it (zero = go now).
     /// Reservations queue: with an empty bucket, three callers get waits of 1/rps, 2/rps and 3/rps.
-    Clock::duration reserve(Clock::time_point now) {
+    Clock::duration reserve(Clock::time_point now) noexcept {
         if (now > last_) {
             const double elapsed = std::chrono::duration<double>(now - last_).count();
             tokens_ = std::min(static_cast<double>(burst_), tokens_ + elapsed * rps_);

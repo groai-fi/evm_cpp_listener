@@ -22,7 +22,7 @@ AimdPager::AimdPager(std::uint32_t max_range, std::uint32_t min_range, std::uint
 }
 
 // Registers successful query; doubles query page range after grow_after consecutive successes.
-void AimdPager::on_success() {
+void AimdPager::on_success() noexcept {
     if (range_ >= max_) {
         streak_ = 0;
         return;
@@ -36,7 +36,7 @@ void AimdPager::on_success() {
 
 // Multiplicative decrease step: shrinks block range on provider RangeTooLarge error.
 // Watch out: Returns Shrink::AtMin when range cannot shrink further; triggers address-split fallback.
-AimdPager::Shrink AimdPager::on_range_too_large(std::optional<std::uint32_t> suggested) {
+AimdPager::Shrink AimdPager::on_range_too_large(std::optional<std::uint32_t> suggested) noexcept {
     streak_ = 0; // Reset success streak immediately on range limit error
     if (range_ <= min_) return Shrink::AtMin;
     // Prefer provider's suggested limit if smaller than current range, otherwise halve range

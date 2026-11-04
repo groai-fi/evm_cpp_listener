@@ -22,13 +22,13 @@ void load_dotenv();
 /// @param key Environment variable name.
 /// @param default_val Default fallback string if variable is unset.
 /// @return String value.
-std::string get(const std::string& key, const std::string& default_val = "");
+[[nodiscard]] std::string get(const std::string& key, std::string_view default_val = "");
 
 /// @brief Retrieves required environment variable value, failing fast if unset or empty.
 /// @param key Environment variable name.
 /// @return Non-empty string value.
 /// @warning Throws ConfigError if variable is missing or empty.
-std::string require(const std::string& key);
+[[nodiscard]] std::string require(const std::string& key);
 
 /// @brief Masks sensitive credentials, access tokens, API keys, and userinfo in RPC URLs for safe logging.
 /// Transformations:
@@ -36,6 +36,6 @@ std::string require(const std::string& key);
 /// - http://alice:password@localhost:8545/ -> http://****@localhost:8545/
 /// @param url Raw endpoint URL.
 /// @return Redacted URL string, or "<invalid-url>" if malformed.
-std::string redact(std::string_view url);
+[[nodiscard]] std::string redact(std::string_view url);
 
 }  // namespace evml::core::env

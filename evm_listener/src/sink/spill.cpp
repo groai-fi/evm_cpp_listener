@@ -40,12 +40,16 @@ bool is_spill_segment(const std::filesystem::path& p) {
 
 }  // namespace
 
-std::uint32_t crc32c(const void* data, std::size_t len) {
+std::uint32_t crc32c(core::BytesView data) noexcept {
     const auto& t = crc_table();
-    const auto* p = static_cast<const unsigned char*>(data);
     std::uint32_t crc = 0xFFFFFFFFu;
-    for (std::size_t i = 0; i < len; ++i) crc = t[(crc ^ p[i]) & 0xFFu] ^ (crc >> 8);
+    for (const std::uint8_t b : data) crc = t[(crc ^ b) & 0xFFu] ^ (crc >> 8);
     return ~crc;
+}
+
+std::uint32_t crc32c(std::string_view data) noexcept {
+    return crc32c(
+        core::BytesView(reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
 }
 
 Spill::Spill(std::filesystem::path dir, std::uint64_t max_bytes, std::uint64_t segment_bytes)
@@ -112,8 +116,8 @@ void Spill::append(std::uint8_t kind, std::string_view payload) {
     buf.push_back(static_cast<char>(kind));
     buf.append(payload);
     // Compute Castagnoli CRC32C over [kind + payload] and backfill into header.
-    const std::uint32_t crc = crc32c(buf.data() + 8, 1 + payload.size());
-    for (int i = 0; i < 4; ++i) buf[4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFFu);
+    const std::uint32_t crc = crc32c(std::string_view(buf).substr(8, 1 + payload.size()));
+    for (std::size_t i = 0; i < 4; ++i) buf[4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFFu);
 
     writer_.write(buf.data(), static_cast<std::streamsize>(buf.size()));
     writer_.flush();  // to the OS, so the reader (same process) sees it; deliberately no fsync
@@ -161,7 +165,7 @@ std::optional<SpillRecord> Spill::peek() {
             throw SpillError("spill: short payload read in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
     }
     // Verify CRC32C checksum over kind discriminator byte and payload string.
-    if (crc32c(body.data(), body.size()) != crc)
+    if (crc32c(std::string_view(body)) != crc)
         throw SpillError("spill: CRC mismatch in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
 
     peeked_ = SpillRecord{static_cast<std::uint8_t>(static_cast<unsigned char>(body[0])), body.substr(1)};

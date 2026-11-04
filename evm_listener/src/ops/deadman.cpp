@@ -39,16 +39,16 @@ namespace {
 
 net::awaitable<void> ping(std::shared_ptr<Deadman::State> st) {
     std::string error;
-    try {
-        const auto res = co_await st->client.get(st->opts.url);
-        if (res.status >= 200 && res.status < 300) {
+    const auto res = co_await st->client.try_get(st->opts.url);
+    if (res) {
+        if (res->status >= 200 && res->status < 300) {
             ++st->pings;
             st->in_flight = false;
             co_return;
         }
-        error = "http status " + std::to_string(res.status);
-    } catch (const std::exception& e) {
-        error = e.what();  // TransportError text carries the redacted URL only
+        error = "http status " + std::to_string(res->status);
+    } else {
+        error = res.error().what();  // TransportError text carries the redacted URL only
     }
     if (!st->stopped) {
         ++st->failures;
@@ -66,9 +66,9 @@ Deadman::Deadman(net::any_io_executor executor, DeadmanOptions opts) : exec_(exe
         state_->write(spdlog::level::warn, "DEADMAN_PING_URL is empty: dead-man pings are disabled", {});
 }
 
-bool Deadman::enabled() const { return !state_->opts.url.empty(); }
+bool Deadman::enabled() const noexcept { return !state_->opts.url.empty(); }
 
-const char* Deadman::status() const { return enabled() ? "enabled" : "disabled"; }
+const char* Deadman::status() const noexcept { return enabled() ? "enabled" : "disabled"; }
 
 bool Deadman::healthy(const DeadmanFacts& f) {
     if (!f.leader) {
@@ -109,7 +109,7 @@ void Deadman::stop() {
     state_->client.cancel();
 }
 
-std::uint64_t Deadman::pings_total() const { return state_->pings.load(); }
-std::uint64_t Deadman::ping_failures_total() const { return state_->failures.load(); }
+std::uint64_t Deadman::pings_total() const noexcept { return state_->pings.load(); }
+std::uint64_t Deadman::ping_failures_total() const noexcept { return state_->failures.load(); }
 
 }  // namespace evml::ops

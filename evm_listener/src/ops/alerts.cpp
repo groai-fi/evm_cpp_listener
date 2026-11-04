@@ -44,15 +44,6 @@ AlertEvent redis_tenancy_violation_event(std::string message, std::uint64_t new_
     return e;
 }
 
-const char* to_string(Severity s) {
-    switch (s) {
-        case Severity::Critical: return "critical";
-        case Severity::Warning: return "warning";
-        case Severity::Info: return "info";
-    }
-    return "?";
-}
-
 AlertThresholds AlertThresholds::from_config(const core::Config& cfg) {
     AlertThresholds t;
     t.head_stall_ms = cfg.watchdog.head_stall_ms;
@@ -156,7 +147,7 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         const auto idle = unchanged_for("g_s", *s.g_s, now);
         if (idle > seconds(t_.safe_gate_stuck_s)) {
             add("safe_gate_stuck", Severity::Critical, "Safe Gate Stuck",
-                "safe gate has not advanced for " + num(idle.count()) + " s",
+                "safe gate has not advanced for " + num(static_cast<std::uint64_t>(idle.count())) + " s",
                 {{"G_s", *s.g_s}, {"head", jv(s.head)}, {"seconds_since_advance", idle.count()}});
         }
     }
@@ -164,7 +155,7 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         const auto idle = unchanged_for("g_f", *s.g_f, now);
         if (idle > seconds(t_.finalized_gate_stuck_s)) {
             add("finalized_gate_stuck", Severity::Critical, "Finalized Gate Stuck",
-                "finalized gate has not advanced for " + num(idle.count()) + " s",
+                "finalized gate has not advanced for " + num(static_cast<std::uint64_t>(idle.count())) + " s",
                 {{"G_f", *s.g_f}, {"head", jv(s.head)}, {"seconds_since_advance", idle.count()}});
         }
     }
@@ -188,7 +179,7 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         const auto limit = seconds(static_cast<std::int64_t>(t_.pipeline_stall_deadlines) * t_.progress_stall_ms / 1000);
         if (idle < limit) return;
         add(std::string("pipeline_stalled:") + cls, Severity::Critical, "Pipeline Stalled",
-            std::string(cls) + " cursor has not moved for " + num(idle.count()) + " s",
+            std::string(cls) + " cursor has not moved for " + num(static_cast<std::uint64_t>(idle.count())) + " s",
             {{"class", cls}, {"cursor", cursor}, {"gate", ceiling}, {"provider", s.getlogs_provider}, {"detail", "no progress"}});
     };
     if (s.g_s) cursor_stall("safe", s.c_s, *s.g_s);
@@ -242,7 +233,7 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
                        {"group", f.group},
                        {"undelivered_age_s", f.undelivered_age_s},
                        {"pending_age_s", f.pending_age_s},
-                       {"lag", f.lag},
+                       {"lag", f.lag ? json::value(static_cast<std::int64_t>(*f.lag)) : json::value(-1)},
                        {"retention_s", f.retention_s}};
         if (age > t_.consumer_lag_crit_s) {
             add(prefix + "near_trim", Severity::Critical, "Consumer Near Trim",

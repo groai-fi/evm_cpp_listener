@@ -9,7 +9,7 @@
 namespace evml::rpc {
 
 /// @brief Failure classification category for RPC error dispatching and recovery.
-enum class FailKind {
+enum class FailKind : std::uint8_t {
     Retry,           // network/TLS/WS errors, timeouts, transient provider errors -> full-jitter backoff
     RateLimited,     // per-second throttling -> max(backoff, Retry-After)
     QuotaExhausted,  // monthly quota -> provider cooled down, immediate failover
@@ -19,7 +19,17 @@ enum class FailKind {
 };
 
 /// @brief Converts failure classification category to human-readable string.
-const char* to_string(FailKind k);
+[[nodiscard]] constexpr const char* to_string(FailKind k) noexcept {
+    switch (k) {
+        case FailKind::Retry: return "retry";
+        case FailKind::RateLimited: return "rate_limited";
+        case FailKind::QuotaExhausted: return "quota_exhausted";
+        case FailKind::AuthFatal: return "auth_fatal";
+        case FailKind::ConfigFatal: return "config_fatal";
+        case FailKind::RangeTooLarge: return "range_too_large";
+    }
+    return "unknown";
+}
 
 /// @brief Unified error envelope capturing HTTP status, JSON-RPC error codes, and server response hints.
 /// All fields are optional or defaulted; unset values indicate absence in the raw exchange.
@@ -46,11 +56,11 @@ struct Classified {
 /// 5. Transient retry (network glitches, timeouts, 5xx)
 /// @param e Error envelope from HTTP response or JSON-RPC error frame.
 /// @return Classified failure verdict and actionable metadata.
-Classified classify(const ErrorInfo& e);
+[[nodiscard]] Classified classify(const ErrorInfo& e) noexcept;
 
 /// @brief Parses an HTTP Retry-After header value into delta seconds.
 /// @param header_value Raw header string (e.g., "120").
 /// @return Parsed seconds if numeric; std::nullopt for HTTP-date format or malformed input.
-std::optional<std::chrono::seconds> parse_retry_after(std::string_view header_value);
+[[nodiscard]] std::optional<std::chrono::seconds> parse_retry_after(std::string_view header_value) noexcept;
 
 }  // namespace evml::rpc

@@ -8,6 +8,6 @@ inline constexpr const char* kSemver = "@PROJECT_VERSION@";
 inline constexpr const char* kGitDescribe = "@EVML_GIT_DESCRIBE@";
 
 /// @brief Returns the complete human-readable version banner ("evm_listener <semver> (<git describe>)").
-const char* version_string();
+[[nodiscard]] const char* version_string();
 
 }  // namespace evml::core

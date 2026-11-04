@@ -22,7 +22,7 @@ constexpr auto kOpsPeriod = 10s;  // plan 5.3.3: the alert engine evaluates a fr
 HostTelemetry::HostTelemetry(const core::Config& cfg)
     : cfg_(cfg), engine_(ops::AlertThresholds::from_config(cfg)) {}
 
-void HostTelemetry::init_ops_clients(boost::asio::any_io_executor ex, const std::string& user_agent) {
+void HostTelemetry::init_ops_clients(boost::asio::any_io_executor ex, std::string_view user_agent) {
     const auto hook = core::env::get(cfg_.ops.alert_webhook_env);
     const auto token = core::env::get(cfg_.ops.alert_webhook_token_env);
     if (!hook.empty() && !token.empty()) {
@@ -32,7 +32,7 @@ void HostTelemetry::init_ops_clients(boost::asio::any_io_executor ex, const std:
         ao.service = cfg_.ops.alert_service;
         ao.shard = cfg_.shard.id;
         ao.host = cfg_.shard.host_id;
-        ao.user_agent = user_agent;
+        ao.user_agent = std::string(user_agent);
         ao.seed = std::random_device{}();
         alerts_ = std::make_unique<ops::AlertSender>(ex, std::move(ao));
     } else {
@@ -41,7 +41,7 @@ void HostTelemetry::init_ops_clients(boost::asio::any_io_executor ex, const std:
     }
     ops::DeadmanOptions dopt;
     dopt.url = core::env::get(cfg_.ops.deadman_ping_env);
-    dopt.user_agent = user_agent;
+    dopt.user_agent = std::string(user_agent);
     deadman_ = std::make_unique<ops::Deadman>(ex, std::move(dopt));
 }
 
@@ -66,7 +66,7 @@ void HostTelemetry::emit_event_now(ops::AlertEvent ev, std::uint64_t /*ts_ms*/) 
 
 void HostTelemetry::ops_tick(const TelemetryContext& ctx, std::chrono::steady_clock::time_point now,
                              std::uint64_t ts_ms, const std::optional<ops::RedisMisconfig>& redis_misconfig,
-                             std::int64_t redis_wait_since_ns, const std::string& redis_wait_family) {
+                             std::int64_t redis_wait_since_ns, std::string_view redis_wait_family) {
     if (now >= next_ops_) {
         next_ops_ = now + kOpsPeriod;
         std::chrono::seconds down{0};
@@ -294,9 +294,9 @@ void HostTelemetry::update_metrics(const TelemetryContext& ctx) {
 
 ops::OpsResponse HostTelemetry::build_healthz(const ops::Watchdog& wd) const {
     ops::OpsResponse o;
-    if (const char* stale = wd.stale_heartbeat()) {
+    if (const auto stale = wd.stale_heartbeat()) {
         o.status = 503;
-        o.body = std::string("stale heartbeat: ") + stale + "\n";
+        o.body = "stale heartbeat: " + std::string(*stale) + "\n";
     } else {
         o.body = "ok\n";
     }
@@ -352,7 +352,7 @@ ops::OpsResponse HostTelemetry::build_metrics_response(const TelemetryContext& c
 ops::SnapshotInputs HostTelemetry::build_snapshot_inputs(
     const TelemetryContext& ctx, std::chrono::steady_clock::time_point now, std::uint64_t ts_ms,
     const std::optional<ops::RedisMisconfig>& redis_misconfig, std::uint32_t redis_unreachable_s,
-    const std::string& addr_family) const {
+    std::string_view addr_family) const {
     ops::SnapshotInputs in;
     in.now = now;
     in.wall_ms = ts_ms;
@@ -361,7 +361,7 @@ ops::SnapshotInputs HostTelemetry::build_snapshot_inputs(
     in.redis_misconfigured = redis_misconfig;
     if (redis_unreachable_s > 0) {
         in.redis_unreachable_s = redis_unreachable_s;
-        in.addr_family = addr_family;
+        in.addr_family = std::string(addr_family);
     }
     if (ctx.leader) {
         in.head = ctx.ring->top();

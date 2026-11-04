@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/asio/io_context.hpp>
 
@@ -31,14 +32,16 @@ public:
     /// @param listen "host:port" with an optional bracketed IPv6 host, e.g. "[::]:9464", "127.0.0.1:0" (port 0 = ephemeral).
     /// @param request_timeout per-connection deadline for reading one request and for an idle keep-alive (slow-client guard).
     /// @throws std::invalid_argument on a malformed `listen` or a null handler; boost::system::system_error if the bind fails.
-    OpsHttpServer(boost::asio::io_context& ioc, const std::string& listen, Routes routes,
+    OpsHttpServer(boost::asio::io_context& ioc, std::string_view listen, Routes routes,
                   std::chrono::milliseconds request_timeout = std::chrono::seconds(10));
     ~OpsHttpServer();
     OpsHttpServer(const OpsHttpServer&) = delete;
     OpsHttpServer& operator=(const OpsHttpServer&) = delete;
+    OpsHttpServer(OpsHttpServer&&) = delete;
+    OpsHttpServer& operator=(OpsHttpServer&&) = delete;
 
     /// @brief The bound port (useful when `listen` used port 0).
-    std::uint16_t port() const;
+    [[nodiscard]] std::uint16_t port() const;
     /// @brief Stop accepting. Open sessions end at their next read. Idempotent; call on the io thread.
     void stop();
 

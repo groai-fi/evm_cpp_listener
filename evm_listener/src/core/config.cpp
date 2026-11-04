@@ -17,20 +17,6 @@
 
 namespace evml::core {
 
-/// @brief Converts Finality enum to lowercase string.
-const char* to_string(Finality f) {
-    switch (f) {
-        case Finality::Safe: return "safe";
-        case Finality::Finalized: return "finalized";
-        case Finality::Depth: return "depth";
-        case Finality::Latest: return "latest";
-    }
-    return "?";
-}
-
-/// @brief Converts StreamKind enum to lowercase string.
-const char* to_string(StreamKind s) { return s == StreamKind::Events ? "events" : "registry"; }
-
 namespace {
 
 /// @brief Strict TOML table parser rejecting unknown keys to catch typos and configuration drift.
@@ -180,7 +166,7 @@ std::string event_name(const std::string& sig) { return sig.substr(0, sig.find('
 }  // namespace
 
 /// @brief Queries fast routing map for an event tuple (contract_address, topic0).
-const EventRoute* Config::route(const Address20& address, const Hash32& topic0) const {
+const EventRoute* Config::route(const Address20& address, const Hash32& topic0) const noexcept {
     const auto it = routes.find(RouteKey{address, topic0});
     return it == routes.end() ? nullptr : &it->second;
 }
@@ -214,7 +200,7 @@ LogFilter Config::filter(Finality only) const {
 }
 
 /// @brief Parses TOML text using standard process environment resolver.
-Config Config::parse(std::string_view toml_text, const std::string& origin) {
+Config Config::parse(std::string_view toml_text, std::string_view origin) {
     return parse(toml_text, origin, [](const std::string& k) { return env::get(k); });
 }
 
@@ -229,11 +215,12 @@ Config Config::load_file(const std::filesystem::path& path) {
 
 /// @brief Parses TOML text, resolves providers, and validates cross-section invariants.
 /// @param toml_text Raw UTF-8 TOML configuration document.
-/// @param origin Path or identifier of the config source for descriptive errors.
+/// @param origin_name Path or identifier of the config source for descriptive errors.
 /// @param env_lookup Dynamic environment resolver functor (defaults to env::get).
 /// @return Validated, fully-resolved Config object.
 /// @throws ConfigError On TOML syntax error, unknown keys, missing required fields, or invariant violations.
-Config Config::parse(std::string_view toml_text, const std::string& origin, const EnvLookup& env_lookup) {
+Config Config::parse(std::string_view toml_text, std::string_view origin_name, const EnvLookup& env_lookup) {
+    const std::string origin(origin_name);
     toml::table root;
     try {
         // Parse raw document into tomlplusplus AST table.

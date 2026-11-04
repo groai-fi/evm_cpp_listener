@@ -33,7 +33,12 @@ struct BlockInfo {
 // All invocations execute sequentially within the Asio io thread.
 class LogSource {
 public:
+    LogSource() = default;
     virtual ~LogSource() = default;
+    LogSource(const LogSource&) = delete;
+    LogSource& operator=(const LogSource&) = delete;
+    LogSource(LogSource&&) = delete;
+    LogSource& operator=(LogSource&&) = delete;
 
     // Queries logs across the inclusive block range with configured filter over the provider failover chain.
     // Watch out: Returns rpc::FailKind::RangeTooLarge if provider query limits are exceeded.
@@ -45,11 +50,11 @@ public:
 
     // Returns active getLogs provider name; used to look up provider-specific AIMD pager bounds.
     // Watch out: Returns nullopt when all providers in the chain are in cooldown or down.
-    virtual std::optional<std::string> current_provider() const = 0;
+    [[nodiscard]] virtual std::optional<std::string> current_provider() const = 0;
 
     // Reports that `provider` returned data failing validation or blockHash checks (rev 5, G2).
     // Penalizes provider health score and steers subsequent queries to failover fallback.
-    virtual void report_bad(const std::string& provider, const std::string& reason) = 0;
+    virtual void report_bad(std::string_view provider, std::string_view reason) = 0;
 
     // Clears any cached verified block headers (called on reorg signals or safe-window re-verification).
     virtual void clear_cache() {}

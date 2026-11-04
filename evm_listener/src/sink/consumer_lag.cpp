@@ -7,24 +7,25 @@ namespace evml::sink {
 
 namespace {
 
-std::uint64_t parse_part(const std::string& s, std::size_t from, std::size_t to, const std::string& whole) {
+std::uint64_t parse_part(std::string_view s, std::size_t from, std::size_t to, std::string_view whole) {
     std::uint64_t v = 0;
     const auto [p, ec] = std::from_chars(s.data() + from, s.data() + to, v);
     if (from == to || ec != std::errc{} || p != s.data() + to)
-        throw std::runtime_error("redis: stream id is not '<ms>-<seq>': '" + whole + "'");
+        throw std::runtime_error("redis: stream id is not '<ms>-<seq>': '" + std::string(whole) + "'");
     return v;
 }
 
-std::uint64_t age_s(const std::string& id, std::uint64_t now_ms) {
+std::uint64_t age_s(std::string_view id, std::uint64_t now_ms) {
     const StreamId sid = StreamId::parse(id);
     return sid.ms >= now_ms ? 0 : (now_ms - sid.ms) / 1000;
 }
 
 }  // namespace
 
-StreamId StreamId::parse(const std::string& s) {
+StreamId StreamId::parse(std::string_view s) {
     const auto dash = s.find('-');
-    if (dash == std::string::npos) throw std::runtime_error("redis: stream id is not '<ms>-<seq>': '" + s + "'");
+    if (dash == std::string_view::npos)
+        throw std::runtime_error("redis: stream id is not '<ms>-<seq>': '" + std::string(s) + "'");
     return StreamId{parse_part(s, 0, dash, s), parse_part(s, dash + 1, s.size(), s)};
 }
 

@@ -67,7 +67,7 @@ std::vector<std::string> uncovered_contracts(const core::Config& cfg, const std:
 }
 
 // Determines the initial sweep start cursor; returns lowest start_block - 1 or gate G_s.
-std::uint64_t initial_cursor(const core::Config& cfg, std::uint64_t g_s) {
+std::uint64_t initial_cursor(const core::Config& cfg, std::uint64_t g_s) noexcept {
     if (cfg.chain.start_policy == core::StartPolicy::Gate) return g_s;
     std::uint64_t cursor = g_s;
     for (const auto& c : cfg.contracts) {

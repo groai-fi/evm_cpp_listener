@@ -52,12 +52,12 @@ public:
     /// @brief Cancels any in-flight dead-man ping on shutdown.
     void stop();
 
-    bool enabled() const;
+    [[nodiscard]] bool enabled() const noexcept;
     /// @brief "enabled" or "disabled", for the /readyz JSON.
-    const char* status() const;
+    [[nodiscard]] const char* status() const noexcept;
 
-    std::uint64_t pings_total() const;           // pings answered 2xx
-    std::uint64_t ping_failures_total() const;   // evml_deadman_ping_failures_total
+    [[nodiscard]] std::uint64_t pings_total() const noexcept;           // pings answered 2xx
+    [[nodiscard]] std::uint64_t ping_failures_total() const noexcept;   // evml_deadman_ping_failures_total
 
     struct State;  // shared with the detached ping coroutines; internal
 

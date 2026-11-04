@@ -36,8 +36,17 @@ namespace evml::sink {
 /// - Degraded: Redis unreachable; pipeline writes divert to local spill WAL; reconnect probes back off with jitter.
 /// - Replaying: Reconnected; held batch and spill WAL are drained in strict FIFO order before accepting queue writes.
 /// - Fenced / Failed: Terminal states. Fenced drops queued items to avoid dual-writer split-brain; Failed halts on unrecoverable error.
-enum class SinkMode : int { Connected, Degraded, Replaying, Fenced, Failed };
-const char* to_string(SinkMode m);
+enum class SinkMode : std::uint8_t { Connected, Degraded, Replaying, Fenced, Failed };
+[[nodiscard]] constexpr const char* to_string(SinkMode m) noexcept {
+    switch (m) {
+        case SinkMode::Connected: return "connected";
+        case SinkMode::Degraded: return "degraded";
+        case SinkMode::Replaying: return "replaying";
+        case SinkMode::Fenced: return "fenced";
+        case SinkMode::Failed: return "failed";
+    }
+    return "failed";
+}
 
 /// @brief Configuration settings controlling Redis batching, leasing, dedup, and disk spill.
 /// Watch out:
@@ -85,7 +94,8 @@ struct RedisSinkOptions {
 
     /// @brief Constructs and validates RedisSinkOptions from configuration sections.
     /// @throws std::invalid_argument If configuration violates fencing consistency or timeout constraints.
-    static RedisSinkOptions from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token);
+    [[nodiscard]] static RedisSinkOptions from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease,
+                                                      std::string token);
 };
 
 /// @brief Telemetry snapshot capturing sink state, backpressure, and error counters.
@@ -141,8 +151,8 @@ struct StampedWrite {
 
 // A read sits in the same queue as the writes, so it is a barrier: it runs only after every earlier write is acked.
 struct ReadItem {
-    std::function<void(RedisConn&)> run;  // performs the read and delivers the result; throws ConnError on transport failure
-    std::function<void()> abandon;        // delivers nullopt
+    std::function<core::Result<void, ConnError>(RedisConn&)> run;  // performs the read and delivers the result
+    std::function<void()> abandon;                                 // delivers nullopt
 };
 using QueueItem = std::variant<StampedWrite, ReadItem>;
 }  // namespace detail
@@ -175,12 +185,14 @@ public:
     ~RedisSink() override;
     RedisSink(const RedisSink&) = delete;
     RedisSink& operator=(const RedisSink&) = delete;
+    RedisSink(RedisSink&&) = delete;
+    RedisSink& operator=(RedisSink&&) = delete;
 
     // pipeline::Sink
     /// @brief Returns true if queue depth or spill exceeds soft cap, or if sink entered a terminal state.
-    bool saturated() const override;
+    [[nodiscard]] bool saturated() const noexcept override;
     /// @brief Returns true only when connected and running, permitting read operations.
-    bool readable() const override;
+    [[nodiscard]] bool readable() const noexcept override;
     /// @brief Enqueues an event emission to the sink queue; non-blocking for callers.
     void emit(pipeline::Emission e) override;
     /// @brief Enqueues a best-effort fast signal emission when Connected and not saturated; drops otherwise.
@@ -214,7 +226,7 @@ public:
     // The latest consumer-group lag snapshot, one entry per configured group (empty before the first probe, or when the
     // probe is disabled). Thread-safe. Phase 5 turns it into metrics and alerts.
     /// @brief Returns cached consumer lag metrics for configured consumer groups.
-    std::vector<ConsumerLag> consumer_lag() const;
+    [[nodiscard]] std::vector<ConsumerLag> consumer_lag() const;
 
     // Graceful shutdown (plan 4.8 "Draining"): waits up to `budget` for every accepted write to be acked, stops the sink
     // thread, then releases the lease so a standby takes over without waiting for the TTL. If the flush did not finish
@@ -239,28 +251,33 @@ public:
     bool wait_idle(std::chrono::milliseconds timeout) const;
 
     /// @brief Returns current sink status and queue/spill metrics snapshot.
-    SinkStatus status() const;
+    [[nodiscard]] SinkStatus status() const;
     /// @brief Returns current operational mode atomically.
-    SinkMode mode() const { return mode_.load(); }
+    [[nodiscard]] SinkMode mode() const noexcept { return mode_.load(); }
     // The reason of the Failed state (empty otherwise).
     /// @brief Returns error description if sink entered Failed mode.
-    std::string fatal_message() const;
+    [[nodiscard]] std::string fatal_message() const;
     // Steady-clock ms of the last sink-loop iteration; the process watchdog compares it with now (plan 4.4).
     /// @brief Timestamp of most recent pump() pass for watchdog liveness monitoring.
-    std::uint64_t loop_heartbeat_ms() const { return heartbeat_ms_.load(); }
+    [[nodiscard]] std::uint64_t loop_heartbeat_ms() const noexcept { return heartbeat_ms_.load(); }
 
 private:
     using Clock = RedisSinkOptions::Clock;
     using TimePoint = Clock::time_point;
-    enum class LeaseResult { Ok, Resumed, Fenced };
+    enum class LeaseResult : std::uint8_t { Ok, Resumed, Fenced };
     struct Verdict;
+    struct ReadGate {
+        std::mutex mu;
+        RedisSink* sink{nullptr};
+        explicit ReadGate(RedisSink* s) noexcept : sink(s) {}
+    };
 
     TimePoint now() const { return opts_.steady_now(); }
     bool leasing() const { return opts_.token != kNoFence; }
 
     void enqueue(detail::WriteItem item);
     template <class T, class Op>
-    boost::asio::awaitable<std::optional<T>> read(Op op);
+    static boost::asio::awaitable<std::optional<T>> read(std::shared_ptr<ReadGate> gate, Op op);
 
     void run();
     TimePoint wake_time() const;
@@ -269,7 +286,7 @@ private:
     bool service_heartbeat();
     bool service_consumer_lag();
     bool service_tenancy();
-    LeaseResult renew_lease();
+    core::Result<LeaseResult, ConnError> renew_lease();
     bool drain_terminal();
     bool queue_to_spill();
     bool try_reconnect();
@@ -339,6 +356,7 @@ private:
     std::string hb_payload_;
     mutable std::mutex lag_mu_;
     std::vector<ConsumerLag> lag_snapshot_;
+    std::shared_ptr<ReadGate> read_gate_;
 };
 
 }  // namespace evml::sink

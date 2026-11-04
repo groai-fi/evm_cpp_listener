@@ -11,7 +11,7 @@ namespace log = core::log;
 WsReconciler::WsReconciler(const core::Config& cfg, std::size_t pending_max_logs)
     : cfg_(cfg), pending_(pending_max_logs) {}
 
-void WsReconciler::on_ws_log(const rpc::Log& l, const std::string& provider) {
+void WsReconciler::on_ws_log(const rpc::Log& l, std::string_view provider) {
     if (l.topics.empty() || cfg_.route(l.address, l.topics.front()) == nullptr) {
         log::warn("host", "ws log matches no configured route, not staged",
                   {{"provider", provider}, {"block", std::to_string(l.block_number)}});

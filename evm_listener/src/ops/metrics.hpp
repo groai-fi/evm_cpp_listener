@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <prometheus/counter.h>
 #include <prometheus/family.h>
@@ -26,20 +27,20 @@ public:
     /// rebuilt (a new sink per leadership term restarts at 0), so the new total is added as fresh increments and the
     /// counter keeps rising, as Prometheus expects.
     /// @throws std::logic_error if `name` was registered as a gauge, or with a different help text.
-    void counter_total(const std::string& name, const std::string& help, const Labels& labels, std::uint64_t total);
+    void counter_total(std::string_view name, std::string_view help, const Labels& labels, std::uint64_t total);
 
     /// @brief Sets the gauge `name{labels}` to `value`.
     /// @throws std::logic_error if `name` was registered as a counter, or with a different help text.
-    void gauge(const std::string& name, const std::string& help, const Labels& labels, double value);
+    void gauge(std::string_view name, std::string_view help, const Labels& labels, double value);
 
     /// @brief Prometheus text exposition format (what `/metrics` returns).
-    std::string serialize() const;
+    [[nodiscard]] std::string serialize() const;
 
 private:
-    static std::string series_key(const std::string& name, const Labels& labels);
+    static std::string series_key(std::string_view name, const Labels& labels);
 
     mutable std::mutex mu_;
-    std::shared_ptr<prometheus::Registry> registry_;
+    std::unique_ptr<prometheus::Registry> registry_;
     std::map<std::string, std::pair<prometheus::Family<prometheus::Counter>*, std::string>> counters_;  // name -> (family, help)
     std::map<std::string, std::pair<prometheus::Family<prometheus::Gauge>*, std::string>> gauges_;
     std::map<std::string, std::uint64_t> last_total_;  // series key -> last total seen

@@ -17,7 +17,7 @@ inline constexpr int kExitFailure = 1;  ///< Runtime error, probe failure, or on
 inline constexpr int kExitUsage = 2;    ///< Command-line syntax error or invalid configuration.
 
 /// @brief Returns `[ops].http_user_agent` with the `{version}` placeholder replaced by the compiled semver.
-std::string user_agent(const core::Config& cfg);
+[[nodiscard]] std::string user_agent(const core::Config& cfg);
 
 /// @brief Prints an offline structural summary of the loaded configuration to stdout.
 ///
@@ -47,7 +47,7 @@ int check_config_online(const core::Config& cfg);
 /// @param address Contract address to inspect.
 /// @return Lowest block number where bytecode exists at the target address.
 /// @throws std::runtime_error If all RPC providers fail or the contract has no code at head.
-std::uint64_t find_deploy_block(const core::Config& cfg, const core::Address20& address);
+[[nodiscard]] std::uint64_t find_deploy_block(const core::Config& cfg, const core::Address20& address);
 
 /// @brief Runs a live, end-to-end transport probe using real WebSocket and HTTP connections.
 ///

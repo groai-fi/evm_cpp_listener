@@ -1,11 +1,15 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <string_view>
+
+#include "core/error.hpp"
 
 namespace evml::rpc {
 
 /// @brief URL scheme category expected by the transport parser.
-enum class UrlKind {
+enum class UrlKind : std::uint8_t {
     Http,  // Supports http:// (plain) and https:// (TLS)
     Ws     // Supports ws:// (plain) and wss:// (TLS)
 };
@@ -19,14 +23,17 @@ struct ParsedUrl {
 
     /// @brief Computes HTTP/WS Host header value (omits port if standard 80/443).
     /// @return Formatted host header (e.g., "eth.alchemy.com" or "127.0.0.1:8545").
-    std::string host_header() const;
+    [[nodiscard]] std::string host_header() const;
 };
+
+/// @brief Non-throwing URL parser returning Result<ParsedUrl>.
+[[nodiscard]] core::Result<ParsedUrl> try_parse_url(std::string_view url, UrlKind kind);
 
 /// @brief Parses and validates an RPC endpoint URL.
 /// @param url Full endpoint URL (e.g., "https://base-mainnet.g.alchemy.com/v2/...").
 /// @param kind Expected scheme family (Http or Ws).
 /// @return Dissected URL components.
 /// @warning Throws TransportError with redacted URL on unsupported scheme, userinfo, or syntax errors.
-ParsedUrl parse_url(const std::string& url, UrlKind kind);
+[[nodiscard]] ParsedUrl parse_url(std::string_view url, UrlKind kind);
 
 }  // namespace evml::rpc

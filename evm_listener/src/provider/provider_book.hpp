@@ -16,14 +16,23 @@ using TimePoint = std::chrono::steady_clock::time_point;
 using std::chrono::seconds;
 
 /// @brief Health states for RPC endpoints.
-enum class State {
+enum class State : std::uint8_t {
     Up,        // usable
     Down,      // repeated transient failures or voluntarily demoted: must pass a probe to come back
     Cooldown,  // monthly quota exhausted: re-probed after quota_cooldown
     Disabled,  // credentials rejected: re-probed after auth_disable
     Fatal,     // configuration error (wrong chain): never used again in this process
 };
-const char* to_string(State s);
+[[nodiscard]] constexpr const char* to_string(State s) noexcept {
+    switch (s) {
+        case State::Up: return "up";
+        case State::Down: return "down";
+        case State::Cooldown: return "cooldown";
+        case State::Disabled: return "disabled";
+        case State::Fatal: return "fatal";
+    }
+    return "unknown";
+}
 
 /// @brief Thresholds and cooldowns governing provider health state transitions and failover hysteresis.
 struct Policy {
@@ -91,14 +100,14 @@ public:
 
     // ---- queries ----
     /// @brief Checks whether probe interval has elapsed for a Down/Cooldown/Disabled provider.
-    bool probe_due(std::string_view name, TimePoint now) const;
+    [[nodiscard]] bool probe_due(std::string_view name, TimePoint now) const;
     /// @brief Returns true if provider is Up and not currently subject to rate-limit backoff.
-    bool usable(std::string_view name, TimePoint now) const;  // Up and not rate-limited right now
+    [[nodiscard]] bool usable(std::string_view name, TimePoint now) const;  // Up and not rate-limited right now
     /// @brief Returns current state record of named provider.
-    const ProviderState& state(std::string_view name) const;
+    [[nodiscard]] const ProviderState& state(std::string_view name) const;
 
     struct WsDecision {
-        enum class Reason { Keep, Initial, Forced, SwitchBack, NoneAvailable };
+        enum class Reason : std::uint8_t { Keep, Initial, Forced, SwitchBack, NoneAvailable };
         std::optional<std::string> from;      // the previously active provider (nullopt = none)
         std::optional<std::string> provider;  // the provider that should be active (nullopt = none)
         bool changed{false};
@@ -108,15 +117,16 @@ public:
     /// @brief Evaluates active WebSocket provider selection, applying sticky retention and 10-minute switchback hysteresis.
     WsDecision select_ws(TimePoint now);
     /// @brief Returns currently active WebSocket provider name, or nullopt if none assigned.
-    const std::optional<std::string>& active_ws() const { return active_ws_; }
+    [[nodiscard]] const std::optional<std::string>& active_ws() const noexcept { return active_ws_; }
 
     // First usable getLogs provider that is NOT the active WS provider (independent cross-check); falls back to
     // the active WS provider only when nothing else is usable. nullopt = none usable.
     /// @brief Selects optimal HTTP provider for getLogs; prioritizes non-active WS provider for dual-node cross-check.
-    std::optional<std::string> pick_getlogs(TimePoint now) const;
+    [[nodiscard]] std::optional<std::string> pick_getlogs(TimePoint now) const;
     // Same, skipping providers in `exclude` (those already tried for the current request).
     /// @brief Selects getLogs provider excluding already tried endpoints during failover retry loops.
-    std::optional<std::string> pick_getlogs(TimePoint now, const std::unordered_set<std::string>& exclude) const;
+    [[nodiscard]] std::optional<std::string> pick_getlogs(TimePoint now,
+                                                          const std::unordered_set<std::string>& exclude) const;
 
 private:
     ProviderState& at(std::string_view name);

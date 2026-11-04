@@ -31,7 +31,7 @@ struct ReleasedEntry {
     std::vector<Field> fields;
 };
 
-enum class CheckpointKind { Safe, Finalized };
+enum class CheckpointKind : std::uint8_t { Safe, Finalized };
 
 struct Checkpoint {
     std::optional<std::uint64_t> safe;
@@ -52,15 +52,20 @@ struct Checkpoint {
 // Invariants enforced: Invariant I3 (Monotonic Checkpoints), Invariant I4 (Atomic Dedup), Invariant I6 (Revert Fidelity).
 class Sink {
 public:
+    Sink() = default;
     virtual ~Sink() = default;
+    Sink(const Sink&) = delete;
+    Sink& operator=(const Sink&) = delete;
+    Sink(Sink&&) = delete;
+    Sink& operator=(Sink&&) = delete;
 
     // Backpressure probe (plan 4.6): returns true if queue or spill buffer is full.
     // Watch out: Pipeline must immediately pause sweeps when saturated() returns true.
-    virtual bool saturated() const = 0;
+    [[nodiscard]] virtual bool saturated() const = 0;
 
     // Read availability probe: returns false when sink is disconnected, degraded, or replaying spill WAL.
     // Watch out: Final sweep and reverification should pause rather than burn RPC calls when readable() is false.
-    virtual bool readable() const = 0;
+    [[nodiscard]] virtual bool readable() const = 0;
 
     // Enqueues an event emission to the stream; writes dedup key atomically via Lua.
     virtual void emit(Emission e) = 0;
@@ -90,12 +95,12 @@ public:
                                                                                           std::uint64_t to) = 0;
 };
 
-Emission make_emission(const Event& e, std::optional<std::uint64_t> released_block);
+[[nodiscard]] Emission make_emission(const Event& e, std::optional<std::uint64_t> released_block);
 
 // The retraction of `entry`: the original fields with type=revert and a fresh emitted_ms.
-Emission make_revert(const ReleasedEntry& entry, std::uint64_t emitted_ms);
+[[nodiscard]] Emission make_revert(const ReleasedEntry& entry, std::uint64_t emitted_ms);
 
 // The `released` record for a log emission, built from its own fields (what the sink stores for the diff).
-ReleasedEntry to_released_entry(const Emission& e);
+[[nodiscard]] ReleasedEntry to_released_entry(const Emission& e);
 
 }  // namespace evml::pipeline

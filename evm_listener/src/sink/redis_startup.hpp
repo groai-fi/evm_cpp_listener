@@ -50,25 +50,25 @@ struct TenancyReport {
 };
 
 /// @brief Formats the expected value of `evml:{<shard>}:tenant` (`"evm-listener|<deploy_env>"`).
-std::string format_tenant_marker(std::string_view deploy_env);
+[[nodiscard]] std::string format_tenant_marker(std::string_view deploy_env);
 
 /// @brief Replaces whitespace and control characters outside `[0x21, 0x7e]` with `'_'` for `CLIENT SETNAME`.
-std::string sanitize_client_name(std::string_view raw);
+[[nodiscard]] std::string sanitize_client_name(std::string_view raw);
 
 /// @brief Validates `EVML_DEPLOY_ENV` (`local|staging|production`) or defaults to `local` for local dev/test Redis hosts.
-std::string resolve_deploy_env(std::string_view raw_deploy_env, std::string_view redis_url);
+[[nodiscard]] std::string resolve_deploy_env(std::string_view raw_deploy_env, std::string_view redis_url);
 
 /// @brief Parses `/<db>` from `redis_url` path (defaults to 0; throws StartupFatal on malformed URL or invalid DB).
-int parse_redis_db(std::string_view redis_url);
+[[nodiscard]] int parse_redis_db(std::string_view redis_url);
 
 /// @brief Returns true if `allow_destructive_env == "1"` or `redis_url` targets a local dev/test Redis host.
-bool is_allowed_test_redis_host(std::string_view redis_url, std::string_view allow_destructive_env = "");
+[[nodiscard]] bool is_allowed_test_redis_host(std::string_view redis_url, std::string_view allow_destructive_env = "");
 
 /// @brief Evaluates dedicated-Redis tenancy invariants without performing I/O.
-TenancyReport evaluate_tenancy(const TenancyFacts& facts, std::string_view expected_env, int expected_db);
+[[nodiscard]] TenancyReport evaluate_tenancy(const TenancyFacts& facts, std::string_view expected_env, int expected_db);
 
 /// @brief Gathers runtime tenancy facts (`INFO keyspace`, bounded `SCAN`, `CLIENT LIST`) from a live Redis connection.
-TenancyFacts gather_runtime_tenancy_facts(sw::redis::Redis& redis);
+[[nodiscard]] TenancyFacts gather_runtime_tenancy_facts(sw::redis::Redis& redis);
 
 /// @brief Structured semver version of the target Redis server.
 struct RedisVersion {
@@ -79,7 +79,7 @@ struct RedisVersion {
 
 // "redis_version:8.4.7" out of an `INFO server` reply. Throws StartupFatal when the field is missing or malformed.
 /// @brief Extracts and parses semver from `INFO server` text output.
-RedisVersion parse_redis_version(std::string_view info_server);
+[[nodiscard]] RedisVersion parse_redis_version(std::string_view info_server);
 
 // What the server told us. An absent optional means the command was refused (CONFIG is often disabled on managed Redis).
 /// @brief Facts gathered during startup probes (INFO server, maxmemory-policy, appendonly).
@@ -109,7 +109,7 @@ struct StartupReport {
 // `require_noeviction` is set (any eviction could silently delete our streams or checkpoint).
 /// @brief Evaluates startup facts against engine invariants.
 /// @throws StartupFatal If Redis version < 7.0 or maxmemory-policy != noeviction.
-StartupReport evaluate_startup(const StartupFacts& facts, bool require_noeviction);
+[[nodiscard]] StartupReport evaluate_startup(const StartupFacts& facts, bool require_noeviction);
 
 /// @brief Options for Redis pre-flight connection readiness loop.
 struct StartupOptions {
@@ -130,6 +130,6 @@ struct StartupOptions {
 // Connects, then runs the §4.3 checks. Waits (does not exit) while Redis is unreachable. Returns nullopt only when
 // `stop` fired. Throws StartupFatal for AUTH rejected, redis < 7.0, or noeviction required and not set.
 /// @brief Connects to Redis URL and blocks until server is ready and validated.
-std::optional<StartupReport> await_redis_ready(const std::string& redis_url, const StartupOptions& opts);
+[[nodiscard]] std::optional<StartupReport> await_redis_ready(std::string_view redis_url, const StartupOptions& opts);
 
 }  // namespace evml::sink

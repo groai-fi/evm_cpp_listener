@@ -25,30 +25,27 @@ using tcp = net::ip::tcp;
 
 namespace {
 
-/// Runs one phase, turning Boost errors into a TransportError that names the phase and the REDACTED url only.
-template <class Awaitable>
-net::awaitable<void> phase(const std::string& who, const char* name, Awaitable&& a) {
-    try {
-        co_await std::forward<Awaitable>(a);
-    } catch (const boost::system::system_error& e) {
-        const bool timed_out = e.code() == beast::error::timeout;
-        throw rpc::TransportError(std::string(name) + " failed for " + who + ": " +
-                                  (timed_out ? "timeout" : e.code().message()));
-    }
+core::Error format_phase_err(std::string_view who, const char* name, const boost::system::error_code& ec) {
+    const bool timed_out = ec == beast::error::timeout;
+    return core::Error{std::string(name) + " failed for " + std::string(who) + ": " +
+                       (timed_out ? "timeout" : ec.message())};
 }
 
 template <class Stream>
-net::awaitable<http::response<http::string_body>> exchange(Stream& stream, http::request<http::string_body>& req,
-                                                           std::chrono::milliseconds timeout, std::size_t max_bytes,
-                                                           const std::string& who) {
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    co_await phase(who, "write", http::async_write(stream, req, net::use_awaitable));
+net::awaitable<core::Result<http::response<http::string_body>>> exchange(
+    std::shared_ptr<Stream> stream, http::request<http::string_body>& req, std::chrono::milliseconds timeout,
+    std::size_t max_bytes, std::string who) {
+    boost::system::error_code ec;
+    beast::get_lowest_layer(*stream).expires_after(timeout);
+    co_await http::async_write(*stream, req, net::redirect_error(net::use_awaitable, ec));
+    if (ec) co_return format_phase_err(who, "write", ec);
 
     beast::flat_buffer buf;
     http::response_parser<http::string_body> parser;
     parser.body_limit(max_bytes);
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    co_await phase(who, "read", http::async_read(stream, buf, parser, net::use_awaitable));
+    beast::get_lowest_layer(*stream).expires_after(timeout);
+    co_await http::async_read(*stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
+    if (ec) co_return format_phase_err(who, "read", ec);
     co_return parser.release();
 }
 
@@ -74,48 +71,83 @@ void validate_headers(const HttpClient::Headers& headers) {
 
 }  // namespace
 
-HttpClient::HttpClient(net::any_io_executor executor, HttpClientOptions opts)
-    : exec_(std::move(executor)), opts_(std::move(opts)) {
-    if (opts_.timeout.count() <= 0) throw std::invalid_argument("HttpClient: timeout must be > 0");
-    if (opts_.max_response_bytes == 0) throw std::invalid_argument("HttpClient: max_response_bytes must be > 0");
+struct HttpClient::State {
+    State(net::any_io_executor ex, HttpClientOptions o) : exec(std::move(ex)), opts(std::move(o)) {}
+    net::any_io_executor exec;
+    HttpClientOptions opts;
+    bool cancelled{false};
+    std::uint64_t next_closer_id{1};
+    std::unordered_map<std::uint64_t, std::function<void()>> closers;
+};
+
+HttpClient::HttpClient(net::any_io_executor executor, HttpClientOptions opts) {
+    if (opts.timeout.count() <= 0) throw std::invalid_argument("HttpClient: timeout must be > 0");
+    if (opts.max_response_bytes == 0) throw std::invalid_argument("HttpClient: max_response_bytes must be > 0");
+    state_ = std::make_shared<State>(std::move(executor), std::move(opts));
 }
 
-net::awaitable<HttpResponse> HttpClient::post_json(const std::string& url, std::string body, const Headers& headers) {
-    co_return co_await request(Method::Post, url, std::move(body), headers);
+net::awaitable<core::Result<HttpResponse>> HttpClient::try_post_json(
+    std::string url, std::string body, Headers headers) {
+    auto st = state_;
+    validate_headers(headers);
+    co_return co_await request(std::move(st), Method::Post, std::move(url), std::move(body), std::move(headers));
 }
 
-net::awaitable<HttpResponse> HttpClient::get(const std::string& url, const Headers& headers) {
-    co_return co_await request(Method::Get, url, {}, headers);
+net::awaitable<core::Result<HttpResponse>> HttpClient::try_get(std::string url, Headers headers) {
+    auto st = state_;
+    validate_headers(headers);
+    co_return co_await request(std::move(st), Method::Get, std::move(url), {}, std::move(headers));
+}
+
+net::awaitable<HttpResponse> HttpClient::post_json(std::string url, std::string body, Headers headers) {
+    auto st = state_;
+    validate_headers(headers);
+    auto r = co_await request(std::move(st), Method::Post, std::move(url), std::move(body), std::move(headers));
+    if (!r) throw rpc::TransportError(r.error().what());
+    co_return std::move(*r);
+}
+
+net::awaitable<HttpResponse> HttpClient::get(std::string url, Headers headers) {
+    auto st = state_;
+    validate_headers(headers);
+    auto r = co_await request(std::move(st), Method::Get, std::move(url), {}, std::move(headers));
+    if (!r) throw rpc::TransportError(r.error().what());
+    co_return std::move(*r);
 }
 
 void HttpClient::cancel() {
-    cancelled_ = true;
-    auto active = closers_;
+    state_->cancelled = true;
+    auto active = state_->closers;
     for (auto& [_, fn] : active) {
         if (fn) fn();
     }
 }
 
-net::awaitable<HttpResponse> HttpClient::request(Method method, const std::string& url, std::string body,
-                                                 const Headers& headers) {
-    validate_headers(headers);
+net::awaitable<core::Result<HttpResponse>> HttpClient::request(
+    std::shared_ptr<State> st, Method method, std::string url, std::string body, Headers headers) {
     const std::string who = core::env::redact(url);
-    if (cancelled_) throw rpc::TransportError("request cancelled for " + who);
-    const rpc::ParsedUrl u = rpc::parse_url(url, rpc::UrlKind::Http);  // throws TransportError with the redacted URL
+    if (st->cancelled) co_return core::Error{"request cancelled for " + who};
+    const auto parsed = rpc::try_parse_url(url, rpc::UrlKind::Http);
+    if (!parsed) co_return parsed.error();
+    const rpc::ParsedUrl& u = *parsed;
 
     struct CloserGuard {
-        std::unordered_map<std::uint64_t, std::function<void()>>& map;
+        std::shared_ptr<State> st;
         std::uint64_t id;
-        CloserGuard(std::unordered_map<std::uint64_t, std::function<void()>>& m, std::uint64_t i, std::function<void()> fn)
-            : map(m), id(i) {
-            map[id] = std::move(fn);
+        CloserGuard(std::shared_ptr<State> s, std::uint64_t i, std::function<void()> fn)
+            : st(std::move(s)), id(i) {
+            st->closers[id] = std::move(fn);
         }
-        ~CloserGuard() { map.erase(id); }
+        ~CloserGuard() { st->closers.erase(id); }
+        CloserGuard(const CloserGuard&) = delete;
+        CloserGuard& operator=(const CloserGuard&) = delete;
+        CloserGuard(CloserGuard&&) = delete;
+        CloserGuard& operator=(CloserGuard&&) = delete;
     };
 
     http::request<http::string_body> req{method == Method::Post ? http::verb::post : http::verb::get, u.target, 11};
     req.set(http::field::host, u.host_header());
-    req.set(http::field::user_agent, opts_.user_agent);
+    req.set(http::field::user_agent, st->opts.user_agent);
     req.set(http::field::accept, "*/*");
     req.set(http::field::accept_encoding, "identity");  // no gunzip on our side
     req.set(http::field::connection, "close");
@@ -126,30 +158,32 @@ net::awaitable<HttpResponse> HttpClient::request(Method method, const std::strin
     for (const auto& [name, value] : headers) req.set(name, value);
     req.prepare_payload();
 
-    tcp::resolver resolver(exec_);
+    auto resolver = std::make_shared<tcp::resolver>(st->exec);
     tcp::resolver::results_type endpoints;
     {
-        CloserGuard rg(closers_, next_closer_id_++, [&resolver] { resolver.cancel(); });
-        try {
-            endpoints = co_await resolver.async_resolve(u.host, u.port, net::use_awaitable);
-        } catch (const boost::system::system_error& e) {
-            throw rpc::TransportError("resolve failed for " + who + ": " + e.code().message());
-        }
+        CloserGuard rg(st, st->next_closer_id++, [resolver] { resolver->cancel(); });
+        boost::system::error_code ec;
+        endpoints = co_await resolver->async_resolve(u.host, u.port, net::redirect_error(net::use_awaitable, ec));
+        if (ec) co_return core::Error{"resolve failed for " + who + ": " + ec.message()};
     }
-    if (cancelled_) throw rpc::TransportError("request cancelled for " + who);
+    if (st->cancelled) co_return core::Error{"request cancelled for " + who};
 
     http::response<http::string_body> res;
     if (!u.tls) {
-        auto stream = std::make_shared<beast::tcp_stream>(exec_);
-        CloserGuard sg(closers_, next_closer_id_++, [stream] {
+        auto stream = std::make_shared<beast::tcp_stream>(st->exec);
+        CloserGuard sg(st, st->next_closer_id++, [stream] {
             beast::error_code ec;
             stream->socket().close(ec);
         });
-        stream->expires_after(opts_.timeout);
-        co_await phase(who, "connect", stream->async_connect(endpoints, net::use_awaitable));
-        res = co_await exchange(*stream, req, opts_.timeout, opts_.max_response_bytes, who);
-        beast::error_code ec;
-        stream->socket().shutdown(tcp::socket::shutdown_both, ec);
+        boost::system::error_code ec;
+        stream->expires_after(st->opts.timeout);
+        co_await stream->async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
+        if (ec) co_return format_phase_err(who, "connect", ec);
+        auto ex = co_await exchange(stream, req, st->opts.timeout, st->opts.max_response_bytes, who);
+        if (!ex) co_return ex.error();
+        res = std::move(*ex);
+        beast::error_code close_ec;
+        stream->socket().shutdown(tcp::socket::shutdown_both, close_ec);
         stream->close();
     } else {
         // TLS with the system trust store, peer verification and a hostname check. Hold ctx before stream in a
@@ -160,22 +194,28 @@ net::awaitable<HttpResponse> HttpClient::request(Method method, const std::strin
             TlsHttpConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
                 : ctx(std::move(c)), stream(ex, *ctx) {}
         };
-        auto conn = std::make_shared<TlsHttpConn>(exec_, rpc::make_tls_client_context());
-        auto& stream = conn->stream;
-        CloserGuard sg(closers_, next_closer_id_++, [conn] {
+        auto conn = std::make_shared<TlsHttpConn>(st->exec, rpc::make_tls_client_context());
+        auto stream_ptr = std::shared_ptr<beast::ssl_stream<beast::tcp_stream>>(conn, &conn->stream);
+        CloserGuard sg(st, st->next_closer_id++, [conn] {
             beast::error_code ec;
             beast::get_lowest_layer(conn->stream).socket().close(ec);
         });
-        if (!rpc::configure_tls_sni_and_hostname(stream, u.host))
-            throw rpc::TransportError("cannot set TLS SNI for " + who);
-        beast::get_lowest_layer(stream).expires_after(opts_.timeout);
-        co_await phase(who, "connect", beast::get_lowest_layer(stream).async_connect(endpoints, net::use_awaitable));
-        beast::get_lowest_layer(stream).expires_after(opts_.timeout);
-        co_await phase(who, "TLS handshake", stream.async_handshake(ssl::stream_base::client, net::use_awaitable));
-        res = co_await exchange(stream, req, opts_.timeout, opts_.max_response_bytes, who);
-        beast::error_code ec;
-        beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
-        beast::get_lowest_layer(stream).close();
+        if (!rpc::configure_tls_sni_and_hostname(*stream_ptr, u.host))
+            co_return core::Error{"cannot set TLS SNI for " + who};
+        boost::system::error_code ec;
+        beast::get_lowest_layer(*stream_ptr).expires_after(st->opts.timeout);
+        co_await beast::get_lowest_layer(*stream_ptr)
+            .async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
+        if (ec) co_return format_phase_err(who, "connect", ec);
+        beast::get_lowest_layer(*stream_ptr).expires_after(st->opts.timeout);
+        co_await stream_ptr->async_handshake(ssl::stream_base::client, net::redirect_error(net::use_awaitable, ec));
+        if (ec) co_return format_phase_err(who, "TLS handshake", ec);
+        auto ex = co_await exchange(stream_ptr, req, st->opts.timeout, st->opts.max_response_bytes, who);
+        if (!ex) co_return ex.error();
+        res = std::move(*ex);
+        beast::error_code close_ec;
+        beast::get_lowest_layer(*stream_ptr).socket().shutdown(tcp::socket::shutdown_both, close_ec);
+        beast::get_lowest_layer(*stream_ptr).close();
     }
     co_return HttpResponse{static_cast<int>(res.result_int()), std::move(res.body())};
 }

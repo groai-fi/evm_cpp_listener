@@ -1,6 +1,6 @@
 #pragma once
 
-#include <string>
+#include <string_view>
 
 #include "core/config.hpp"
 #include "provider/provider_pool.hpp"
@@ -17,6 +17,6 @@ namespace evml::app {
 /// @param user_agent Evaluated User-Agent HTTP/WS header string with injected semver.
 /// @return Fully populated PoolConfig ready for ProviderPool instantiation.
 /// @throws std::invalid_argument If the resulting pool topology violates internal pool invariants.
-provider::PoolConfig make_pool_config(const core::Config& cfg, const std::string& user_agent);
+[[nodiscard]] provider::PoolConfig make_pool_config(const core::Config& cfg, std::string_view user_agent);
 
 }  // namespace evml::app

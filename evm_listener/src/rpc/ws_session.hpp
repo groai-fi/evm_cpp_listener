@@ -63,8 +63,8 @@ class WsSession : public std::enable_shared_from_this<WsSession> {
 public:
     /// @brief Factory function creating an initialized WebSocket session.
     /// @warning Throws std::invalid_argument if no subscription is configured or required handlers are missing.
-    static std::shared_ptr<WsSession> create(boost::asio::any_io_executor executor, WsSessionConfig cfg,
-                                             WsHandlers handlers);
+    [[nodiscard]] static std::shared_ptr<WsSession> create(boost::asio::any_io_executor executor, WsSessionConfig cfg,
+                                                           WsHandlers handlers);
 
     /// @brief Spawns the session coroutine on the executor (throws std::logic_error if called twice).
     void start();
@@ -72,16 +72,19 @@ public:
     void stop();
 
     /// @brief Returns true if the session has terminated or been stopped.
-    bool closed() const { return closed_; }
+    [[nodiscard]] bool closed() const noexcept { return closed_; }
     /// @brief Provider identifier name.
-    const std::string& name() const { return cfg_.name; }
+    [[nodiscard]] const std::string& name() const noexcept { return cfg_.name; }
     /// @brief Total duration the session was in Ready state (used by Backoff::report_live to measure stability).
-    std::chrono::milliseconds live_for() const { return live_for_; }
+    [[nodiscard]] std::chrono::milliseconds live_for() const noexcept { return live_for_; }
     /// @brief Number of dropped notifications whose subscription ID was unknown to this session.
-    std::uint64_t unknown_subscription_msgs() const { return unknown_msgs_; }
+    [[nodiscard]] std::uint64_t unknown_subscription_msgs() const noexcept { return unknown_msgs_; }
 
+    ~WsSession() = default;
     WsSession(const WsSession&) = delete;
     WsSession& operator=(const WsSession&) = delete;
+    WsSession(WsSession&&) = delete;
+    WsSession& operator=(WsSession&&) = delete;
 
 private:
     struct Private {};
@@ -91,9 +94,9 @@ public:
 
 private:
     boost::asio::awaitable<void> run();
-    boost::asio::awaitable<void> session_main();
+    boost::asio::awaitable<WsClosed> session_main(std::shared_ptr<WsSession> self);
     template <class Ws>
-    boost::asio::awaitable<void> serve(Ws& ws);
+    boost::asio::awaitable<WsClosed> serve(std::shared_ptr<WsSession> self, Ws& ws);
     void finish(WsClosed c);
     void close_socket();
 

@@ -26,22 +26,29 @@ std::string quoted(std::string_view s) {
 
 }  // namespace
 
-/// @brief Strictly parses a 0x-prefixed hex quantity string into a 64-bit unsigned integer.
-std::uint64_t parse_u64_hex(std::string_view s) {
+/// @brief Non-throwing operational parser for 0x-prefixed hex quantity strings into uint64_t.
+Result<std::uint64_t> try_parse_u64_hex(std::string_view s) noexcept {
     // Enforce 0x/0X prefix and at least one trailing hex digit
     if (s.size() < 3 || s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) {
-        throw DecodeError("invalid hex quantity (need 0x prefix and >=1 digit): " + quoted(s));
+        return Error("invalid hex quantity (need 0x prefix and >=1 digit): " + quoted(s));
     }
     std::uint64_t v = 0;
     // Iterate over digits after the 0x prefix
     for (const char c : s.substr(2)) {
         const int n = nibble(c);
-        if (n < 0) throw DecodeError("invalid hex digit in quantity: " + quoted(s));
+        if (n < 0) return Error("invalid hex digit in quantity: " + quoted(s));
         // Guard against 64-bit overflow: shifting left by 4 must not discard bits
-        if (v >> 60) throw DecodeError("hex quantity overflows uint64: " + quoted(s));
+        if (v >> 60) return Error("hex quantity overflows uint64: " + quoted(s));
         v = (v << 4) | static_cast<std::uint64_t>(n);
     }
     return v;
+}
+
+/// @brief Strictly parses a 0x-prefixed hex quantity string into a 64-bit unsigned integer.
+std::uint64_t parse_u64_hex(std::string_view s) {
+    auto res = try_parse_u64_hex(s);
+    if (!res) throw DecodeError(res.error().what());
+    return *res;
 }
 
 /// @brief Formats a 64-bit unsigned integer into minimal lowercase hex notation.
@@ -58,22 +65,30 @@ std::string to_hex_u64(std::uint64_t v) {
     return "0x" + std::string(rev.rbegin(), rev.rend());
 }
 
-/// @brief Parses a fixed-size byte array from a strict "0x"-prefixed hex string of length 2 + 2*N.
+/// @brief Non-throwing operational parser for fixed-size byte array from "0x"-prefixed hex string.
 template <std::size_t N>
-FixedBytes<N> FixedBytes<N>::from_hex(std::string_view s) {
+Result<FixedBytes<N>> FixedBytes<N>::try_from_hex(std::string_view s) noexcept {
     // Validate exact length and 0x prefix
     if (s.size() != 2 + 2 * N || s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) {
-        throw DecodeError("expected 0x + " + std::to_string(2 * N) + " hex digits: " + quoted(s));
+        return Error("expected 0x + " + std::to_string(2 * N) + " hex digits: " + quoted(s));
     }
     FixedBytes<N> out;
     // Parse consecutive pairs of hex characters into single bytes
     for (std::size_t i = 0; i < N; ++i) {
         const int hi = nibble(s[2 + 2 * i]);
         const int lo = nibble(s[3 + 2 * i]);
-        if (hi < 0 || lo < 0) throw DecodeError("invalid hex digit: " + quoted(s));
+        if (hi < 0 || lo < 0) return Error("invalid hex digit: " + quoted(s));
         out.bytes[i] = static_cast<std::uint8_t>((hi << 4) | lo);
     }
     return out;
+}
+
+/// @brief Parses a fixed-size byte array from a strict "0x"-prefixed hex string of length 2 + 2*N.
+template <std::size_t N>
+FixedBytes<N> FixedBytes<N>::from_hex(std::string_view s) {
+    auto res = try_from_hex(s);
+    if (!res) throw DecodeError(res.error().what());
+    return *res;
 }
 
 /// @brief Formats fixed bytes into lowercase "0x"-prefixed hex string.

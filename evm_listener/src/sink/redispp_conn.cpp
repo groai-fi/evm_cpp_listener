@@ -10,9 +10,8 @@ namespace evml::sink {
 
 namespace {
 
-sw::redis::Redis make_redis(const std::string& url, std::chrono::milliseconds io_timeout,
-                            const std::string& client_name) {
-    sw::redis::ConnectionOptions opts = sw::redis::Uri(url).connection_options();
+sw::redis::Redis make_redis(std::string_view url, std::chrono::milliseconds io_timeout, std::string_view client_name) {
+    sw::redis::ConnectionOptions opts = sw::redis::Uri(std::string(url)).connection_options();
     opts.connect_timeout = io_timeout;
     opts.socket_timeout = io_timeout;
     if (!client_name.empty()) {
@@ -28,20 +27,25 @@ bool starts_with(const std::string& s, const char* prefix) { return s.rfind(pref
 // An error reply that means "the server cannot serve this right now", as opposed to "your command is wrong".
 bool is_transient_reply(const std::string& msg) { return starts_with(msg, "LOADING") || starts_with(msg, "BUSY"); }
 
-// Runs `f`, turning every transport-level failure into ConnError. Fatal error replies pass through unchanged.
+// Runs `f`, turning every transport-level failure into Result<T, ConnError>. Fatal error replies pass through unchanged.
 template <class F>
-auto guarded(F&& f) -> decltype(f()) {
+auto try_guarded(F&& f) -> core::Result<decltype(f()), ConnError> {
     try {
-        return f();
+        if constexpr (std::is_void_v<decltype(f())>) {
+            f();
+            return {};
+        } else {
+            return f();
+        }
     } catch (const sw::redis::OomError& e) {
-        throw ConnError(std::string("redis OOM: ") + e.what());
+        return ConnError(std::string("redis OOM: ") + e.what());
     } catch (const sw::redis::ReplyError& e) {
-        if (is_transient_reply(e.what())) throw ConnError(std::string("redis busy: ") + e.what());
+        if (is_transient_reply(e.what())) return ConnError(std::string("redis busy: ") + e.what());
         throw;
     } catch (const sw::redis::IoError& e) {  // includes TimeoutError
-        throw ConnError(std::string("redis io: ") + e.what());
+        return ConnError(std::string("redis io: ") + e.what());
     } catch (const sw::redis::ClosedError& e) {
-        throw ConnError(std::string("redis closed: ") + e.what());
+        return ConnError(std::string("redis closed: ") + e.what());
     }
 }
 
@@ -103,33 +107,51 @@ std::optional<std::string> flat_str(const redisReply& arr, const std::string& ke
 
 }  // namespace
 
-RedisppConn::RedisppConn(const std::string& url, const Keys& keys, std::chrono::milliseconds io_timeout,
-                         std::string client_name)
+RedisppConn::RedisppConn(std::string_view url, const Keys& keys, std::chrono::milliseconds io_timeout,
+                         std::string_view client_name)
     : redis_(make_redis(url, io_timeout, client_name)), keys_(keys) {}
 
+core::Result<TenancyFacts, ConnError> RedisppConn::try_read_tenancy_facts() {
+    return try_guarded([&] { return gather_runtime_tenancy_facts(redis_); });
+}
+
 TenancyFacts RedisppConn::read_tenancy_facts() {
-    return guarded([&] { return gather_runtime_tenancy_facts(redis_); });
+    auto r = try_read_tenancy_facts();
+    if (!r) throw r.error();
+    return std::move(*r);
+}
+
+core::Result<void, ConnError> RedisppConn::try_load_scripts() {
+    auto r = try_guarded([&] {
+        for (std::size_t i = 0; i < kScriptCount; ++i)
+            shas_[i] = redis_.script_load(script_source(static_cast<Script>(i)));
+    });
+    if (!r) return r.error();
+    loaded_ = true;
+    return {};
 }
 
 void RedisppConn::load_scripts() {
-    guarded([&] {
-        for (std::size_t i = 0; i < kScriptCount; ++i)
-            shas_[i] = redis_.script_load(script_source(static_cast<Script>(i)));
-        return 0;
-    });
-    loaded_ = true;
+    if (auto r = try_load_scripts(); !r) throw r.error();
 }
 
-void RedisppConn::set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) {
-    guarded([&] {
-        redis_.set(key, value, std::chrono::seconds(ttl_s));
-        return 0;
+core::Result<void, ConnError> RedisppConn::try_set_with_ttl(std::string_view key, std::string_view value,
+                                                            std::uint32_t ttl_s) {
+    return try_guarded([&] {
+        redis_.set(sw::redis::StringView(key.data(), key.size()), sw::redis::StringView(value.data(), value.size()),
+                   std::chrono::seconds(ttl_s));
     });
 }
 
-std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& calls) {
-    if (!loaded_) load_scripts();
-    return guarded([&] {
+void RedisppConn::set_with_ttl(std::string_view key, std::string_view value, std::uint32_t ttl_s) {
+    if (auto r = try_set_with_ttl(key, value, ttl_s); !r) throw r.error();
+}
+
+core::Result<std::vector<CallOutcome>, ConnError> RedisppConn::try_pipeline(const std::vector<ScriptCall>& calls) {
+    if (!loaded_) {
+        if (auto lr = try_load_scripts(); !lr) return lr.error();
+    }
+    return try_guarded([&] {
         // Build and dispatch non-transactional Redis pipeline containing all script invocations.
         auto pipe = redis_.pipeline(false);
         for (const auto& c : calls)
@@ -153,13 +175,21 @@ std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& ca
     });
 }
 
-pipeline::Checkpoint RedisppConn::read_checkpoint() {
+std::vector<CallOutcome> RedisppConn::pipeline(const std::vector<ScriptCall>& calls) {
+    auto r = try_pipeline(calls);
+    if (!r) throw r.error();
+    return std::move(*r);
+}
+
+core::Result<pipeline::Checkpoint, ConnError> RedisppConn::try_read_checkpoint() {
     std::unordered_map<std::string, std::string> h;
-    guarded([&] {
-        // Fetch all fields of the checkpoint hash (safe, finalized, contracts).
-        redis_.hgetall(keys_.ckpt(), std::inserter(h, h.end()));
-        return 0;
-    });
+    if (auto r = try_guarded([&] {
+            // Fetch all fields of the checkpoint hash (safe, finalized, contracts).
+            redis_.hgetall(keys_.ckpt(), std::inserter(h, h.end()));
+        });
+        !r) {
+        return r.error();
+    }
 
     pipeline::Checkpoint ck;
     for (const auto& [field, value] : h) {
@@ -171,13 +201,22 @@ pipeline::Checkpoint RedisppConn::read_checkpoint() {
     return ck;
 }
 
-std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t from, std::uint64_t to) {
+pipeline::Checkpoint RedisppConn::read_checkpoint() {
+    auto r = try_read_checkpoint();
+    if (!r) throw r.error();
+    return std::move(*r);
+}
+
+core::Result<std::vector<pipeline::ReleasedEntry>, ConnError> RedisppConn::try_read_released(std::uint64_t from,
+                                                                                             std::uint64_t to) {
     // Flat [member, score, member, score, ...], ordered by score then member.
     // Query sorted set for released log entries within requested block range [from, to].
-    const auto flat = guarded([&] {
+    const auto flat_res = try_guarded([&] {
         return redis_.command<std::vector<std::string>>("ZRANGEBYSCORE", keys_.released(), std::to_string(from),
                                                         std::to_string(to), "WITHSCORES");
     });
+    if (!flat_res) return flat_res.error();
+    const auto& flat = *flat_res;
     if (flat.size() % 2 != 0) throw std::runtime_error("redis: ZRANGEBYSCORE WITHSCORES returned an odd element count");
 
     std::vector<pipeline::ReleasedEntry> out;
@@ -190,10 +229,12 @@ std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t fr
         for (std::size_t i = first; i < last; i += 2) ids.push_back(flat[i]);
 
         std::vector<sw::redis::OptionalString> images;
-        guarded([&] {
-            redis_.hmget(keys_.released_data(), ids.begin(), ids.end(), std::back_inserter(images));
-            return 0;
-        });
+        if (auto r = try_guarded([&] {
+                redis_.hmget(keys_.released_data(), ids.begin(), ids.end(), std::back_inserter(images));
+            });
+            !r) {
+            return r.error();
+        }
         if (images.size() != ids.size()) throw std::runtime_error("redis: HMGET returned the wrong number of values");
 
         for (std::size_t k = 0; k < ids.size(); ++k) {
@@ -209,15 +250,26 @@ std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t fr
     return out;
 }
 
-GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const std::string& group) {
-    const auto run = [this](std::vector<std::string> argv) -> sw::redis::ReplyUPtr {
-        return guarded([&] { return redis_.command(argv.begin(), argv.end()); });
+std::vector<pipeline::ReleasedEntry> RedisppConn::read_released(std::uint64_t from, std::uint64_t to) {
+    auto r = try_read_released(from, to);
+    if (!r) throw r.error();
+    return std::move(*r);
+}
+
+core::Result<GroupFacts, ConnError> RedisppConn::try_read_group_facts(std::string_view stream_key,
+                                                                      std::string_view group) {
+    const std::string sk(stream_key);
+    const std::string grp(group);
+    const auto run = [this](std::vector<std::string> argv) -> core::Result<sw::redis::ReplyUPtr, ConnError> {
+        return try_guarded([&] { return redis_.command(argv.begin(), argv.end()); });
     };
     GroupFacts f;
 
     sw::redis::ReplyUPtr groups;
     try {
-        groups = run({"XINFO", "GROUPS", stream_key});
+        auto groups_res = run({"XINFO", "GROUPS", sk});
+        if (!groups_res) return groups_res.error();
+        groups = std::move(*groups_res);
     } catch (const sw::redis::ReplyError& e) {
         if (std::string(e.what()).find("no such key") != std::string::npos) return f;  // the stream does not exist yet
         throw;
@@ -226,7 +278,7 @@ GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const st
     require_array(*groups, "XINFO GROUPS");
     const redisReply* mine = nullptr;
     for (std::size_t i = 0; i < groups->elements && !mine; ++i)
-        if (flat_str(*groups->element[i], "name", "XINFO GROUPS entry") == group) mine = groups->element[i];
+        if (flat_str(*groups->element[i], "name", "XINFO GROUPS entry") == grp) mine = groups->element[i];
     if (!mine) return f;
     f.group_found = true;
     f.last_delivered_id = flat_str(*mine, "last-delivered-id", "XINFO GROUPS entry").value();
@@ -234,7 +286,9 @@ GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const st
     if (const auto read = flat_str(*mine, "entries-read", "XINFO GROUPS entry"))
         f.entries_read = parse_u64(*read, "group entries-read");
 
-    const auto info = run({"XINFO", "STREAM", stream_key});
+    const auto info_res = run({"XINFO", "STREAM", sk});
+    if (!info_res) return info_res.error();
+    const auto& info = *info_res;
     f.max_deleted_id = flat_str(*info, "max-deleted-entry-id", "XINFO STREAM").value_or("");
     if (const auto added = flat_str(*info, "entries-added", "XINFO STREAM"))
         f.entries_added = parse_u64(*added, "stream entries-added");
@@ -244,7 +298,9 @@ GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const st
         f.first_entry_id = reply_str(*first->element[0]);
     }
 
-    const auto next = run({"XRANGE", stream_key, "(" + f.last_delivered_id, "+", "COUNT", "1"});
+    const auto next_res = run({"XRANGE", sk, "(" + f.last_delivered_id, "+", "COUNT", "1"});
+    if (!next_res) return next_res.error();
+    const auto& next = *next_res;
     require_array(*next, "XRANGE");
     if (next->elements > 0) {
         require_array(*next->element[0], "XRANGE entry");
@@ -253,17 +309,27 @@ GroupFacts RedisppConn::read_group_facts(const std::string& stream_key, const st
     }
 
     // Summary form: [count, smallest id | nil, largest id | nil, consumers | nil]
-    const auto pending = run({"XPENDING", stream_key, group});
+    const auto pending_res = run({"XPENDING", sk, grp});
+    if (!pending_res) return pending_res.error();
+    const auto& pending = *pending_res;
     require_array(*pending, "XPENDING");
     if (pending->elements < 2) throw std::runtime_error("redis: XPENDING summary is too short");
     f.smallest_pending_id = reply_str(*pending->element[1]);
 
-    const auto time = run({"TIME"});
+    const auto time_res = run({"TIME"});
+    if (!time_res) return time_res.error();
+    const auto& time = *time_res;
     require_array(*time, "TIME");
     if (time->elements != 2) throw std::runtime_error("redis: TIME did not answer [seconds, microseconds]");
     f.now_ms = parse_u64(reply_str(*time->element[0]).value(), "TIME seconds") * 1000 +
                parse_u64(reply_str(*time->element[1]).value(), "TIME microseconds") / 1000;
     return f;
+}
+
+GroupFacts RedisppConn::read_group_facts(std::string_view stream_key, std::string_view group) {
+    auto r = try_read_group_facts(stream_key, group);
+    if (!r) throw r.error();
+    return std::move(*r);
 }
 
 }  // namespace evml::sink

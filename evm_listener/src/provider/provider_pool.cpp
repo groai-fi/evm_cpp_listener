@@ -68,7 +68,7 @@ void validate(const PoolConfig& c) {
         const auto& p = find(n, "ws_order");
         if (p.ws_url.empty()) fail("provider '" + n + "' is in ws_order but has no ws_url");
         if (p.http_url.empty()) fail("provider '" + n + "' is in ws_order but has no http_url (needed for probes)");
-        rpc::parse_url(p.ws_url, rpc::UrlKind::Ws);
+        (void)rpc::parse_url(p.ws_url, rpc::UrlKind::Ws);
     }
     for (const auto& n : c.getlogs_order) {
         const auto& p = find(n, "getlogs_order");
@@ -142,7 +142,7 @@ void ProviderPool::stop() {
     tick_timer_.cancel();
     end_session_quiet();
     for (auto& [_, n] : nodes_) {
-        for (auto* t : n.wait_timers) {
+        for (const auto& t : n.wait_timers) {
             t->cancel();
         }
         if (n.http) {
@@ -277,7 +277,7 @@ void ProviderPool::remember_fault(const std::string& provider, rpc::FailKind kin
     nodes_.at(provider).fault = {http_status, rpc_code, message.substr(0, 200)};
 }
 
-std::optional<std::uint32_t> ProviderPool::ms_since_head() const {
+std::optional<std::uint32_t> ProviderPool::ms_since_head() const noexcept {
     // Silence is measured across session restarts and failovers (even with no active WS provider): only a real head
     // resets it, so a pool stuck without heads still reports growing silence and WebSocket Stalled can fire.
     if (!running_ || !cfg_.subscribe_heads) return std::nullopt;
@@ -441,14 +441,13 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
         }
     }
 
-    rpc::HttpResult r;
-    try {
-        r = co_await n.http->call(std::move(body));
-    } catch (const rpc::TransportError& e) {
+    auto r_res = co_await n.http->try_call(std::move(body));
+    if (r_res.has_error()) {
         o.kind = rpc::FailKind::Retry;
-        o.error = e.what();
+        o.error = r_res.error().message;
         co_return o;
     }
+    const rpc::HttpResult& r = r_res.value();
 
     const auto apply = [&](const rpc::ErrorInfo& info, const std::string& what) {
         const auto c = rpc::classify(info);
@@ -465,15 +464,13 @@ net::awaitable<RpcOutcome> ProviderPool::call_on(std::string provider, std::stri
         co_return o;
     }
 
-    rpc::Message m;
-    try {
-        m = dec_.decode(r.body);
-    } catch (const core::DecodeError& e) {
+    auto m_res = dec_.try_decode(r.body);
+    if (m_res.has_error()) {
         o.kind = rpc::FailKind::Retry;
-        o.error = std::string("undecodable response: ") + e.what();
+        o.error = "undecodable response: " + m_res.error().message;
         co_return o;
     }
-    const auto* resp = std::get_if<rpc::Response>(&m);
+    const auto* resp = std::get_if<rpc::Response>(&m_res.value());
     if (resp == nullptr) {
         o.kind = rpc::FailKind::Retry;
         o.error = "notification received instead of a response";
@@ -543,15 +540,21 @@ net::awaitable<RpcOutcome> ProviderPool::call_to(std::string provider, RequestBu
     const auto wait = n.bucket.reserve(Clock::now());
     if (wait > Clock::duration::zero()) {
         ++n.throttled;
-        net::steady_timer timer(exec_, wait);
-        n.wait_timers.push_back(&timer);
+        auto timer = std::make_shared<net::steady_timer>(exec_, wait);
+        n.wait_timers.push_back(timer);
         struct TimerGuard {
-            std::vector<net::steady_timer*>& list;
-            net::steady_timer* t;
+            std::vector<std::shared_ptr<net::steady_timer>>& list;
+            std::shared_ptr<net::steady_timer> t;
+            TimerGuard(std::vector<std::shared_ptr<net::steady_timer>>& l, std::shared_ptr<net::steady_timer> tm)
+                : list(l), t(std::move(tm)) {}
             ~TimerGuard() { list.erase(std::remove(list.begin(), list.end(), t), list.end()); }
-        } guard{n.wait_timers, &timer};
+            TimerGuard(const TimerGuard&) = delete;
+            TimerGuard& operator=(const TimerGuard&) = delete;
+            TimerGuard(TimerGuard&&) = delete;
+            TimerGuard& operator=(TimerGuard&&) = delete;
+        } guard(n.wait_timers, timer);
         boost::system::error_code ec;
-        co_await timer.async_wait(net::redirect_error(net::use_awaitable, ec));
+        co_await timer->async_wait(net::redirect_error(net::use_awaitable, ec));
         if (stopped_ || ec) {
             RpcOutcome o;
             o.provider = provider;
@@ -570,10 +573,10 @@ net::awaitable<RpcOutcome> ProviderPool::call_to(std::string provider, RequestBu
     co_return o;
 }
 
-void ProviderPool::report_bad(const std::string& provider, const std::string& reason) {
-    ++nodes_.at(provider).inconsistent;
+void ProviderPool::report_bad(std::string_view provider, std::string_view reason) {
+    ++nodes_.at(std::string(provider)).inconsistent;
     if (const auto t = book_.on_failure(provider, rpc::FailKind::Retry, std::nullopt, Clock::now())) {
-        emit_transition(*t, "bad response: " + reason);
+        emit_transition(*t, "bad response: " + std::string(reason));
         reconcile();
     }
 }
@@ -588,18 +591,19 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
 
     std::optional<rpc::Head> head;
     if (o.ok) {
-        try {
-            head = dec_.parse_block(o.result_raw);
+        auto blk_r = dec_.try_parse_block(o.result_raw);
+        if (blk_r.has_error()) {
+            o.ok = false;
+            o.kind = rpc::FailKind::Retry;
+            o.error = "undecodable block: " + blk_r.error().message;
+        } else {
+            head = std::move(blk_r).value();
             if (!head) {
                 // Node returned null result for tag; counts as a retryable provider error.
                 o.ok = false;
                 o.kind = rpc::FailKind::Retry;
                 o.error = std::string("null block for tag '") + tag_name(tag) + "'";
             }
-        } catch (const core::DecodeError& e) {
-            o.ok = false;
-            o.kind = rpc::FailKind::Retry;
-            o.error = std::string("undecodable block: ") + e.what();
         }
     }
     note(provider, o);
@@ -616,8 +620,8 @@ net::awaitable<std::optional<TagSnapshot>> ProviderPool::read_tag(std::string pr
     co_return s;
 }
 
-std::optional<TagSnapshot> ProviderPool::cached_tag(const std::string& provider, Tag tag) const {
-    return nodes_.at(provider).tags[tag_index(tag)];
+std::optional<TagSnapshot> ProviderPool::cached_tag(std::string_view provider, Tag tag) const {
+    return nodes_.at(std::string(provider)).tags[tag_index(tag)];
 }
 
 net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<ProviderPool> self, std::string provider) {
@@ -625,12 +629,11 @@ net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<Provid
     // Probe node liveness via lightweight eth_blockNumber call.
     auto o = co_await call_on(provider, rpc::build_block_number(id), id);
     if (o.ok) {
-        try {
-            dec_.parse_quantity(o.result_raw);
-        } catch (const core::DecodeError& e) {
+        auto q_r = dec_.try_parse_quantity(o.result_raw);
+        if (q_r.has_error()) {
             o.ok = false;
             o.kind = rpc::FailKind::Retry;
-            o.error = std::string("undecodable block number: ") + e.what();
+            o.error = "undecodable block number: " + q_r.error().message;
         }
     }
     probing_.erase(provider);
@@ -660,22 +663,28 @@ net::awaitable<void> ProviderPool::probe([[maybe_unused]] std::shared_ptr<Provid
     }
 }
 
-net::awaitable<void> ProviderPool::poll([[maybe_unused]] std::shared_ptr<ProviderPool> self, std::string provider) {
+net::awaitable<void> ProviderPool::poll(std::shared_ptr<ProviderPool> self, std::string provider) {
     struct Done {
-        ProviderPool& p;
-        ~Done() { p.polling_ = false; }
-    } done{*this};
+        std::shared_ptr<ProviderPool> p;
+        explicit Done(std::shared_ptr<ProviderPool> pool) : p(std::move(pool)) {}
+        ~Done() { p->polling_ = false; }
+        Done(const Done&) = delete;
+        Done& operator=(const Done&) = delete;
+        Done(Done&&) = delete;
+        Done& operator=(Done&&) = delete;
+    } done(self);
 
     const auto id = next_id_++;
     auto o = co_await call_on(provider, rpc::build_block_number(id), id);
     std::optional<std::uint64_t> head;
     if (o.ok) {
-        try {
-            head = dec_.parse_quantity(o.result_raw);
-        } catch (const core::DecodeError& e) {
+        auto q_r = dec_.try_parse_quantity(o.result_raw);
+        if (q_r.has_error()) {
             o.ok = false;
             o.kind = rpc::FailKind::Retry;
-            o.error = std::string("undecodable block number: ") + e.what();
+            o.error = "undecodable block number: " + q_r.error().message;
+        } else {
+            head = q_r.value();
         }
     }
     if (!running_) co_return;
@@ -693,12 +702,16 @@ net::awaitable<void> ProviderPool::poll([[maybe_unused]] std::shared_ptr<Provide
     }
 }
 
-net::awaitable<void> ProviderPool::crosscheck([[maybe_unused]] std::shared_ptr<ProviderPool> self,
-                                              std::string provider) {
+net::awaitable<void> ProviderPool::crosscheck(std::shared_ptr<ProviderPool> self, std::string provider) {
     struct Done {
-        ProviderPool& p;
-        ~Done() { p.crosschecking_ = false; }
-    } done{*this};
+        std::shared_ptr<ProviderPool> p;
+        explicit Done(std::shared_ptr<ProviderPool> pool) : p(std::move(pool)) {}
+        ~Done() { p->crosschecking_ = false; }
+        Done(const Done&) = delete;
+        Done& operator=(const Done&) = delete;
+        Done(Done&&) = delete;
+        Done& operator=(Done&&) = delete;
+    } done(self);
 
     const auto safe = co_await read_tag(provider, Tag::Safe);
     // Only meaningful while that provider is still the WS provider (the detector was reset when it changed).

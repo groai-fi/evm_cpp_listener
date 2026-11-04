@@ -67,7 +67,7 @@ struct AlertSender::State {
     const AlertSenderOptions opts;
     HttpClient client;
     bool stopped{false};
-    std::vector<net::steady_timer*> retry_timers;
+    std::vector<std::shared_ptr<net::steady_timer>> retry_timers;
     std::atomic<std::uint64_t> sent{0};
     std::atomic<std::uint64_t> failures{0};
     std::atomic<std::uint64_t> seq{0};
@@ -83,31 +83,40 @@ net::awaitable<void> deliver(std::shared_ptr<AlertSender::State> st, std::string
     std::string last_error;
     for (std::uint32_t i = 1; i <= attempts; ++i) {
         if (st->stopped) co_return;
-        try {
-            const auto res = co_await st->client.post_json(st->opts.url, body, headers);
-            if (res.status >= 200 && res.status < 300) {
+        const auto res = co_await st->client.try_post_json(st->opts.url, body, headers);
+        if (res) {
+            if (res->status >= 200 && res->status < 300) {
                 ++st->sent;
                 co_return;
             }
-            last_error = "http status " + std::to_string(res.status);
-        } catch (const std::exception& e) {
-            last_error = e.what();  // TransportError text carries the redacted URL only
+            last_error = "http status " + std::to_string(res->status);
+        } else {
+            last_error = res.error().what();  // TransportError text carries the redacted URL only
         }
         if (st->stopped) co_return;
         const auto n = std::to_string(i);
         if (i < attempts) {
             st->write(spdlog::level::warn, "alert delivery attempt failed, will retry",
                       {{"title", title}, {"attempt", n}, {"error", last_error}});
-            net::steady_timer t(co_await net::this_coro::executor);
-            st->retry_timers.push_back(&t);
+            auto t = std::make_shared<net::steady_timer>(co_await net::this_coro::executor);
+            st->retry_timers.push_back(t);
             struct TimerGuard {
-                std::vector<net::steady_timer*>& list;
-                net::steady_timer* timer;
-                ~TimerGuard() { list.erase(std::remove(list.begin(), list.end(), timer), list.end()); }
-            } tg{st->retry_timers, &t};
-            t.expires_after(backoff.next());
+                std::shared_ptr<AlertSender::State> st;
+                std::shared_ptr<net::steady_timer> timer;
+                TimerGuard(std::shared_ptr<AlertSender::State> s, std::shared_ptr<net::steady_timer> tm)
+                    : st(std::move(s)), timer(std::move(tm)) {}
+                ~TimerGuard() {
+                    st->retry_timers.erase(std::remove(st->retry_timers.begin(), st->retry_timers.end(), timer),
+                                           st->retry_timers.end());
+                }
+                TimerGuard(const TimerGuard&) = delete;
+                TimerGuard& operator=(const TimerGuard&) = delete;
+                TimerGuard(TimerGuard&&) = delete;
+                TimerGuard& operator=(TimerGuard&&) = delete;
+            } tg{st, t};
+            t->expires_after(backoff.next());
             boost::system::error_code ec;
-            co_await t.async_wait(net::redirect_error(net::use_awaitable, ec));
+            co_await t->async_wait(net::redirect_error(net::use_awaitable, ec));
             if (ec || st->stopped) co_return;
         }
     }
@@ -132,11 +141,12 @@ void AlertSender::send(const Alert& alert) {
 
 void AlertSender::stop() {
     state_->stopped = true;
-    for (auto* t : state_->retry_timers) t->cancel();
+    auto timers = state_->retry_timers;
+    for (const auto& t : timers) t->cancel();
     state_->client.cancel();
 }
 
-std::uint64_t AlertSender::sent_total() const { return state_->sent.load(); }
-std::uint64_t AlertSender::send_failures_total() const { return state_->failures.load(); }
+std::uint64_t AlertSender::sent_total() const noexcept { return state_->sent.load(); }
+std::uint64_t AlertSender::send_failures_total() const noexcept { return state_->failures.load(); }
 
 }  // namespace evml::ops

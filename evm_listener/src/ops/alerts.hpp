@@ -27,8 +27,15 @@ namespace evml::ops {
 
 using AlertClock = std::chrono::steady_clock;
 
-enum class Severity { Critical, Warning, Info };
-const char* to_string(Severity s);
+enum class Severity : std::uint8_t { Critical, Warning, Info };
+[[nodiscard]] constexpr const char* to_string(Severity s) noexcept {
+    switch (s) {
+        case Severity::Critical: return "critical";
+        case Severity::Warning: return "warning";
+        case Severity::Info: return "info";
+    }
+    return "?";
+}
 
 struct Alert {
     Severity severity{Severity::Info};
@@ -63,7 +70,7 @@ struct AlertThresholds {
     std::uint32_t renotify_s{900};
     std::uint32_t event_rate_limit_s{900};
 
-    static AlertThresholds from_config(const core::Config& cfg);
+    [[nodiscard]] static AlertThresholds from_config(const core::Config& cfg);
 };
 
 struct ProviderFact {
@@ -82,7 +89,7 @@ struct ConsumerFact {
     bool found{true};                     // the configured group exists
     double undelivered_age_s{0};
     double pending_age_s{0};
-    std::int64_t lag{-1};                 // -1 = Redis cannot compute it
+    std::optional<std::uint64_t> lag;     // nullopt = Redis cannot compute it
     std::uint64_t retention_s{0};
     bool trimmed_unread{false};
     std::string last_delivered_id;
@@ -98,7 +105,7 @@ struct RedisMisconfig {
 
 /// Something that happened since the last snapshot (host-fed).
 struct AlertEvent {
-    enum class Kind {
+    enum class Kind : std::uint8_t {
         ProviderFailover,
         SafeReorg,
         SinkFenced,
@@ -114,7 +121,8 @@ struct AlertEvent {
     boost::json::object details;
 };
 
-AlertEvent redis_tenancy_violation_event(std::string message, std::uint64_t new_violations, std::uint64_t total);
+[[nodiscard]] AlertEvent redis_tenancy_violation_event(std::string message, std::uint64_t new_violations,
+                                                       std::uint64_t total);
 
 struct OpsSnapshot {
     AlertClock::time_point now{};
@@ -153,12 +161,12 @@ struct OpsSnapshot {
 
 class AlertEngine {
 public:
-    explicit AlertEngine(AlertThresholds t) : t_(std::move(t)) {}
+    explicit AlertEngine(AlertThresholds t) noexcept : t_(t) {}
 
     /// @brief Alerts to send for this snapshot (fires, re-notifies, resolves, events), in that order.
     /// Example: a gate stuck for 11 min with `safe_gate_stuck_s = 600` fires once; evaluating again 10 s later returns
     /// nothing; 15 min after the fire it re-notifies; when the gate moves it returns one "RESOLVED:" alert.
-    std::vector<Alert> evaluate(const OpsSnapshot& s);
+    [[nodiscard]] std::vector<Alert> evaluate(const OpsSnapshot& s);
 
 private:
     struct Candidate {

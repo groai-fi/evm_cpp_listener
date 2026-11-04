@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/hex.hpp"
+
 namespace evml::sink {
 
 // Raised for any spill I/O failure or on-disk inconsistency (CRC mismatch, short read, bad length). Never swallowed:
@@ -27,7 +29,8 @@ struct SpillRecord {
 
 // CRC-32C (Castagnoli), exposed for tests.
 /// @brief Computes 32-bit Castagnoli CRC over memory buffer for corruption detection.
-std::uint32_t crc32c(const void* data, std::size_t len);
+[[nodiscard]] std::uint32_t crc32c(core::BytesView data) noexcept;
+[[nodiscard]] std::uint32_t crc32c(std::string_view data) noexcept;
 
 // Process-scoped FIFO on ephemeral disk (plan 4.5, rev 6 D1). Items the sink could not hand to Redis wait here and
 // replay, in order, after the outage, within the SAME process. It is wiped at construction, never replayed by a later
@@ -55,6 +58,8 @@ public:
     ~Spill();
     Spill(const Spill&) = delete;
     Spill& operator=(const Spill&) = delete;
+    Spill(Spill&&) = delete;
+    Spill& operator=(Spill&&) = delete;
 
     // Appends at the tail. Never refuses: an item the sink already accepted must not be dropped; `saturated()` is how
     // the pipeline is told to stop producing (plan 4.6).
@@ -63,18 +68,18 @@ public:
 
     // The oldest unconsumed record; nullopt when empty. Does not consume: call pop() once it was delivered.
     /// @brief Reads and validates CRC32C of the oldest unconsumed record without advancing read cursor.
-    std::optional<SpillRecord> peek();
+    [[nodiscard]] std::optional<SpillRecord> peek();
     /// @brief Advances read cursor past the current peeked record, deleting fully drained segment files.
     void pop();
 
     /// @brief Returns true if no unconsumed records remain in the WAL.
-    bool empty() const { return records_ == 0; }
+    [[nodiscard]] bool empty() const noexcept { return records_ == 0; }
     /// @brief Total count of unconsumed records stored on disk.
-    std::uint64_t records() const { return records_; }
+    [[nodiscard]] std::uint64_t records() const noexcept { return records_; }
     /// @brief Total byte size of unconsumed records on disk.
-    std::uint64_t bytes() const { return bytes_; }
+    [[nodiscard]] std::uint64_t bytes() const noexcept { return bytes_; }
     /// @brief Returns true if stored bytes exceed configured soft threshold max_bytes.
-    bool saturated() const { return bytes_ >= max_bytes_; }
+    [[nodiscard]] bool saturated() const noexcept { return bytes_ >= max_bytes_; }
 
     // Drops everything unconsumed and returns how many records were discarded (SinkFenced path, plan 4.8).
     /// @brief Discards all unconsumed segments on fenced demotion, deleting underlying files.

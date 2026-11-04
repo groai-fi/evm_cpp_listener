@@ -18,7 +18,7 @@ struct FinalDiff {
 // Reconciles previously released safe logs against canonical finalized sweep logs (plan 3.5).
 // Enforces Invariant I6 (Revert Fidelity): identifies vanished events requiring explicit retraction.
 // Watch out: An event whose blockHash changed across a reorg appears as both vanished and late.
-FinalDiff diff_released(std::uint64_t chain_id, const std::vector<ReleasedEntry>& released,
-                        const std::vector<rpc::Log>& sweep_logs);
+[[nodiscard]] FinalDiff diff_released(std::uint64_t chain_id, const std::vector<ReleasedEntry>& released,
+                                      const std::vector<rpc::Log>& sweep_logs);
 
 }  // namespace evml::pipeline

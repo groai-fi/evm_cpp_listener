@@ -51,30 +51,31 @@ public:
     explicit HostTelemetry(const core::Config& cfg);
 
     void init_metrics(const core::Config& cfg);
-    void init_ops_clients(boost::asio::any_io_executor ex, const std::string& user_agent);
+    void init_ops_clients(boost::asio::any_io_executor ex, std::string_view user_agent);
     void stop();
 
     void push_event(ops::AlertEvent ev);
     void emit_event_now(ops::AlertEvent ev, std::uint64_t ts_ms);
     void ops_tick(const TelemetryContext& ctx, std::chrono::steady_clock::time_point now, std::uint64_t ts_ms,
                   const std::optional<ops::RedisMisconfig>& redis_misconfig, std::int64_t redis_wait_since_ns,
-                  const std::string& redis_wait_family);
+                  std::string_view redis_wait_family);
     void update_metrics(const TelemetryContext& ctx);
 
-    ops::OpsResponse build_healthz(const ops::Watchdog& wd) const;
-    ops::OpsResponse build_readyz(const TelemetryContext& ctx) const;
-    ops::OpsResponse build_metrics_response(const TelemetryContext& ctx);
+    [[nodiscard]] ops::OpsResponse build_healthz(const ops::Watchdog& wd) const;
+    [[nodiscard]] ops::OpsResponse build_readyz(const TelemetryContext& ctx) const;
+    [[nodiscard]] ops::OpsResponse build_metrics_response(const TelemetryContext& ctx);
 
-    ops::SnapshotInputs build_snapshot_inputs(const TelemetryContext& ctx, std::chrono::steady_clock::time_point now,
-                                              std::uint64_t ts_ms,
-                                              const std::optional<ops::RedisMisconfig>& redis_misconfig,
-                                              std::uint32_t redis_unreachable_s,
-                                              const std::string& addr_family) const;
+    [[nodiscard]] ops::SnapshotInputs build_snapshot_inputs(const TelemetryContext& ctx,
+                                                            std::chrono::steady_clock::time_point now,
+                                                            std::uint64_t ts_ms,
+                                                            const std::optional<ops::RedisMisconfig>& redis_misconfig,
+                                                            std::uint32_t redis_unreachable_s,
+                                                            std::string_view addr_family) const;
 
-    static std::string format_heartbeat_json(std::uint64_t ts_ms, const pipeline::DriverStatus& st,
-                                             std::optional<std::uint64_t> head,
-                                             const std::optional<std::string>& active_provider,
-                                             std::optional<std::uint64_t> epoch_n);
+    [[nodiscard]] static std::string format_heartbeat_json(std::uint64_t ts_ms, const pipeline::DriverStatus& st,
+                                                           std::optional<std::uint64_t> head,
+                                                           const std::optional<std::string>& active_provider,
+                                                           std::optional<std::uint64_t> epoch_n);
 
 private:
     void set_sink_counters(const sink::SinkStatus& sk);

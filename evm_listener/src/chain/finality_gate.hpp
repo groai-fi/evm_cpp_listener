@@ -3,19 +3,28 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "core/hex.hpp"
 
 namespace evml::chain {
 
-enum class GateSignal {
+enum class GateSignal : std::uint8_t {
     None,
     SafeRegression,    // the SAME provider's `safe` went backwards: possible L1 reorg (plan 3.3/3.6)
     SafeHashMismatch,  // the SAME provider returned a different hash for the same `safe` number
     FinalizedAnomaly,  // `finalized` changed hash at the same height: CRITICAL, release frozen
 };
-const char* to_string(GateSignal s);
+[[nodiscard]] constexpr const char* to_string(GateSignal s) noexcept {
+    switch (s) {
+        case GateSignal::None: return "none";
+        case GateSignal::SafeRegression: return "safe_regression";
+        case GateSignal::SafeHashMismatch: return "safe_hash_mismatch";
+        case GateSignal::FinalizedAnomaly: return "finalized_anomaly";
+    }
+    return "unknown";
+}
 
 // Tracks the two finality gates G_s (safe) and G_f (finalized) from the tags of the CURRENT getLogs provider
 // (plan 3.3). Pure: no I/O, no clock. Single-threaded.
@@ -32,23 +41,23 @@ class FinalityGate {
 public:
     // Evaluates incoming safe block tag from the specified provider.
     // Watch out: Returns SafeRegression or SafeHashMismatch if the same provider regresses; signals reorg.
-    GateSignal on_safe(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
+    [[nodiscard]] GateSignal on_safe(std::string_view provider, std::uint64_t number, const core::Hash32& hash);
 
     // Evaluates incoming finalized block tag from the specified provider.
     // Watch out: Ignores stale lower heights from load-balanced nodes; returns FinalizedAnomaly and permanently
     // freezes release if a finalized block changes hash at the same height.
-    GateSignal on_finalized(const std::string& provider, std::uint64_t number, const core::Hash32& hash);
+    [[nodiscard]] GateSignal on_finalized(std::string_view provider, std::uint64_t number, const core::Hash32& hash);
 
     // Latest observed safe block height (nullopt until first tag received).
-    std::optional<std::uint64_t> safe() const { return latest_safe_; }
+    [[nodiscard]] std::optional<std::uint64_t> safe() const noexcept { return latest_safe_; }
 
     // Latest observed finalized block height, clamped to safe() so that G_f <= G_s strictly holds (Invariant I2).
     // Watch out: Finalized gate never advances beyond safe gate even if RPC reports higher finalized tag.
-    std::optional<std::uint64_t> finalized() const;
+    [[nodiscard]] std::optional<std::uint64_t> finalized() const noexcept;
 
     // True if pipeline release is permanently frozen due to a FinalizedAnomaly.
-    bool frozen() const { return frozen_; }
-    const std::string& frozen_reason() const { return frozen_reason_; }
+    [[nodiscard]] bool frozen() const noexcept { return frozen_; }
+    [[nodiscard]] const std::string& frozen_reason() const noexcept { return frozen_reason_; }
 
 private:
     struct Seen {

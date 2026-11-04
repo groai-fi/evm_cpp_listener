@@ -39,7 +39,7 @@ struct HttpResult {
 /// @param r HTTP exchange result.
 /// @param decoder JSON-RPC decoder used to probe body for error objects.
 /// @return Extracted ErrorInfo.
-ErrorInfo error_info_from_http(const HttpResult& r, Decoder& decoder);
+[[nodiscard]] ErrorInfo error_info_from_http(const HttpResult& r, Decoder& decoder);
 
 /// @brief Asynchronous HTTP 1.1 client for a single JSON-RPC provider with connection pooling and FIFO serialization.
 /// Concurrency & Threading:
@@ -57,35 +57,37 @@ public:
     ~HttpRpcClient();
     HttpRpcClient(const HttpRpcClient&) = delete;
     HttpRpcClient& operator=(const HttpRpcClient&) = delete;
+    HttpRpcClient(HttpRpcClient&&) = delete;
+    HttpRpcClient& operator=(HttpRpcClient&&) = delete;
+
+    /// @brief Sends a serialized JSON-RPC payload asynchronously without throwing on transport errors.
+    /// @param json_body Complete request JSON string.
+    /// @return Result containing HttpResult or transport error.
+    [[nodiscard]] boost::asio::awaitable<core::Result<HttpResult>> try_call(std::string json_body);
 
     /// @brief Sends a serialized JSON-RPC payload asynchronously.
     /// @param json_body Complete request JSON string.
     /// @return HttpResult with status code and body.
     /// @warning Throws TransportError on unrecoverable transport or TLS errors.
-    boost::asio::awaitable<HttpResult> call(std::string json_body);
+    [[nodiscard]] boost::asio::awaitable<HttpResult> call(std::string json_body);
 
     /// @brief Closes the active socket connection if open (safe to call at any time).
-    void close();
+    void close() noexcept;
 
     /// @brief Cancels any in-flight request or queued waiters and closes the active connection.
-    void cancel();
+    void cancel() noexcept;
 
     /// @brief Provider identifier name.
-    const std::string& name() const { return cfg_.name; }
+    [[nodiscard]] const std::string& name() const noexcept;
 
 private:
-    boost::asio::awaitable<std::shared_ptr<detail::HttpConn>> open();
+    struct State;
+    static boost::asio::awaitable<core::Result<std::shared_ptr<detail::HttpConn>>> open(std::shared_ptr<State> st);
+    static boost::asio::awaitable<core::Result<HttpResult>> try_call_impl(std::shared_ptr<State> st,
+                                                                          std::string json_body);
+    static boost::asio::awaitable<HttpResult> call_impl(std::shared_ptr<State> st, std::string json_body);
 
-    boost::asio::any_io_executor exec_;
-    HttpRpcClientConfig cfg_;
-    ParsedUrl url_;
-    std::string redacted_;
-    std::shared_ptr<detail::HttpConn> conn_;
-    boost::asio::ip::tcp::resolver* active_resolver_{nullptr};
-    detail::HttpConn* opening_conn_{nullptr};
-    boost::asio::steady_timer lock_timer_;  // wake-up channel of the FIFO request lock
-    bool locked_{false};
-    bool cancelled_{false};
+    std::shared_ptr<State> state_;
 };
 
 }  // namespace evml::rpc

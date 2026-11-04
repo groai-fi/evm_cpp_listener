@@ -13,23 +13,23 @@ std::string ParsedUrl::host_header() const {
     return port == def ? host : host + ":" + port;
 }
 
-/// @brief Parses and validates an RPC HTTP or WS URL, redacting secrets on failure.
-ParsedUrl parse_url(const std::string& url, UrlKind kind) {
+/// @brief Non-throwing URL parser returning Result<ParsedUrl>, redacting secrets on failure.
+core::Result<ParsedUrl> try_parse_url(std::string_view url, UrlKind kind) {
     ParsedUrl p;
     std::string rest;
     // Define expected scheme prefixes
-    const char* plain = kind == UrlKind::Http ? "http://" : "ws://";
-    const char* secure = kind == UrlKind::Http ? "https://" : "wss://";
+    const std::string_view plain = kind == UrlKind::Http ? "http://" : "ws://";
+    const std::string_view secure = kind == UrlKind::Http ? "https://" : "wss://";
     // Check for secure TLS scheme prefix first
-    if (url.rfind(secure, 0) == 0) {
+    if (url.substr(0, secure.size()) == secure) {
         p.tls = true;
-        rest = url.substr(std::string(secure).size());
-    } else if (url.rfind(plain, 0) == 0) {
+        rest = std::string(url.substr(secure.size()));
+    } else if (url.substr(0, plain.size()) == plain) {
         // Plain unencrypted scheme prefix
-        rest = url.substr(std::string(plain).size());
+        rest = std::string(url.substr(plain.size()));
     } else {
         // Reject invalid or mismatched scheme family with redacted URL
-        throw TransportError("unsupported URL scheme: " + core::env::redact(url));
+        return core::Error{"unsupported URL scheme: " + core::env::redact(url)};
     }
     // Locate boundary between authority and path/query
     const auto slash = rest.find_first_of("/?");
@@ -39,7 +39,9 @@ ParsedUrl parse_url(const std::string& url, UrlKind kind) {
     // Fix bare query strings to have leading slash
     if (p.target[0] == '?') p.target.insert(0, "/");
     // Reject userinfo (@) to prevent credential leakage or ambiguous authority parsing
-    if (authority.find('@') != std::string::npos) throw TransportError("URL userinfo is not supported: " + core::env::redact(url));
+    if (authority.find('@') != std::string::npos) {
+        return core::Error{"URL userinfo is not supported: " + core::env::redact(url)};
+    }
     // Find optional port separator (ignoring IPv6 literal brackets)
     const auto colon = authority.rfind(':');
     if (colon != std::string::npos && authority.find(']') == std::string::npos) {
@@ -51,9 +53,18 @@ ParsedUrl parse_url(const std::string& url, UrlKind kind) {
         p.port = p.tls ? "443" : "80";
     }
     // Verify non-empty host and port fields
-    if (authority.empty() || p.port.empty()) throw TransportError("malformed URL: " + core::env::redact(url));
+    if (authority.empty() || p.port.empty()) {
+        return core::Error{"malformed URL: " + core::env::redact(url)};
+    }
     p.host = authority;
     return p;
+}
+
+/// @brief Parses and validates an RPC HTTP or WS URL, redacting secrets on failure.
+ParsedUrl parse_url(std::string_view url, UrlKind kind) {
+    auto r = try_parse_url(url, kind);
+    if (!r) throw TransportError(r.error().what());
+    return std::move(*r);
 }
 
 }  // namespace evml::rpc

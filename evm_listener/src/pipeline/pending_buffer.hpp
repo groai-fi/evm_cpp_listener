@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -12,13 +13,22 @@
 
 namespace evml::pipeline {
 
-enum class StageResult {
+enum class StageResult : std::uint8_t {
     Added,
     Duplicate,       // same (blockHash, logIndex) already staged
     Removed,         // removed:true and the staged entry was erased
     RemovedUnknown,  // removed:true for something that was never staged (nothing to do)
 };
-const char* to_string(StageResult r);
+
+[[nodiscard]] constexpr const char* to_string(StageResult r) noexcept {
+    switch (r) {
+        case StageResult::Added: return "Added";
+        case StageResult::Duplicate: return "Duplicate";
+        case StageResult::Removed: return "Removed";
+        case StageResult::RemovedUnknown: return "RemovedUnknown";
+    }
+    return "?";
+}
 
 struct CrossCheck {
     std::size_t ws_missed{};  // in the sweep result only: WS never delivered it (ws_missed_logs_total)
@@ -36,7 +46,7 @@ public:
 
     // Stages incoming WS log; idempotent by (blockHash, logIndex).
     // Watch out: If log.removed is true, erases existing staged entry instead of inserting.
-    StageResult stage(const rpc::Log& log, const std::string& source);
+    StageResult stage(const rpc::Log& log, std::string_view source);
 
     // Compares staged logs across [from, to] against getLogs sweep result; drops reconciled entries.
     // Watch out: Logs where in_scope returns false (e.g. unpolled finality classes) are preserved.
@@ -47,9 +57,9 @@ public:
     // Watch out: Call immediately on head fork to prevent stale logs from corrupting cross-check telemetry.
     std::size_t purge_from(std::uint64_t number);
 
-    std::size_t size() const { return total_; }
-    std::size_t bucket_count() const { return buckets_.size(); }
-    std::uint64_t evicted_total() const { return evicted_total_; }
+    [[nodiscard]] std::size_t size() const noexcept { return total_; }
+    [[nodiscard]] std::size_t bucket_count() const noexcept { return buckets_.size(); }
+    [[nodiscard]] std::uint64_t evicted_total() const noexcept { return evicted_total_; }
 
 private:
     struct Staged {

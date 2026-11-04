@@ -37,7 +37,7 @@ struct AlertSenderOptions {
 
 /// @brief The JSON text posted to n8n: {severity, service, shard, host, title, message, ts, details}.
 /// `ts` is the current UTC time as YYYY-MM-DDTHH:MM:SSZ.
-std::string alert_payload(const AlertSenderOptions& opts, const Alert& alert);
+[[nodiscard]] std::string alert_payload(const AlertSenderOptions& opts, const Alert& alert);
 
 class AlertSender {
 public:
@@ -51,9 +51,9 @@ public:
     void stop();
 
     /// @brief Alerts delivered with a 2xx answer.
-    std::uint64_t sent_total() const;
+    [[nodiscard]] std::uint64_t sent_total() const noexcept;
     /// @brief Alerts given up on after all attempts (evml_alert_send_failures_total).
-    std::uint64_t send_failures_total() const;
+    [[nodiscard]] std::uint64_t send_failures_total() const noexcept;
 
     struct State;  // shared with the detached delivery coroutines; internal
 

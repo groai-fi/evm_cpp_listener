@@ -5,22 +5,12 @@
 
 namespace evml::pipeline {
 
-const char* to_string(StageResult r) {
-    switch (r) {
-        case StageResult::Added: return "Added";
-        case StageResult::Duplicate: return "Duplicate";
-        case StageResult::Removed: return "Removed";
-        case StageResult::RemovedUnknown: return "RemovedUnknown";
-    }
-    return "?";
-}
-
 PendingBuffer::PendingBuffer(std::size_t max_logs) : max_logs_(max_logs) {
     if (max_logs == 0) throw std::invalid_argument("PendingBuffer: max_logs must be >= 1");
 }
 
 // Stages a new log into the buffer or processes an EVM log removal notification.
-StageResult PendingBuffer::stage(const rpc::Log& log, const std::string& source) {
+StageResult PendingBuffer::stage(const rpc::Log& log, std::string_view source) {
     if (log.removed) {
         // Handle EVM log removal: find and erase previously staged entry
         const auto b = buckets_.find(log.block_number);
@@ -36,7 +26,7 @@ StageResult PendingBuffer::stage(const rpc::Log& log, const std::string& source)
 
     // Insert new entry into block_number -> block_hash -> log_index map
     auto& by_index = buckets_[log.block_number][log.block_hash];
-    if (!by_index.emplace(log.log_index, Staged{log, source}).second) return StageResult::Duplicate;
+    if (!by_index.emplace(log.log_index, Staged{log, std::string(source)}).second) return StageResult::Duplicate;
     ++total_;
     evict_to_cap(); // Enforce soft upper bound on memory usage
     return StageResult::Added;

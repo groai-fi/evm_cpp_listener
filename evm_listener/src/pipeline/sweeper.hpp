@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +19,7 @@
 
 namespace evml::pipeline {
 
-enum class StepStatus {
+enum class StepStatus : std::uint8_t {
     NoWork,   // cursor already at its ceiling
     Advanced, // one page swept, emitted and checkpointed
     Retry,    // transient: nothing emitted, cursor unchanged (a provider failure, an unreadable block)
@@ -26,7 +27,17 @@ enum class StepStatus {
               // through max_bad_attempts (no agreement between getLogs and the canonical-hash source)
     Paused,   // sink saturated (plan 4.6): nothing done
 };
-const char* to_string(StepStatus s);
+
+[[nodiscard]] constexpr const char* to_string(StepStatus s) noexcept {
+    switch (s) {
+        case StepStatus::NoWork: return "NoWork";
+        case StepStatus::Advanced: return "Advanced";
+        case StepStatus::Retry: return "Retry";
+        case StepStatus::Stalled: return "Stalled";
+        case StepStatus::Paused: return "Paused";
+    }
+    return "?";
+}
 
 struct StepResult {
     StepStatus status{StepStatus::NoWork};
@@ -87,12 +98,12 @@ public:
     // Sets starting cursors from persistent checkpoint; inclusive upper bound of already swept blocks.
     // Watch out: Throws std::invalid_argument if C_f > C_s to strictly uphold Invariant I2.
     void set_cursors(std::uint64_t c_s, std::uint64_t c_f);
-    std::uint64_t c_s() const { return c_s_; }
-    std::uint64_t c_f() const { return c_f_; }
+    [[nodiscard]] std::uint64_t c_s() const noexcept;
+    [[nodiscard]] std::uint64_t c_f() const noexcept;
 
     // Safe-reorg rewind: pulls C_s back to fork_point; clamps C_f to keep C_f <= C_s (Invariant I2).
     // Watch out: Only safe cursor rewinds in memory; persisted checkpoint advances monotonically (Invariant I3).
-    void rewind_safe(std::uint64_t fork_point);
+    void rewind_safe(std::uint64_t fork_point) noexcept;
 
     // Advances safe sweep by one AIMD page in (C_s, g_s]; emits safe-class events and adds to released ZSET.
     // Watch out: Returns StepStatus::Paused if sink is saturated or degraded.
@@ -112,7 +123,7 @@ public:
     // Watch out: Idempotent across transient provider retries; preserves lowest pending fork point.
     boost::asio::awaitable<ReverifyResult> reverify_released();
 
-    const SweepStats& stats() const { return stats_; }
+    [[nodiscard]] const SweepStats& stats() const noexcept;
 
 private:
     struct Fetched {
@@ -124,22 +135,12 @@ private:
         std::map<std::uint64_t, BlockInfo> blocks;  // every block that has logs
     };
 
-    boost::asio::awaitable<Fetched> fetch_page(std::uint64_t cursor, std::uint64_t ceiling, const core::LogFilter& filter,
-                                               std::optional<core::Finality> only_class);
-    AimdPager& pager_for(const std::string& provider);
-    Event build_event(const rpc::Log& log, const Fetched& f, EventType type) const;
+    struct State;
+    static boost::asio::awaitable<Fetched> fetch_page(std::shared_ptr<State> st, std::uint64_t cursor,
+                                                      std::uint64_t ceiling, core::LogFilter filter,
+                                                      std::optional<core::Finality> only_class);
 
-    const core::Config& cfg_;
-    EventContext ctx_;
-    LogSource& source_;
-    Sink& sink_;
-    std::function<std::uint64_t()> now_ms_;
-    SweeperOptions opt_;
-    LastTypeMap recent_;
-    std::unordered_map<std::string, AimdPager> pagers_;
-    std::uint64_t c_s_{0}, c_f_{0};
-    std::optional<std::uint64_t> pending_fork_;  // lowest fork point found by an unfinished reverify_released
-    SweepStats stats_;
+    std::shared_ptr<State> state_;
 };
 
 }  // namespace evml::pipeline

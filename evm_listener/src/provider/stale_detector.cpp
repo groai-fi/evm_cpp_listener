@@ -30,7 +30,7 @@ void StaleDetector::on_http_safe(std::uint64_t number, TimePoint now) {
     evaluate(now);
 }
 
-void StaleDetector::reset_ws(TimePoint now) {
+void StaleDetector::reset_ws(TimePoint now) noexcept {
     ws_head_.reset();
     ws_safe_.reset();
     session_baseline_ = now;
@@ -38,14 +38,14 @@ void StaleDetector::reset_ws(TimePoint now) {
     safe_lag_since_.reset();  // the safe comparison involves the WS side too
 }
 
-void StaleDetector::reset_http(TimePoint) {
+void StaleDetector::reset_http(TimePoint) noexcept {
     http_head_.reset();
     http_safe_.reset();
     ws_lag_since_.reset();
     safe_lag_since_.reset();
 }
 
-void StaleDetector::evaluate(TimePoint now) {
+void StaleDetector::evaluate(TimePoint now) noexcept {
     // Check if HTTP head block is ahead of WS head by more than ws_lag_blocks (default 5).
     const bool head_lag = ws_head_ && http_head_ && *http_head_ > *ws_head_ + t_.ws_lag_blocks;
     if (!head_lag) {
@@ -65,26 +65,26 @@ void StaleDetector::evaluate(TimePoint now) {
     }
 }
 
-std::chrono::milliseconds StaleDetector::ws_head_silence(TimePoint now) const {
+std::chrono::milliseconds StaleDetector::ws_head_silence(TimePoint now) const noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(now - last_head_at_);
 }
 
-bool StaleDetector::ws_head_stalled(TimePoint now) const {
+bool StaleDetector::ws_head_stalled(TimePoint now) const noexcept {
     // Triggers if elapsed time since last received newHeads block (or session reset) exceeds head_stall (default 15s).
     return now - session_baseline_ >= t_.head_stall;
 }
 
-bool StaleDetector::ws_stale(TimePoint now) const {
+bool StaleDetector::ws_stale(TimePoint now) const noexcept {
     // Triggers if WS head has lagged HTTP head continuously for more than ws_lag_for (default 30s).
     return ws_lag_since_ && now - *ws_lag_since_ >= t_.ws_lag_for;
 }
 
-bool StaleDetector::getlogs_stale(TimePoint now) const {
+bool StaleDetector::getlogs_stale(TimePoint now) const noexcept {
     // Triggers if getLogs safe tag has lagged WS safe tag continuously for more than safe_lag_for (default 120s).
     return safe_lag_since_ && now - *safe_lag_since_ >= t_.safe_lag_for;
 }
 
-std::optional<std::uint64_t> StaleDetector::divergence() const {
+std::optional<std::uint64_t> StaleDetector::divergence() const noexcept {
     // Calculate maximum absolute block distance between WS and HTTP for both head and safe tags.
     std::uint64_t worst = 0;
     if (ws_head_ && http_head_) worst = std::max(worst, distance(*ws_head_, *http_head_));

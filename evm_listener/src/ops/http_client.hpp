@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -16,6 +17,8 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+
+#include "core/error.hpp"
 
 namespace evml::ops {
 
@@ -34,29 +37,33 @@ class HttpClient {
 public:
     using Headers = std::vector<std::pair<std::string, std::string>>;
 
-    HttpClient(boost::asio::any_io_executor executor, HttpClientOptions opts = {});
+    explicit HttpClient(boost::asio::any_io_executor executor, HttpClientOptions opts = {});
+
+    [[nodiscard]] boost::asio::awaitable<core::Result<HttpResponse>> try_post_json(
+        std::string url, std::string body, Headers headers = {});
+    [[nodiscard]] boost::asio::awaitable<core::Result<HttpResponse>> try_get(
+        std::string url, Headers headers = {});
 
     /// @brief POST `body` as application/json. Any status is returned to the caller (it decides what a non-2xx means).
     /// @throws rpc::TransportError on a bad URL, resolve/connect/TLS/read/write failure, timeout or an oversized response
     ///         (message has the redacted URL only); std::invalid_argument on a header that could break the request.
-    boost::asio::awaitable<HttpResponse> post_json(const std::string& url, std::string body, const Headers& headers = {});
+    [[nodiscard]] boost::asio::awaitable<HttpResponse> post_json(std::string url, std::string body,
+                                                                 Headers headers = {});
 
     /// @brief GET. Same contract as post_json.
-    boost::asio::awaitable<HttpResponse> get(const std::string& url, const Headers& headers = {});
+    [[nodiscard]] boost::asio::awaitable<HttpResponse> get(std::string url, Headers headers = {});
 
     /// @brief Cancels any in-flight resolve or socket operations on this client.
     void cancel();
 
-private:
-    enum class Method { Get, Post };
-    boost::asio::awaitable<HttpResponse> request(Method method, const std::string& url, std::string body,
-                                                 const Headers& headers);
+    struct State;
 
-    boost::asio::any_io_executor exec_;
-    HttpClientOptions opts_;
-    bool cancelled_{false};
-    std::uint64_t next_closer_id_{1};
-    std::unordered_map<std::uint64_t, std::function<void()>> closers_;
+private:
+    enum class Method : std::uint8_t { Get, Post };
+    static boost::asio::awaitable<core::Result<HttpResponse>> request(
+        std::shared_ptr<State> st, Method method, std::string url, std::string body, Headers headers);
+
+    std::shared_ptr<State> state_;
 };
 
 }  // namespace evml::ops

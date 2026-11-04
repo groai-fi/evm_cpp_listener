@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -33,25 +34,16 @@ public:
     boost::asio::awaitable<pipeline::LogResult> get_logs(pipeline::BlockRange range,
                                                          const core::LogFilter& filter) override;
     boost::asio::awaitable<std::optional<pipeline::BlockInfo>> block(std::uint64_t number) override;
-    std::optional<std::string> current_provider() const override;
-    void report_bad(const std::string& provider, const std::string& reason) override;
+    [[nodiscard]] std::optional<std::string> current_provider() const override;
+    void report_bad(std::string_view provider, std::string_view reason) override;
     void clear_cache() override;
 
     static constexpr std::size_t kMaxBlockCache = 4096;
 
-private:
-    void cache_block(std::uint64_t number, const pipeline::BlockInfo& info);
+    struct State;
 
-    std::shared_ptr<provider::ProviderPool> pool_;
-    const chain::ReorgDetector* ring_;
-    rpc::Decoder dec_;                      // used only synchronously (never across a co_await)
-    std::unordered_set<std::string> avoid_;          // providers reported bad since the last get_logs
-    std::unordered_set<std::string> logs_providers_; // every provider that answered get_logs for the current page
-    std::optional<pipeline::BlockRange> last_logs_range_;
-    std::vector<core::Address20> seen_split_addresses_;
-    bool page_sealed_{false};
-    std::unordered_map<std::uint64_t, pipeline::BlockInfo> block_cache_;
-    std::deque<std::uint64_t> cache_order_;
+private:
+    std::shared_ptr<State> state_;
 };
 
 }  // namespace evml::app

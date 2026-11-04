@@ -33,20 +33,20 @@ struct OpsHttpServer::State {
 
 namespace {
 
-tcp::endpoint parse_listen(const std::string& listen) {
+tcp::endpoint parse_listen(std::string_view listen) {
     const auto colon = listen.rfind(':');
-    if (colon == std::string::npos || colon + 1 >= listen.size())
-        throw std::invalid_argument("ops http listen address must be host:port, got \"" + listen + "\"");
-    std::string host = listen.substr(0, colon);
-    const std::string port = listen.substr(colon + 1);
+    if (colon == std::string_view::npos || colon + 1 >= listen.size())
+        throw std::invalid_argument("ops http listen address must be host:port, got \"" + std::string(listen) + "\"");
+    std::string_view host = listen.substr(0, colon);
+    const std::string port(listen.substr(colon + 1));
     if (host.size() >= 2 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
     if (port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos)
-        throw std::invalid_argument("ops http listen port is not a number: \"" + listen + "\"");
+        throw std::invalid_argument("ops http listen port is not a number: \"" + std::string(listen) + "\"");
     const unsigned long p = std::stoul(port);
-    if (p > 65535) throw std::invalid_argument("ops http listen port out of range: \"" + listen + "\"");
+    if (p > 65535) throw std::invalid_argument("ops http listen port out of range: \"" + std::string(listen) + "\"");
     boost::system::error_code ec;
-    const auto addr = net::ip::make_address(host, ec);
-    if (ec) throw std::invalid_argument("ops http listen host is not an IP literal: \"" + listen + "\"");
+    const auto addr = net::ip::make_address(std::string(host), ec);
+    if (ec) throw std::invalid_argument("ops http listen host is not an IP literal: \"" + std::string(listen) + "\"");
     return tcp::endpoint(addr, static_cast<unsigned short>(p));
 }
 
@@ -120,7 +120,7 @@ net::awaitable<void> accept_loop(std::shared_ptr<OpsHttpServer::State> st) {
 
 }  // namespace
 
-OpsHttpServer::OpsHttpServer(net::io_context& ioc, const std::string& listen, Routes routes,
+OpsHttpServer::OpsHttpServer(net::io_context& ioc, std::string_view listen, Routes routes,
                              std::chrono::milliseconds request_timeout) {
     if (!routes.healthz || !routes.readyz || !routes.metrics)
         throw std::invalid_argument("OpsHttpServer: every route needs a handler");

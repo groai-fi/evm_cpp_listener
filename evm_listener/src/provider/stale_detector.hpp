@@ -42,25 +42,25 @@ public:
 
     // The WS / getLogs provider changed: forget everything learned about the old one (values and lag timers).
     /// @brief Resets WS head metrics and baseline timestamp when WebSocket provider fails over.
-    void reset_ws(TimePoint now);
+    void reset_ws(TimePoint now) noexcept;
     /// @brief Resets HTTP metrics and lag timers when getLogs provider changes.
-    void reset_http(TimePoint now);
+    void reset_http(TimePoint now) noexcept;
 
     /// @brief Returns true if newHeads stream has been completely silent longer than head_stall threshold.
-    bool ws_head_stalled(TimePoint now) const;  // newHeads silence
+    [[nodiscard]] bool ws_head_stalled(TimePoint now) const noexcept;  // newHeads silence
     /// @brief Time since the last newHeads block (or since start before the first one). Never reset on WS failover.
-    std::chrono::milliseconds ws_head_silence(TimePoint now) const;
+    [[nodiscard]] std::chrono::milliseconds ws_head_silence(TimePoint now) const noexcept;
     /// @brief Returns true if WS head has continuously lagged HTTP head by > ws_lag_blocks for > ws_lag_for.
-    bool ws_stale(TimePoint now) const;         // WS head lags the getLogs provider's head
+    [[nodiscard]] bool ws_stale(TimePoint now) const noexcept;         // WS head lags the getLogs provider's head
     /// @brief Returns true if HTTP safe tag has continuously lagged WS safe tag by > safe_lag_blocks for > safe_lag_for.
-    bool getlogs_stale(TimePoint now) const;    // getLogs `safe` lags the WS provider's `safe`
+    [[nodiscard]] bool getlogs_stale(TimePoint now) const noexcept;    // getLogs `safe` lags the WS provider's `safe`
 
     // Largest head/safe distance between the two sides when it exceeds divergence_blocks (WARN material).
     /// @brief Returns maximum block distance between WS and HTTP if it exceeds divergence threshold (default 200 blocks).
-    std::optional<std::uint64_t> divergence() const;
+    [[nodiscard]] std::optional<std::uint64_t> divergence() const noexcept;
 
 private:
-    void evaluate(TimePoint now);
+    void evaluate(TimePoint now) noexcept;
 
     StaleThresholds t_;
     std::optional<std::uint64_t> ws_head_, http_head_, ws_safe_, http_safe_;

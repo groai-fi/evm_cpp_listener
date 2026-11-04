@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "chain/reorg_detector.hpp"
@@ -21,12 +22,12 @@ public:
     WsReconciler(const core::Config& cfg, std::size_t pending_max_logs);
 
     // Stages a routed WS log into PendingBuffer; logs a warning and drops unrouted logs.
-    void on_ws_log(const rpc::Log& log, const std::string& provider);
+    void on_ws_log(const rpc::Log& log, std::string_view provider);
 
     // Cross-checks a swept page of `kind` logs against PendingBuffer across [range.from, range.to].
     // Pre-live and already-reconciled sub-ranges are evicted from PendingBuffer without counting misses.
-    pipeline::CrossCheck on_sweep_page(core::Finality kind, const pipeline::BlockRange& range,
-                                       const std::vector<rpc::Log>& logs);
+    [[nodiscard]] pipeline::CrossCheck on_sweep_page(core::Finality kind, const pipeline::BlockRange& range,
+                                                     const std::vector<rpc::Log>& logs);
 
     // Latches `live_from_block_ = c_s + 1` once the pipeline enters Live with an active WS provider.
     void on_live_tick(std::uint64_t c_s, bool has_active_ws);
@@ -43,9 +44,9 @@ public:
     // Purges all staged logs and advances `live_from_block_` when the head ring is reset.
     void on_ring_resync(std::uint64_t new_head_number);
 
-    std::uint64_t evicted_total() const { return pending_.evicted_total(); }
-    std::optional<std::uint64_t> live_from_block() const { return live_from_block_; }
-    bool reseed_pending() const { return reseed_live_watermark_; }
+    [[nodiscard]] std::uint64_t evicted_total() const noexcept { return pending_.evicted_total(); }
+    [[nodiscard]] std::optional<std::uint64_t> live_from_block() const noexcept { return live_from_block_; }
+    [[nodiscard]] bool reseed_pending() const noexcept { return reseed_live_watermark_; }
 
 private:
     const core::Config& cfg_;

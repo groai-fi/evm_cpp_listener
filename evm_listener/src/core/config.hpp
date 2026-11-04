@@ -14,7 +14,7 @@
 namespace evml::core {
 
 /// @brief Finality level classification for chain events and sweeps.
-enum class Finality {
+enum class Finality : std::uint8_t {
     Safe,       // Subject to safe reorgs; emitted to safe stream and tracked in pending buffer
     Finalized,  // Irreversible canonical events; audited against safe emissions
     Depth,      // Block depth confirmation (N blocks behind chain head)
@@ -22,21 +22,31 @@ enum class Finality {
 };
 
 /// @brief Destination Redis stream classification.
-enum class StreamKind {
+enum class StreamKind : std::uint8_t {
     Events,    // Fast-path operational and state events stream
     Registry   // Registry / contract lifecycle stream
 };
 
 /// @brief Sweep starting block policy on initial uncheckpointed deployment.
-enum class StartPolicy {
+enum class StartPolicy : std::uint8_t {
     ContractStart,  // Sweeps from minimum contract start_block configured in TOML
     Gate            // Sweeps from active finality gate position (no deep historical backfill)
 };
 
 /// @brief Converts Finality enum to lowercase string.
-const char* to_string(Finality f);
+[[nodiscard]] constexpr const char* to_string(Finality f) noexcept {
+    switch (f) {
+        case Finality::Safe: return "safe";
+        case Finality::Finalized: return "finalized";
+        case Finality::Depth: return "depth";
+        case Finality::Latest: return "latest";
+    }
+    return "?";
+}
 /// @brief Converts StreamKind enum to lowercase string.
-const char* to_string(StreamKind s);
+[[nodiscard]] constexpr const char* to_string(StreamKind s) noexcept {
+    return s == StreamKind::Events ? "events" : "registry";
+}
 
 /// @brief Shard identification parameters determining Redis key hash tagging.
 struct ShardCfg {
@@ -163,12 +173,12 @@ struct EventRoute {
 struct RouteKey {
     Address20 address;
     Hash32 topic0;
-    friend bool operator==(const RouteKey&, const RouteKey&) = default;
+    friend constexpr bool operator==(const RouteKey&, const RouteKey&) noexcept = default;
 };
 
 /// @brief Hash functor for composite RouteKey.
 struct RouteKeyHash {
-    std::size_t operator()(const RouteKey& k) const noexcept {
+    [[nodiscard]] std::size_t operator()(const RouteKey& k) const noexcept {
         return std::hash<Address20>{}(k.address) * 1000003u ^ std::hash<Hash32>{}(k.topic0);
     }
 };
@@ -207,12 +217,12 @@ struct Config {
 
     /// @brief Fast O(1) event route lookup by (contract_address, topic0).
     /// @return Pointer to EventRoute if tracked, or nullptr if untracked.
-    const EventRoute* route(const Address20& address, const Hash32& topic0) const;
+    [[nodiscard]] const EventRoute* route(const Address20& address, const Hash32& topic0) const noexcept;
 
     /// @brief Generates consolidated LogFilter spanning all tracked contracts.
-    LogFilter filter() const;
+    [[nodiscard]] LogFilter filter() const;
     /// @brief Generates LogFilter filtered to contracts belonging to specified Finality class.
-    LogFilter filter(Finality only) const;
+    [[nodiscard]] LogFilter filter(Finality only) const;
 
     /// @brief Parses TOML configuration text using custom environment lookup.
     /// @param toml_text Raw TOML file content.
@@ -220,11 +230,11 @@ struct Config {
     /// @param env Environment resolver function.
     /// @return Validated Config object.
     /// @throws ConfigError with detailed explanation on syntax or constraint failure.
-    static Config parse(std::string_view toml_text, const std::string& origin, const EnvLookup& env);
+    [[nodiscard]] static Config parse(std::string_view toml_text, std::string_view origin, const EnvLookup& env);
     /// @brief Parses TOML configuration text resolving variables against process environment.
-    static Config parse(std::string_view toml_text, const std::string& origin);
+    [[nodiscard]] static Config parse(std::string_view toml_text, std::string_view origin);
     /// @brief Loads and parses a TOML configuration file from disk.
-    static Config load_file(const std::filesystem::path& path);
+    [[nodiscard]] static Config load_file(const std::filesystem::path& path);
 };
 
 }  // namespace evml::core

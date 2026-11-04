@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <string>
+#include <string_view>
 
 #include <sw/redis++/redis++.h>
 
@@ -26,24 +27,36 @@ namespace evml::sink {
 class RedisppConn final : public RedisConn {
 public:
     /// @brief Constructs RedisppConn configured with URL and bounded I/O timeouts.
-    RedisppConn(const std::string& url, const Keys& keys,
+    RedisppConn(std::string_view url, const Keys& keys,
                 std::chrono::milliseconds io_timeout = std::chrono::milliseconds(2000),
-                std::string client_name = "");
+                std::string_view client_name = "");
 
     /// @brief Executes batch of ScriptCalls via EVALSHA on redis++ pipeline.
-    std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>& calls) override;
+    [[nodiscard]] std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>& calls) override;
     /// @brief Pre-loads embedded Lua scripts into Redis and records SHA1 digests.
     void load_scripts() override;
     /// @brief Reads checkpoint hash fields (safe, finalized, contracts) via HGETALL.
-    pipeline::Checkpoint read_checkpoint() override;
+    [[nodiscard]] pipeline::Checkpoint read_checkpoint() override;
     /// @brief Queries released members by block range via ZRANGEBYSCORE and batches HMGET for before-images.
-    std::vector<pipeline::ReleasedEntry> read_released(std::uint64_t from, std::uint64_t to) override;
+    [[nodiscard]] std::vector<pipeline::ReleasedEntry> read_released(std::uint64_t from, std::uint64_t to) override;
     /// @brief Sets key with TTL seconds using redis.set EX.
-    void set_with_ttl(const std::string& key, const std::string& value, std::uint32_t ttl_s) override;
+    void set_with_ttl(std::string_view key, std::string_view value, std::uint32_t ttl_s) override;
     /// @brief Queries stream consumer group statistics using XINFO, XRANGE, XPENDING, and TIME.
-    GroupFacts read_group_facts(const std::string& stream_key, const std::string& group) override;
+    [[nodiscard]] GroupFacts read_group_facts(std::string_view stream_key, std::string_view group) override;
     /// @brief Collects runtime tenancy facts (`INFO keyspace`, bounded `SCAN`, `CLIENT LIST`).
-    TenancyFacts read_tenancy_facts() override;
+    [[nodiscard]] TenancyFacts read_tenancy_facts() override;
+
+    [[nodiscard]] core::Result<std::vector<CallOutcome>, ConnError> try_pipeline(
+        const std::vector<ScriptCall>& calls) override;
+    [[nodiscard]] core::Result<void, ConnError> try_load_scripts() override;
+    [[nodiscard]] core::Result<pipeline::Checkpoint, ConnError> try_read_checkpoint() override;
+    [[nodiscard]] core::Result<std::vector<pipeline::ReleasedEntry>, ConnError> try_read_released(
+        std::uint64_t from, std::uint64_t to) override;
+    [[nodiscard]] core::Result<void, ConnError> try_set_with_ttl(std::string_view key, std::string_view value,
+                                                                 std::uint32_t ttl_s) override;
+    [[nodiscard]] core::Result<GroupFacts, ConnError> try_read_group_facts(std::string_view stream_key,
+                                                                           std::string_view group) override;
+    [[nodiscard]] core::Result<TenancyFacts, ConnError> try_read_tenancy_facts() override;
 
 private:
     sw::redis::Redis redis_;

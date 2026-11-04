@@ -17,13 +17,21 @@ struct BlockRef {
     std::uint64_t timestamp{};  // Unix seconds; 0 = unknown (callers that need it must treat 0 as a ring miss)
 };
 
-enum class HeadKind {
+enum class HeadKind : std::uint8_t {
     Seeded,     // ring was empty; this head is its first entry
     Extended,   // number == top+1 and parent == top.hash: the normal case
     Duplicate,  // already in the ring with the same hash (e.g. replay after a failover)
     NeedWalk,   // a gap, or a parent/hash mismatch: run a ForkWalk (plan 3.6)
 };
-const char* to_string(HeadKind k);
+[[nodiscard]] constexpr const char* to_string(HeadKind k) noexcept {
+    switch (k) {
+        case HeadKind::Seeded: return "Seeded";
+        case HeadKind::Extended: return "Extended";
+        case HeadKind::Duplicate: return "Duplicate";
+        case HeadKind::NeedWalk: return "NeedWalk";
+    }
+    return "?";
+}
 
 class ForkWalk;
 
@@ -46,7 +54,7 @@ public:
     HeadKind on_head(const BlockRef& head);
 
     // Begins an ancestral walk to locate the common ancestor fork point for a NeedWalk head.
-    ForkWalk begin_walk(const BlockRef& head) const;
+    [[nodiscard]] ForkWalk begin_walk(const BlockRef& head) const;
 
     // Commits a successfully resolved ForkWalk to the ring buffer.
     // Truncates orphaned blocks above fork point F and inserts the new canonical branch.
@@ -55,16 +63,19 @@ public:
 
     // Evaluates whether the detected fork crossed below the last released block cursor C_s.
     // Watch out: Returns true if fork_point < C_s, requiring an immediate reverify_released() sweep.
-    static bool crosses_safe(const ReorgInfo& info, std::uint64_t c_s) { return info.fork_point < c_s; }
+    [[nodiscard]] static constexpr bool crosses_safe(const ReorgInfo& info, std::uint64_t c_s) noexcept {
+        return info.fork_point < c_s;
+    }
 
     // Drops all ring entries; invoked upon provider failover to re-seed from new provider.
-    void reset() { ring_.clear(); }
+    void reset() noexcept { ring_.clear(); }
 
-    std::optional<std::uint64_t> top() const;
-    std::optional<core::Hash32> hash_at(std::uint64_t number) const;
-    std::optional<BlockRef> ref_at(std::uint64_t number) const;
-    std::optional<std::uint64_t> timestamp_of(std::uint64_t number, const core::Hash32& hash) const;
-    std::size_t size() const { return ring_.size(); }
+    [[nodiscard]] std::optional<std::uint64_t> top() const noexcept;
+    [[nodiscard]] std::optional<core::Hash32> hash_at(std::uint64_t number) const noexcept;
+    [[nodiscard]] std::optional<BlockRef> ref_at(std::uint64_t number) const noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> timestamp_of(std::uint64_t number,
+                                                            const core::Hash32& hash) const noexcept;
+    [[nodiscard]] std::size_t size() const noexcept { return ring_.size(); }
 
 private:
     friend class ForkWalk;
@@ -78,7 +89,7 @@ private:
 // from an HTTP provider), `feed()` supplies it. Walks back until an ancestor matches the ring.
 class ForkWalk {
 public:
-    enum class State {
+    enum class State : std::uint8_t {
         NeedBlock,    // fetch need() and feed() it
         Done,         // fork point found; pass to ReorgDetector::apply()
         BeyondRing,   // no common ancestor within the ring: depth exceeds hash_ring_size, escalate
@@ -86,18 +97,18 @@ public:
                       // reorg mid-walk; discard and restart with a fresh begin_walk()
     };
 
-    State state() const { return state_; }
+    [[nodiscard]] State state() const noexcept { return state_; }
     // Valid only in NeedBlock.
-    std::uint64_t need() const { return cursor_.number - 1; }
+    [[nodiscard]] std::uint64_t need() const noexcept { return cursor_.number - 1; }
     // Hash the fetched block must have (valid only in NeedBlock).
-    const core::Hash32& expected_hash() const { return cursor_.parent; }
+    [[nodiscard]] const core::Hash32& expected_hash() const noexcept { return cursor_.parent; }
 
     void feed(const BlockRef& fetched);
 
     // Valid only in Done.
-    std::uint64_t fork_point() const { return fork_point_; }
+    [[nodiscard]] std::uint64_t fork_point() const noexcept { return fork_point_; }
     // New chain above the fork point, ascending by number (valid only in Done).
-    const std::vector<BlockRef>& new_chain() const { return chain_; }
+    [[nodiscard]] const std::vector<BlockRef>& new_chain() const noexcept { return chain_; }
 
 private:
     friend class ReorgDetector;

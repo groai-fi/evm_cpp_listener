@@ -41,21 +41,8 @@ std::optional<std::uint32_t> parse_range_limit(const std::string& msg) {
 
 }  // namespace
 
-/// @brief Converts failure classification category to human-readable string.
-const char* to_string(FailKind k) {
-    switch (k) {
-        case FailKind::Retry: return "retry";
-        case FailKind::RateLimited: return "rate_limited";
-        case FailKind::QuotaExhausted: return "quota_exhausted";
-        case FailKind::AuthFatal: return "auth_fatal";
-        case FailKind::ConfigFatal: return "config_fatal";
-        case FailKind::RangeTooLarge: return "range_too_large";
-    }
-    return "unknown";
-}
-
 /// @brief Classifies an RPC failure using ordered pattern matching across status codes and error messages.
-Classified classify(const ErrorInfo& e) {
+Classified classify(const ErrorInfo& e) noexcept {
     // Normalise error text to lowercase once for efficient multi-pattern matching
     const std::string m = lower(e.message);
     const auto code = e.rpc_code.value_or(0);
@@ -94,7 +81,7 @@ Classified classify(const ErrorInfo& e) {
 }
 
 /// @brief Parses delta-seconds representation of HTTP Retry-After header.
-std::optional<std::chrono::seconds> parse_retry_after(std::string_view v) {
+std::optional<std::chrono::seconds> parse_retry_after(std::string_view v) noexcept {
     // Strip leading whitespace
     while (!v.empty() && std::isspace(static_cast<unsigned char>(v.front()))) v.remove_prefix(1);
     // Strip trailing whitespace

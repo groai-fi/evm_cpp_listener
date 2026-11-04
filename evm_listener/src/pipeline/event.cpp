@@ -4,8 +4,6 @@
 
 namespace evml::pipeline {
 
-const char* to_string(EventType t) { return t == EventType::Log ? "log" : "revert"; }
-
 // Formats canonical event ID: {chain_id}:{blockHash}:{logIndex}.
 std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash, std::uint64_t log_index) {
     return std::to_string(chain_id) + ":" + block_hash.to_hex() + ":" + std::to_string(log_index);

@@ -5,16 +5,6 @@
 
 namespace evml::chain {
 
-const char* to_string(HeadKind k) {
-    switch (k) {
-        case HeadKind::Seeded: return "Seeded";
-        case HeadKind::Extended: return "Extended";
-        case HeadKind::Duplicate: return "Duplicate";
-        case HeadKind::NeedWalk: return "NeedWalk";
-    }
-    return "?";
-}
-
 ReorgDetector::ReorgDetector(std::size_t capacity) : capacity_(capacity) {
     if (capacity == 0) throw std::invalid_argument("ReorgDetector: capacity must be >= 1");
 }
@@ -26,24 +16,25 @@ void ReorgDetector::insert(const BlockRef& b) {
     ++version_; // Invalidate in-flight walks
 }
 
-std::optional<std::uint64_t> ReorgDetector::top() const {
+std::optional<std::uint64_t> ReorgDetector::top() const noexcept {
     if (ring_.empty()) return std::nullopt;
     return ring_.rbegin()->first;
 }
 
-std::optional<core::Hash32> ReorgDetector::hash_at(std::uint64_t number) const {
+std::optional<core::Hash32> ReorgDetector::hash_at(std::uint64_t number) const noexcept {
     const auto it = ring_.find(number);
     if (it == ring_.end()) return std::nullopt;
     return it->second.hash;
 }
 
-std::optional<BlockRef> ReorgDetector::ref_at(std::uint64_t number) const {
+std::optional<BlockRef> ReorgDetector::ref_at(std::uint64_t number) const noexcept {
     const auto it = ring_.find(number);
     if (it == ring_.end()) return std::nullopt;
     return it->second;
 }
 
-std::optional<std::uint64_t> ReorgDetector::timestamp_of(std::uint64_t number, const core::Hash32& hash) const {
+std::optional<std::uint64_t> ReorgDetector::timestamp_of(std::uint64_t number,
+                                                        const core::Hash32& hash) const noexcept {
     const auto it = ring_.find(number);
     if (it == ring_.end() || !(it->second.hash == hash) || it->second.timestamp == 0) return std::nullopt;
     return it->second.timestamp;
