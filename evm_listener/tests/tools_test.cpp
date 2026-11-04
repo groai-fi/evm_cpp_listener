@@ -21,6 +21,7 @@
 #include "mock_http_server.hpp"
 #include "pipeline/event.hpp"
 #include "sink/keys.hpp"
+#include "sink/redis_startup.hpp"
 #include "test_util.hpp"
 
 using namespace std::chrono_literals;
@@ -36,6 +37,10 @@ std::string random_tag() {
 
 sw::redis::Redis make_admin() {
     const std::string url = evml::core::env::require("REDIS_URL");
+    const char* allow = std::getenv("EVML_TEST_ALLOW_DESTRUCTIVE");
+    if (!evml::sink::is_allowed_test_redis_host(url, allow ? allow : "")) {
+        FAIL("REDIS_URL does not target an allowed local test Redis host and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
+    }
     sw::redis::ConnectionOptions opts = sw::redis::Uri(url).connection_options();
     opts.connect_timeout = 2s;
     opts.socket_timeout = 2s;
@@ -49,7 +54,7 @@ struct ShardCleanup {
             auto r = make_admin();
             const evml::sink::Keys k{shard};
             r.del({k.stream(evml::core::StreamKind::Events), k.stream(evml::core::StreamKind::Registry), k.ckpt(),
-                   k.released(), k.released_data(), k.leader(), k.epoch()});
+                   k.released(), k.released_data(), k.leader(), k.epoch(), k.tenant()});
         } catch (...) {
         }
     }

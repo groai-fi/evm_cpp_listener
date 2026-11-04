@@ -480,3 +480,20 @@ TEST_CASE("alerts: thresholds come from the config", "[unit][alerts]") {
     CHECK(t.consumer_lag_warn_s == 11);
     CHECK(t.consumer_lag_crit_s == 22);
 }
+
+TEST_CASE("alerts: RedisTenancyViolation is Critical and host-local (fires on standby as well as leader)", "[unit][alerts]") {
+    AlertEngine engine{AlertThresholds{}};
+    OpsSnapshot s = snap(0s);
+    s.leader = false;  // host-local: fires even when not leader
+    s.events.push_back(evml::ops::redis_tenancy_violation_event("foreign keys found", 1, 1));
+
+    const auto alerts = engine.evaluate(s);
+    REQUIRE(alerts.size() == 1);
+    CHECK(alerts[0].severity == Severity::Critical);
+    CHECK(alerts[0].title == "Redis Tenancy Violation");
+    CHECK(alerts[0].message == "foreign keys found");
+    CHECK(alerts[0].details.at("new_violations").as_uint64() == 1);
+    CHECK(alerts[0].details.at("total").as_uint64() == 1);
+    CHECK_FALSE(alerts[0].resolved);
+}
+

@@ -1467,7 +1467,9 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
 TEST_CASE("tools: --check-redis prints address_family and startup check results, and exits 1 when unreachable",
           "[integration][tools]") {
     using Catch::Matchers::ContainsSubstring;
-    const auto cfg = evml::test::load_base_config();
+    auto cfg = evml::test::load_base_config();
+    cfg.shard.id = "check_redis_" + random_tag();
+    Cleanup cleanup{cfg.shard.id, {}};
 
     std::ostringstream captured;
     auto* old_cout = std::cout.rdbuf(captured.rdbuf());

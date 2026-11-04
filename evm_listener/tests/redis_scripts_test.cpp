@@ -25,6 +25,7 @@
 
 #include "pipeline/sink.hpp"
 #include "sink/lua_scripts.hpp"
+#include "sink/redis_startup.hpp"
 #include "sink/script_runner.hpp"
 
 using namespace evml::sink;
@@ -39,6 +40,10 @@ namespace {
 std::string redis_url() {
     const char* v = std::getenv("REDIS_URL");
     if (!v || !*v) FAIL("REDIS_URL is not set: the Redis integration tests must run in the dev container (never skipped)");
+    const char* allow = std::getenv("EVML_TEST_ALLOW_DESTRUCTIVE");
+    if (!evml::sink::is_allowed_test_redis_host(v, allow ? allow : "")) {
+        FAIL("REDIS_URL does not target an allowed local test Redis host and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
+    }
     return v;
 }
 

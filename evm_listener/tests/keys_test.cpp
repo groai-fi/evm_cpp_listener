@@ -20,6 +20,7 @@ TEST_CASE("keys: shard-scoped Redis keys share the {shard} hash tag including fa
     CHECK(k.leader() == "evml:{base_eurc_usdc}:leader");
     CHECK(k.epoch() == "evml:{base_eurc_usdc}:epoch");
     CHECK(k.hb("host-a") == "evml:{base_eurc_usdc}:hb:host-a");
+    CHECK(k.tenant() == "evml:{base_eurc_usdc}:tenant");
     CHECK(k.dedup("dedup:8453:0xabc:0") == "evml:{base_eurc_usdc}:dedup:8453:0xabc:0");
     CHECK(k.pattern() == "evml:{base_eurc_usdc}:*");
 

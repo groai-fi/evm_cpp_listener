@@ -797,7 +797,12 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     REQUIRE(L.sink->wait_idle(30s));
     expect_streams_equal(L, expected);
 
-    L.admin.flushall();
+    {
+        std::vector<std::string> keys_to_del;
+        L.admin.keys(L.keys.pattern(), std::back_inserter(keys_to_del));
+        if (!keys_to_del.empty()) L.admin.del(keys_to_del.begin(), keys_to_del.end());
+    }
+    L.admin.command<std::string>("SCRIPT", "FLUSH");
     L.sink->emit(mk("after_flush", 111));  // the old sink's next write
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Fenced; }, 30s));  // renew answers FENCED: epoch is gone too
     CHECK(L.sink->status().discarded_total >= 1);

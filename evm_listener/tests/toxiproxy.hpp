@@ -23,11 +23,19 @@
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 
+#include "sink/redis_startup.hpp"
+
 namespace evml::testing {
 
 inline std::string require_env(const char* name) {
     const char* v = std::getenv(name);
     if (!v || !*v) FAIL(std::string(name) + " is not set: the sink integration tests must run in the dev container (never skipped)");
+    if (std::string_view(name) == "REDIS_URL") {
+        const char* allow = std::getenv("EVML_TEST_ALLOW_DESTRUCTIVE");
+        if (!evml::sink::is_allowed_test_redis_host(v, allow ? allow : "")) {
+            FAIL("REDIS_URL does not target an allowed local test Redis host (redis, localhost, 127.0.0.1, ::1, toxiproxy) and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
+        }
+    }
     return v;
 }
 

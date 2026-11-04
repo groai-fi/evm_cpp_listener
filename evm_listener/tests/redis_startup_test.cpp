@@ -7,11 +7,13 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
 #include <sw/redis++/redis++.h>
 
+#include "sink/keys.hpp"
 #include "sink/redis_startup.hpp"
 #include "toxiproxy.hpp"
 
@@ -110,7 +112,22 @@ TEST_CASE("startup: a non-noeviction policy that is not required is flagged misc
 
 TEST_CASE("startup: a reachable, correctly configured Redis passes with no warnings", "[integration][sink]") {
     // The compose Redis (redis:8.4): noeviction (the OOM test relies on it) and a version >= 7.
-    const auto r = await_redis_ready(require_env("REDIS_URL"), StartupOptions{});
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin(url);
+    StartupOptions opts;
+    opts.shard = "startup_ok_" + std::to_string(std::random_device{}());
+    struct KeyGuard {
+        sw::redis::Redis& r;
+        std::string k;
+        ~KeyGuard() {
+            try {
+                r.del(k);
+            } catch (...) {
+            }
+        }
+    } guard{admin, Keys(opts.shard).tenant()};
+
+    const auto r = await_redis_ready(url, opts);
     REQUIRE(r.has_value());
     CHECK(r->version.major >= 7);
     CHECK_FALSE(r->config_denied);
@@ -123,11 +140,25 @@ TEST_CASE("startup: maxmemory-policy allkeys-lru is fatal when noeviction is req
     ConfigGuard guard(admin, "maxmemory-policy");
     guard.set("allkeys-lru");
 
+    const std::string shard = "startup_lru_" + std::to_string(std::random_device{}());
+    struct KeyGuard {
+        sw::redis::Redis& r;
+        std::string k;
+        ~KeyGuard() {
+            try {
+                r.del(k);
+            } catch (...) {
+            }
+        }
+    } key_guard{admin, Keys(shard).tenant()};
+
     StartupOptions strict;
+    strict.shard = shard;
     strict.require_noeviction = true;
     CHECK_THROWS_WITH(await_redis_ready(url, strict), ContainsSubstring("not 'noeviction'"));
 
     StartupOptions lax;
+    lax.shard = shard;
     lax.require_noeviction = false;
     const auto r = await_redis_ready(url, lax);
     REQUIRE(r.has_value());
@@ -144,10 +175,24 @@ TEST_CASE("startup: a rejected AUTH is fatal, not retried (scenario 8)", "[integ
 }
 
 TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenario 8)", "[integration][sink]") {
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin(url);
     ToxiRedis px;
     px.disable();
 
     StartupOptions o;
+    o.shard = "startup_wait_" + std::to_string(std::random_device{}());
+    struct KeyGuard {
+        sw::redis::Redis& r;
+        std::string k;
+        ~KeyGuard() {
+            try {
+                r.del(k);
+            } catch (...) {
+            }
+        }
+    } key_guard{admin, Keys(o.shard).tenant()};
+
     o.probe_min = 10ms;
     o.probe_max = 50ms;
     o.io_timeout = 500ms;
@@ -176,4 +221,188 @@ TEST_CASE("startup: waiting ends when stop is requested", "[integration][sink]")
     o.on_waiting = [&](const std::string&, const std::string&, std::chrono::milliseconds) { ++waits; };
     o.stop = [&] { return waits >= 2; };
     CHECK_FALSE(await_redis_ready(px.url(), o).has_value());
+}
+
+TEST_CASE("startup: pure dedicated-Redis tenancy helpers and evaluate_tenancy decision table", "[unit][sink]") {
+    CHECK(format_tenant_marker("local") == "evm-listener|local");
+    CHECK(format_tenant_marker("staging") == "evm-listener|staging");
+    CHECK(format_tenant_marker("production") == "evm-listener|production");
+
+    CHECK(sanitize_client_name("evml:host a:startup\n\t") == "evml:host_a:startup__");
+
+    CHECK(resolve_deploy_env("local", "redis://prod.railway.internal:6379") == "local");
+    CHECK(resolve_deploy_env("staging", "redis://prod.railway.internal:6379") == "staging");
+    CHECK(resolve_deploy_env("production", "redis://prod.railway.internal:6379") == "production");
+    CHECK_THROWS_AS(resolve_deploy_env("dev", "redis://redis:6379"), StartupFatal);
+    CHECK(resolve_deploy_env("", "redis://redis:6379/0") == "local");
+    CHECK(resolve_deploy_env("", "redis://localhost:6379") == "local");
+    CHECK(resolve_deploy_env("", "redis://127.0.0.1:6379") == "local");
+    CHECK(resolve_deploy_env("", "redis://[::1]:6379") == "local");
+    CHECK(resolve_deploy_env("", "redis://toxiproxy:16379") == "local");
+    CHECK_THROWS_WITH(resolve_deploy_env("", "redis://prod.railway.internal:6379"),
+                      ContainsSubstring("EVML_DEPLOY_ENV must be set"));
+
+    CHECK(parse_redis_db("redis://redis:6379") == 0);
+    CHECK(parse_redis_db("redis://redis:6379/") == 0);
+    CHECK(parse_redis_db("redis://redis:6379/0") == 0);
+    CHECK(parse_redis_db("redis://redis:6379/15?timeout=1s") == 15);
+    CHECK_THROWS_AS(parse_redis_db("redis://redis:6379/-1"), StartupFatal);
+    CHECK_THROWS_AS(parse_redis_db("redis://redis:6379/notanumber"), StartupFatal);
+    CHECK_THROWS_AS(parse_redis_db("http://redis:6379/0"), StartupFatal);
+
+    CHECK(is_allowed_test_redis_host("redis://redis:6379/0"));
+    CHECK(is_allowed_test_redis_host("redis://localhost:6379"));
+    CHECK(is_allowed_test_redis_host("redis://127.0.0.1:6379"));
+    CHECK(is_allowed_test_redis_host("redis://[::1]:6379"));
+    CHECK(is_allowed_test_redis_host("redis://toxiproxy:16379"));
+    CHECK_FALSE(is_allowed_test_redis_host("redis://prod.railway.internal:6379"));
+    CHECK(is_allowed_test_redis_host("redis://prod.railway.internal:6379", "1"));
+
+    TenancyFacts clean;
+    clean.keyspace_db_keys = {{0, 5}};
+    clean.tenant_marker = "evm-listener|local";
+    CHECK(evaluate_tenancy(clean, "local", 0).warnings.empty());
+
+    // 1. Foreign key prefixes -> StartupFatal with tenancy_violation = true
+    {
+        TenancyFacts f = clean;
+        f.foreign_key_prefixes = {"mds", "bull"};
+        try {
+            (void)evaluate_tenancy(f, "local", 0);
+            FAIL("Expected StartupFatal on foreign_key_prefixes");
+        } catch (const StartupFatal& e) {
+            CHECK(e.tenancy_violation);
+            CHECK(e.foreign_prefixes == "mds,bull");
+        }
+    }
+
+    // 2. Non-zero keys in another DB -> StartupFatal with tenancy_violation = true
+    {
+        TenancyFacts f = clean;
+        f.keyspace_db_keys = {{0, 5}, {1, 2}};
+        try {
+            (void)evaluate_tenancy(f, "local", 0);
+            FAIL("Expected StartupFatal on foreign DB");
+        } catch (const StartupFatal& e) {
+            CHECK(e.tenancy_violation);
+            CHECK(e.db == "db1");
+        }
+    }
+
+    // 3. Missing or mismatched tenant marker -> StartupFatal with tenancy_violation = true
+    {
+        TenancyFacts f = clean;
+        f.tenant_marker = std::nullopt;
+        try {
+            (void)evaluate_tenancy(f, "local", 0);
+            FAIL("Expected StartupFatal on missing tenant_marker");
+        } catch (const StartupFatal& e) {
+            CHECK(e.tenancy_violation);
+            CHECK(e.marker.empty());
+        }
+
+        f.tenant_marker = "evm-listener|production";
+        try {
+            (void)evaluate_tenancy(f, "staging", 0);
+            FAIL("Expected StartupFatal on mismatched tenant_marker");
+        } catch (const StartupFatal& e) {
+            CHECK(e.tenancy_violation);
+            CHECK(e.marker == "evm-listener|production");
+        }
+    }
+
+    // Warnings: foreign client names, CLIENT LIST denied, SCAN budget exhausted
+    {
+        TenancyFacts f = clean;
+        f.foreign_client_names = {"mds:host:data"};
+        f.client_list_denied = true;
+        f.scan_budget_exhausted = true;
+        const auto rep = evaluate_tenancy(f, "local", 0);
+        CHECK(rep.warnings.size() == 3);
+    }
+}
+
+TEST_CASE("startup: live Redis tenancy checks reject foreign keys, foreign DBs, and mismatched tenant markers",
+          "[integration][sink][redis_serial]") {
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin(url);
+    const std::string shard = "startup_tenancy_" + std::to_string(std::random_device{}());
+    const Keys keys(shard);
+
+    struct CleanupGuard {
+        sw::redis::Redis& r;
+        std::string tenant_key;
+        ~CleanupGuard() {
+            try {
+                r.del("mds:test");
+                r.del(tenant_key);
+            } catch (...) {
+            }
+        }
+    } cleanup{admin, keys.tenant()};
+
+    StartupOptions opts;
+    opts.shard = shard;
+    opts.deploy_env = "local";
+    opts.host_id = "test-host";
+
+    // 1. Foreign key (mds:test) causes await_redis_ready to throw StartupFatal and does NOT write evml:{shard}:tenant
+    admin.del(keys.tenant());
+    admin.set("mds:test", "1");
+    try {
+        (void)await_redis_ready(url, opts);
+        FAIL("Expected StartupFatal when foreign key mds:test exists");
+    } catch (const StartupFatal& e) {
+        CHECK(e.tenancy_violation);
+        CHECK(e.foreign_prefixes == "mds");
+    }
+    admin.del("mds:test");
+    CHECK(admin.exists(keys.tenant()) == 0);
+
+    // 2. Non-zero key in DB 1 causes await_redis_ready to throw StartupFatal
+    {
+        std::string db1_url = url;
+        const auto scheme_end = db1_url.find("://");
+        const auto slash = db1_url.find('/', scheme_end == std::string::npos ? 0 : scheme_end + 3);
+        if (slash != std::string::npos) db1_url.resize(slash);
+        db1_url += "/1";
+        sw::redis::Redis admin_db1(db1_url);
+        struct Db1Guard {
+            sw::redis::Redis& r;
+            ~Db1Guard() {
+                try {
+                    r.flushdb();
+                } catch (...) {
+                }
+            }
+        } db1_guard{admin_db1};
+
+        admin_db1.set("evml:db1_probe", "1");
+        try {
+            (void)await_redis_ready(url, opts);
+            FAIL("Expected StartupFatal when DB 1 has keys > 0");
+        } catch (const StartupFatal& e) {
+            CHECK(e.tenancy_violation);
+            CHECK(e.db == "db1");
+        }
+    }
+    CHECK(admin.exists(keys.tenant()) == 0);
+
+    // 3. Mismatched tenant marker (evm-listener|production when deploy_env == "staging") throws StartupFatal
+    admin.set(keys.tenant(), "evm-listener|production");
+    opts.deploy_env = "staging";
+    try {
+        (void)await_redis_ready(url, opts);
+        FAIL("Expected StartupFatal on mismatched tenant marker");
+    } catch (const StartupFatal& e) {
+        CHECK(e.tenancy_violation);
+        CHECK(e.marker == "evm-listener|production");
+    }
+    admin.del(keys.tenant());
+
+    // 4. Matching tenant marker (evm-listener|local) succeeds and writes evml:{shard}:tenant
+    opts.deploy_env = "local";
+    const auto rep = await_redis_ready(url, opts);
+    REQUIRE(rep.has_value());
+    CHECK(admin.get(keys.tenant()) == std::optional<std::string>("evm-listener|local"));
 }

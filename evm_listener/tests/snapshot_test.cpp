@@ -414,3 +414,27 @@ TEST_CASE("snapshot: a switch back to the primary raises Provider Failover with 
     CHECK(first.message == "the WS provider switched back from none to quicknode");
     CHECK(first.details.at("from").is_null());
 }
+
+TEST_CASE("snapshot: tenancy_violations_total counter increase emits RedisTenancyViolation alert", "[snapshot]") {
+    SnapshotBuilder b;
+    AlertEngine engine{AlertThresholds{}};
+
+    auto in0 = leader_inputs(t0);
+    in0.sink.tenancy_violations_total = 0;
+    CHECK(engine.evaluate(b.build(in0)).empty());
+
+    auto in1 = leader_inputs(t0 + 10s);
+    in1.sink.tenancy_violations_total = 2;
+    const auto s1 = b.build(in1);
+    REQUIRE(s1.events.size() == 1);
+    CHECK(s1.events[0].kind == AlertEvent::Kind::RedisTenancyViolation);
+    CHECK(s1.events[0].details.at("new_violations").as_uint64() == 2);
+    CHECK(s1.events[0].details.at("total").as_uint64() == 2);
+
+    const auto alerts = engine.evaluate(s1);
+    REQUIRE(alerts.size() == 1);
+    CHECK(alerts[0].severity == evml::ops::Severity::Critical);
+    CHECK(alerts[0].title == "Redis Tenancy Violation");
+    CHECK_FALSE(alerts[0].resolved);
+}
+

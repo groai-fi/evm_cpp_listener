@@ -63,6 +63,8 @@ struct FakeServer {
     std::uint64_t kv_writes{0};
     std::map<std::string, GroupFacts> group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
     std::uint64_t group_reads{0};
+    TenancyFacts tenancy_facts;
+    std::uint64_t tenancy_reads{0};
     std::vector<std::string> emit_minids;  // ARGV[2] (minid_ms) of every emit that passed the fence
     std::vector<std::string> fast_minids;  // ARGV[1] (minid_ms) of every emit_fast that passed the fence
 
@@ -273,6 +275,13 @@ public:
         ++server.group_reads;
         const auto it = server.group_facts.find(stream_key + "|" + group);
         return it == server.group_facts.end() ? GroupFacts{} : it->second;
+    }
+
+    TenancyFacts read_tenancy_facts() override {
+        if (down) throw ConnError("fake: connection down");
+        if (aux_throws) throw std::runtime_error("fake: SCAN answered a reply we cannot read");
+        ++server.tenancy_reads;
+        return server.tenancy_facts;
     }
 
     Checkpoint read_checkpoint() override {
@@ -2092,5 +2101,28 @@ TEST_CASE("redis sink: FastEmitItem in suffix after failed prefix item is retire
         CHECK(r.sink->status().pending_writes == 0);
     }
 }
+
+TEST_CASE("redis sink: runtime 300 s tenancy check increments tenancy_violations_total without fencing or degrading",
+          "[unit][sink]") {
+    Rig r;
+    CHECK(r.sink->status().tenancy_violations_total == 0);
+    CHECK(r.server.tenancy_reads == 0);
+
+    // Advance 300 s with clean tenancy facts -> 1 read, 0 violations, mode stays Connected
+    r.elapsed += milliseconds(300000);
+    CHECK(r.sink->pump());
+    CHECK(r.server.tenancy_reads == 1);
+    CHECK(r.sink->status().tenancy_violations_total == 0);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+
+    // Inject foreign key prefix "mds" and advance another 300 s -> increments tenancy_violations_total, mode stays Connected
+    r.server.tenancy_facts.foreign_key_prefixes = {"mds"};
+    r.elapsed += milliseconds(300000);
+    CHECK(r.sink->pump());
+    CHECK(r.server.tenancy_reads == 2);
+    CHECK(r.sink->status().tenancy_violations_total == 1);
+    CHECK(r.sink->mode() == SinkMode::Connected);
+}
+
 
 
