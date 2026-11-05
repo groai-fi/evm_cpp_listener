@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <map>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -306,6 +307,17 @@ TEST_CASE("tools: --audit-stream exits 2 when from_block > to_block or to_block 
     admin.hset(keys.ckpt(), std::make_pair("safe", "52060200"));
     admin.hset(keys.ckpt(), std::make_pair("finalized", "52060100"));
     CHECK(evml::app::audit_stream(cfg, 52060000, 52060101) == evml::app::kExitUsage);
+
+    // 4. Coroutine exception inside run_audit_coro (invalid min_range = 0) propagates out of net::co_spawn.
+    auto bad_cfg = cfg;
+    bad_cfg.backfill.min_range = 0;
+    CHECK_THROWS_AS(evml::app::audit_stream(bad_cfg, 52060000, 52060100), std::invalid_argument);
+
+    // 5. Coroutine exception inside run_backfill_coro drains the sink, releases the Redis shard lease, and propagates.
+    admin.hset(keys.ckpt(), std::make_pair("contracts", "[]"));
+    bad_cfg.contracts.at(0).start_block = 52060000;
+    CHECK_THROWS_AS(evml::app::backfill_contract(bad_cfg, bad_cfg.contracts.at(0).name, 2s), std::invalid_argument);
+    CHECK(admin.exists(keys.leader()) == 0);
 }
 
 TEST_CASE("tools: probe_transport tears down cleanly without reference cycles", "[tools]") {

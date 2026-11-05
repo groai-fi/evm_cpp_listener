@@ -161,9 +161,20 @@ private:
         return ctx;
     }
     ops::OpsHttpServer::Routes routes() {
-        return {[this] { return telemetry_.build_healthz(wd_); },
-                [this] { return telemetry_.build_readyz(build_telemetry_context()); },
-                [this] { return telemetry_.build_metrics_response(build_telemetry_context()); }};
+        return {[weak_self = weak_from_this()] {
+                    if (auto self = weak_self.lock()) return self->telemetry_.build_healthz(self->wd_);
+                    return ops::OpsResponse{503, "shutting down\n"};
+                },
+                [weak_self = weak_from_this()] {
+                    if (auto self = weak_self.lock())
+                        return self->telemetry_.build_readyz(self->build_telemetry_context());
+                    return ops::OpsResponse{503, "shutting down\n"};
+                },
+                [weak_self = weak_from_this()] {
+                    if (auto self = weak_self.lock())
+                        return self->telemetry_.build_metrics_response(self->build_telemetry_context());
+                    return ops::OpsResponse{503, "shutting down\n"};
+                }};
     }
     void launch_acquire(bool first) {
         if (startup_.joinable()) startup_.join();
@@ -257,10 +268,11 @@ private:
     }
     void schedule_beat() {
         beat_timer_.expires_after(opt_.beat_period);
-        beat_timer_.async_wait([this](const boost::system::error_code& ec) {
-            if (ec || finished_) return;
-            on_beat();
-            if (!finished_) schedule_beat();
+        beat_timer_.async_wait([weak_self = weak_from_this()](const boost::system::error_code& ec) {
+            auto self = weak_self.lock();
+            if (!self || ec || self->finished_) return;
+            self->on_beat();
+            if (!self->finished_) self->schedule_beat();
         });
     }
     void publish_heartbeat(const pipeline::DriverStatus& st) {
@@ -367,9 +379,11 @@ private:
         if (ops_) ops_->stop();
         if (rt_ && rt_->pool) rt_->pool->stop();
         grace_timer_.expires_after(kShutdownGrace);
-        grace_timer_.async_wait([this](const boost::system::error_code&) {
-            telemetry_.stop();
-            ioc_.stop();
+        grace_timer_.async_wait([weak_self = weak_from_this()](const boost::system::error_code&) {
+            if (auto self = weak_self.lock()) {
+                self->telemetry_.stop();
+                self->ioc_.stop();
+            }
         });
     }
 
@@ -541,10 +555,12 @@ void Host::acquire_thread_main(bool first) {
         } else {
             grant.token = sink::lease_disabled_token();
         }
-        net::post(ioc_, [this, deploy_env, expected_db, report, grant = std::move(grant)] {
-            deploy_env_ = deploy_env;
-            expected_db_ = expected_db;
-            start_runtime(report, grant);
+        net::post(ioc_, [weak_self = weak_from_this(), deploy_env, expected_db, report, grant = std::move(grant)] {
+            if (auto self = weak_self.lock()) {
+                self->deploy_env_ = deploy_env;
+                self->expected_db_ = expected_db;
+                self->start_runtime(report, grant);
+            }
         });
     } catch (const sink::StartupFatal& e) {
         if (e.tenancy_violation) {
@@ -555,15 +571,19 @@ void Host::acquire_thread_main(bool first) {
                         {"db", e.db},
                         {"marker", e.marker}});
         }
-        net::post(ioc_, [this, msg = std::string(e.what()), tv = e.tenancy_violation] {
-            if (tv) {
-                telemetry_.emit_event_now(ops::redis_tenancy_violation_event(msg, 1, 1), wall_ms());
+        net::post(ioc_, [weak_self = weak_from_this(), msg = std::string(e.what()), tv = e.tenancy_violation] {
+            if (auto self = weak_self.lock()) {
+                if (tv) {
+                    self->telemetry_.emit_event_now(ops::redis_tenancy_violation_event(msg, 1, 1), wall_ms());
+                }
+                self->begin_shutdown(kExitUsage, "redis startup check failed: " + msg);
             }
-            begin_shutdown(kExitUsage, "redis startup check failed: " + msg);
         });
     } catch (const std::exception& e) {
-        net::post(ioc_, [this, msg = std::string(e.what())] {
-            begin_shutdown(kExitFailure, "redis startup failed: " + msg);
+        net::post(ioc_, [weak_self = weak_from_this(), msg = std::string(e.what())] {
+            if (auto self = weak_self.lock()) {
+                self->begin_shutdown(kExitFailure, "redis startup failed: " + msg);
+            }
         });
     }
 }
@@ -610,24 +630,32 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
                        {"to", provider::to_string(t.to)},
                        {"reason", why}});
         };
-        h.on_tag = [this](std::string_view p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) {
-            on_tag(p, tag, n, hash);
+        h.on_tag = [weak_self = weak_from_this()](std::string_view p, provider::Tag tag, std::uint64_t n,
+                                                  const core::Hash32& hash) {
+            if (auto self = weak_self.lock()) self->on_tag(p, tag, n, hash);
         };
-        h.on_head = [this](const rpc::Head& head, std::string_view p) { on_head(head, p); };
-        h.on_log = [this](const rpc::Log& log, std::string_view p) { on_ws_log(log, p); };
-        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to,
-                                        std::string_view reason) {
-            if (!rt_) return;
+        h.on_head = [weak_self = weak_from_this()](const rpc::Head& head, std::string_view p) {
+            if (auto self = weak_self.lock()) self->on_head(head, p);
+        };
+        h.on_log = [weak_self = weak_from_this()](const rpc::Log& log, std::string_view p) {
+            if (auto self = weak_self.lock()) self->on_ws_log(log, p);
+        };
+        h.on_ws_active_changed = [weak_self = weak_from_this()](const std::optional<std::string>& from,
+                                                                const std::optional<std::string>& to,
+                                                                std::string_view reason) {
+            auto self = weak_self.lock();
+            if (!self || !self->rt_) return;
             log::info("pool", "ws active provider changed",
                       {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
             if ((reason == "failover" || reason == "switch_back") && to) {
-                if (reason == "failover") ++provider_failovers_total_;
-                telemetry_.push_event(ops::provider_failover_event(from, *to, reason));
+                if (reason == "failover") ++self->provider_failovers_total_;
+                self->telemetry_.push_event(ops::provider_failover_event(from, *to, reason));
             }
-            const auto c_s = rt_->driver ? std::optional<std::uint64_t>(rt_->driver->status().c_s) : std::nullopt;
-            rt_->ws_reconciler.on_ws_provider_changed(to.has_value(), c_s);
-            if (rt_->source) rt_->source->clear_cache();
-            bump_head_epoch();
+            const auto c_s =
+                self->rt_->driver ? std::optional<std::uint64_t>(self->rt_->driver->status().c_s) : std::nullopt;
+            self->rt_->ws_reconciler.on_ws_provider_changed(to.has_value(), c_s);
+            if (self->rt_->source) self->rt_->source->clear_cache();
+            self->bump_head_epoch();
         };
         rt_->pool =
             provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
@@ -636,8 +664,9 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         pipeline::SweeperOptions sw;
         sw.min_range = cfg_.backfill.min_range;
         sw.max_page_logs = std::max<std::size_t>(1, cfg_.sink.queue_capacity / 2);
-        sw.on_page = [this](core::Finality kind, const pipeline::BlockRange& range, const std::vector<rpc::Log>& logs) {
-            on_sweep_page(kind, range, logs);
+        sw.on_page = [weak_self = weak_from_this()](core::Finality kind, const pipeline::BlockRange& range,
+                                                    const std::vector<rpc::Log>& logs) {
+            if (auto self = weak_self.lock()) self->on_sweep_page(kind, range, logs);
         };
         const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
         rt_->sweeper = std::make_unique<pipeline::Sweeper>(cfg_, ctx, *rt_->source, *rt_->sink, wall_ms, sw);

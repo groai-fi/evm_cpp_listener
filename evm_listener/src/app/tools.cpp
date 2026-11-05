@@ -11,6 +11,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -83,13 +84,18 @@ std::string clip(std::string_view s, std::size_t n = 120) {
                                      .user_agent = user_agent(cfg),
                                      .timeout = std::chrono::milliseconds(cfg.backfill.request_timeout_ms)});
         std::optional<core::Result<rpc::HttpResult>> call_res;
+        std::exception_ptr ep;
         net::co_spawn(ioc, client.try_call(std::string(body)),
-                      [&ioc, &client, &call_res](const std::exception_ptr&, core::Result<rpc::HttpResult> res) {
-                          call_res = std::move(res);
+                      [&ioc, &client, &call_res, &ep](const std::exception_ptr& e, core::Result<rpc::HttpResult> res) {
+                          ep = e;
+                          if (!e) call_res = std::move(res);
                           client.cancel();
                           ioc.stop();
                       });
         ioc.run();
+        if (ep) {
+            std::rethrow_exception(ep);
+        }
         if (!call_res) {
             return core::Error{p.name + ": HTTP request did not complete"};
         }
@@ -397,7 +403,9 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     st->pool->start();
 
     // Spawn coroutine to stream heads for `seconds` and issue post-stream verification queries.
-    net::co_spawn(ioc, run_probe_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+    std::exception_ptr ep;
+    net::co_spawn(ioc, run_probe_coro(st), [&ioc, weak_st, &ep](const std::exception_ptr& e) {
+        ep = e;
         if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
         ioc.stop();
     });
@@ -405,6 +413,9 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     if (st->pool) {
         st->pool->stop();
         st->pool.reset();
+    }
+    if (ep) {
+        std::rethrow_exception(ep);
     }
     return st->ok ? kExitOk : kExitFailure;
 }
@@ -806,7 +817,9 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
     const std::weak_ptr<BackfillState> weak_st = st;
-    net::co_spawn(ioc, run_backfill_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+    std::exception_ptr ep;
+    net::co_spawn(ioc, run_backfill_coro(st), [&ioc, weak_st, &ep](const std::exception_ptr& e) {
+        ep = e;
         if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
         ioc.stop();
     });
@@ -815,6 +828,10 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     if (st->pool) {
         st->pool->stop();
         st->pool.reset();
+    }
+    if (ep) {
+        (void)sink->drain(std::chrono::seconds(5));
+        std::rethrow_exception(ep);
     }
 
     if (st->rc != kExitOk || !st->ck_contracts) {
@@ -1034,7 +1051,9 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
     st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
     const std::weak_ptr<AuditFetchState> weak_st = st;
-    net::co_spawn(ioc, run_audit_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+    std::exception_ptr ep;
+    net::co_spawn(ioc, run_audit_coro(st), [&ioc, weak_st, &ep](const std::exception_ptr& e) {
+        ep = e;
         if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
         ioc.stop();
     });
@@ -1043,6 +1062,9 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
     if (st->pool) {
         st->pool->stop();
         st->pool.reset();
+    }
+    if (ep) {
+        std::rethrow_exception(ep);
     }
 
     report.audit_provider = st->audit_provider;
