@@ -1,13 +1,12 @@
+#include "ops/metrics.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <stdexcept>
 #include <string>
 
-#include "ops/metrics.hpp"
-
-using evml::ops::Metrics;
 using Catch::Matchers::ContainsSubstring;
+using evml::ops::Metrics;
 
 namespace {
 bool has_line(const std::string& text, const std::string& line) {
@@ -25,7 +24,8 @@ TEST_CASE("metrics: a counter is brought up to the total, not incremented by it"
 
 TEST_CASE("metrics: repeating the same total never double-counts", "[metrics]") {
     Metrics m;
-    for (int i = 0; i < 5; ++i) m.counter_total("evml_dup_total", "dups", {}, 7);
+    for (int i = 0; i < 5; ++i)
+        m.counter_total("evml_dup_total", "dups", {}, 7);
     CHECK(has_line(m.serialize(), "evml_dup_total 7"));
 }
 
@@ -73,12 +73,11 @@ TEST_CASE("metrics: misuse fails loudly", "[metrics]") {
 TEST_CASE("metrics: fast-stream emitted and dropped counters serialize with Prometheus TYPE and HELP", "[metrics]") {
     Metrics m;
     m.counter_total("evml_fast_emitted_total", "Fast-stream tip events emitted to Redis", {}, 4);
-    m.counter_total("evml_fast_dropped_total",
-                    "Fast-stream tip events dropped due to backpressure, outage, or fencing", {}, 1);
+    m.counter_total("evml_fast_dropped_total", "Fast-stream tip events dropped due to backpressure, outage, or fencing",
+                    {}, 1);
     const auto out = m.serialize();
     CHECK(has_line(out, "evml_fast_emitted_total 4"));
     CHECK(has_line(out, "evml_fast_dropped_total 1"));
     CHECK_THAT(out, ContainsSubstring("# TYPE evml_fast_emitted_total counter"));
     CHECK_THAT(out, ContainsSubstring("# TYPE evml_fast_dropped_total counter"));
 }
-

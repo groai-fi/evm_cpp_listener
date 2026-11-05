@@ -1,7 +1,12 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "ops/alert_sender.hpp"
+
+#include <spdlog/sinks/ostream_sink.h>
 
 #include <algorithm>
+#include <boost/asio.hpp>
+#include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cctype>
 #include <chrono>
 #include <memory>
@@ -10,14 +15,10 @@
 #include <string>
 #include <vector>
 
-#include <boost/asio.hpp>
-#include <boost/json.hpp>
-#include <spdlog/sinks/ostream_sink.h>
-
 #include "core/log.hpp"
 #include "mock_http_server.hpp"
-#include "ops/alert_sender.hpp"
 
+using Catch::Matchers::ContainsSubstring;
 using evml::ops::Alert;
 using evml::ops::AlertSender;
 using evml::ops::AlertSenderOptions;
@@ -25,7 +26,6 @@ using evml::ops::Severity;
 using evml::test::MockHttpServer;
 using evml::test::MockReply;
 using evml::test::MockRequest;
-using Catch::Matchers::ContainsSubstring;
 
 namespace net = boost::asio;
 namespace json = boost::json;

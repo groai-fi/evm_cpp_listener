@@ -1,7 +1,8 @@
+#include "chain/finality_gate.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "base_config.hpp"
-#include "chain/finality_gate.hpp"
 
 using namespace evml::chain;
 using evml::test::hash_of;
@@ -27,13 +28,14 @@ TEST_CASE("gate: finalized is clamped to safe (I2: G_f <= G_s)", "[unit][gate]")
     CHECK(g.finalized() == 150u);
 }
 
-TEST_CASE("gate: a safe regression from the SAME provider is a safe-reorg signal, and the gate follows it", "[unit][gate]") {
+TEST_CASE("gate: a safe regression from the SAME provider is a safe-reorg signal, and the gate follows it",
+          "[unit][gate]") {
     FinalityGate g;
     CHECK(g.on_safe("infura", 100, hash_of(1)) == GateSignal::None);
     CHECK(g.on_safe("infura", 98, hash_of(2)) == GateSignal::SafeRegression);
     CHECK(g.safe() == 98u);
     CHECK(g.on_safe("infura", 99, hash_of(3)) == GateSignal::None);  // recovered: no repeated signal
-    CHECK_FALSE(g.frozen());                                          // a safe reorg is not a freeze
+    CHECK_FALSE(g.frozen());                                         // a safe reorg is not a freeze
 }
 
 TEST_CASE("gate: same safe number with a different hash is a safe-reorg signal", "[unit][gate]") {
@@ -56,7 +58,8 @@ TEST_CASE("gate: a lower tag from a DIFFERENT provider (getLogs failover) is not
     CHECK(g.on_safe("infura", 95, hash_of(5)) == GateSignal::SafeRegression);
 }
 
-TEST_CASE("gate: finalized ignores load-balanced stale heights and freezes on same-height hash conflict", "[unit][gate]") {
+TEST_CASE("gate: finalized ignores load-balanced stale heights and freezes on same-height hash conflict",
+          "[unit][gate]") {
     SECTION("stale lower height from load-balanced node is ignored (monotonic G_f)") {
         FinalityGate g;
         CHECK(g.on_finalized("infura", 90, hash_of(1)) == GateSignal::None);

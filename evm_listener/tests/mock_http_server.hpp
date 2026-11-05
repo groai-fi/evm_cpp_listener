@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <boost/asio.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -9,8 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/asio.hpp>
-
 namespace evml::test {
 
 struct MockRequest {
@@ -18,7 +17,7 @@ struct MockRequest {
     std::string user_agent;
     std::string accept_encoding;
     std::string body;
-    std::string method;                                       // "GET", "POST", ...
+    std::string method;                                        // "GET", "POST", ...
     std::vector<std::pair<std::string, std::string>> headers;  // every request header, in arrival order
 };
 
@@ -40,10 +39,10 @@ public:
 
     MockHttpServer(boost::asio::io_context& ioc, Handler handler, const std::string& bind_addr = "127.0.0.1");
 
-    std::string url() const;       // http://127.0.0.1:<port>/
-    std::uint16_t port() const;    // bound TCP port
-    int connections() const;       // accepted TCP connections
-    int requests() const;          // fully received requests
+    std::string url() const;     // http://127.0.0.1:<port>/
+    std::uint16_t port() const;  // bound TCP port
+    int connections() const;     // accepted TCP connections
+    int requests() const;        // fully received requests
 
     struct State;  // implementation detail, public only so the .cpp-local coroutines can name it
 

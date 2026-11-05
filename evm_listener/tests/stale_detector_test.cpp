@@ -1,13 +1,15 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "provider/stale_detector.hpp"
+
+#include <catch2/catch_test_macros.hpp>
 
 using namespace evml::provider;
 using namespace std::chrono_literals;
 
 namespace {
 const StaleDetector::TimePoint T0{};
-StaleDetector::TimePoint at(std::chrono::seconds s) { return T0 + s; }
+StaleDetector::TimePoint at(std::chrono::seconds s) {
+    return T0 + s;
+}
 }  // namespace
 
 TEST_CASE("stale: WS head lag must exceed 5 blocks continuously for 30 s") {
@@ -121,6 +123,7 @@ TEST_CASE("stale: ws_head_silence is the time since the last head (or start), an
     d.on_ws_head(1000, at(10s));
     CHECK(d.ws_head_silence(at(12s)) == 2000ms);
     d.reset_ws(at(20s));
-    CHECK(d.ws_head_silence(at(21s)) == 11000ms);  // reset_ws resets the session stall timer, not pool-wide head silence
+    CHECK(d.ws_head_silence(at(21s)) ==
+          11000ms);  // reset_ws resets the session stall timer, not pool-wide head silence
     CHECK_FALSE(d.ws_head_stalled(at(21s)));
 }

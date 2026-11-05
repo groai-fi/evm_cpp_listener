@@ -47,7 +47,8 @@ net::awaitable<void> session(std::shared_ptr<MockHttpServer::State> st, tcp::soc
             mr.accept_encoding = std::string(req[http::field::accept_encoding]);
             mr.body = req.body();
             mr.method = std::string(req.method_string());
-            for (const auto& h : req) mr.headers.emplace_back(std::string(h.name_string()), std::string(h.value()));
+            for (const auto& h : req)
+                mr.headers.emplace_back(std::string(h.name_string()), std::string(h.value()));
             const MockReply rep = st->handler(mr);
 
             if (rep.hang) {
@@ -62,7 +63,8 @@ net::awaitable<void> session(std::shared_ptr<MockHttpServer::State> st, tcp::soc
 
             http::response<http::string_body> res{static_cast<http::status>(rep.status), req.version()};
             res.set(http::field::content_type, "application/json");
-            for (const auto& [k, v] : rep.headers) res.set(k, v);
+            for (const auto& [k, v] : rep.headers)
+                res.set(k, v);
             res.body() = rep.body;
             res.keep_alive(!rep.connection_close);
             res.prepare_payload();
@@ -88,8 +90,14 @@ MockHttpServer::MockHttpServer(net::io_context& ioc, Handler handler, const std:
 std::string MockHttpServer::url() const {
     return "http://127.0.0.1:" + std::to_string(port()) + "/";
 }
-std::uint16_t MockHttpServer::port() const { return st_->acceptor.local_endpoint().port(); }
-int MockHttpServer::connections() const { return st_->conns; }
-int MockHttpServer::requests() const { return st_->reqs; }
+std::uint16_t MockHttpServer::port() const {
+    return st_->acceptor.local_endpoint().port();
+}
+int MockHttpServer::connections() const {
+    return st_->conns;
+}
+int MockHttpServer::requests() const {
+    return st_->reqs;
+}
 
 }  // namespace evml::test

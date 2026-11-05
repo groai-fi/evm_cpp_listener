@@ -1,5 +1,8 @@
 #pragma once
 
+#include <boost/asio.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/json.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -7,10 +10,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <boost/asio.hpp>
-#include <boost/beast/websocket.hpp>
-#include <boost/json.hpp>
 
 namespace evml::test {
 
@@ -26,11 +25,12 @@ public:
     MockWsConn(boost::beast::websocket::stream<boost::asio::ip::tcp::socket>& ws, std::string user_agent)
         : ws_(ws), user_agent_(std::move(user_agent)) {}
 
-    boost::asio::awaitable<Req> read_req();                  // next text frame parsed as a JSON-RPC request
+    boost::asio::awaitable<Req> read_req();  // next text frame parsed as a JSON-RPC request
     boost::asio::awaitable<void> send(const std::string& text);
-    boost::asio::awaitable<void> close(boost::beast::websocket::close_code code = boost::beast::websocket::close_code::going_away);
-    void drop();                                             // hard TCP close, no WS close handshake
-    boost::asio::awaitable<void> go_silent();                // stop reading AND writing (no pongs): a half-open peer
+    boost::asio::awaitable<void> close(
+        boost::beast::websocket::close_code code = boost::beast::websocket::close_code::going_away);
+    void drop();                               // hard TCP close, no WS close handshake
+    boost::asio::awaitable<void> go_silent();  // stop reading AND writing (no pongs): a half-open peer
     boost::asio::awaitable<void> sleep(std::chrono::milliseconds d);
     const std::string& user_agent() const { return user_agent_; }
 

@@ -1,12 +1,12 @@
-#include <catch2/catch_test_macros.hpp>
+#include "rpc/ws_session.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 
 #include "core/log.hpp"
 #include "mock_ws_server.hpp"
 #include "rpc/blocking_http.hpp"
-#include "rpc/ws_session.hpp"
 #include "test_util.hpp"
 
 using namespace evml::rpc;
@@ -106,7 +106,8 @@ TEST_CASE("ws session: clean connect, ACKs, heads and logs flow, stop() is silen
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return rec.heads.size() == 1 && rec.logs.size() == 1; }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return rec.heads.size() == 1 && rec.logs.size() == 1; }, 5s));
     CHECK(rec.ready == 1);
     CHECK(rec.heads[0].number == 0x31cbb7fULL);
     CHECK(rec.logs[0].address.to_hex() == kPoolAddr);
@@ -124,10 +125,11 @@ TEST_CASE("ws session: clean connect, ACKs, heads and logs flow, stop() is silen
     CHECK(f.at("topics").as_array().at(0).as_array().at(0).as_string() == kSwapTopic);
 
     s->stop();
-    run_until(ioc, [] { return false; }, 150ms);  // let the aborted read unwind
-    CHECK(rec.closed.empty());                    // stop() never produces on_closed
+    run_until(
+        ioc, [] { return false; }, 150ms);  // let the aborted read unwind
+    CHECK(rec.closed.empty());              // stop() never produces on_closed
     CHECK(s->closed());
-    s->stop();                                    // idempotent
+    s->stop();  // idempotent
 }
 
 TEST_CASE("ws session: server drops the TCP connection mid-stream -> Retry", "[integration]") {
@@ -141,7 +143,8 @@ TEST_CASE("ws session: server drops the TCP connection mid-stream -> Retry", "[i
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.ready == 1);
     CHECK(rec.heads.size() == 1);
     REQUIRE(rec.closed.size() == 1);
@@ -160,7 +163,8 @@ TEST_CASE("ws session: server close frame -> Retry naming the close", "[integrat
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.closed[0].kind == FailKind::Retry);
     CHECK(rec.closed[0].reason.find("server closed") != std::string::npos);
 }
@@ -178,7 +182,8 @@ TEST_CASE("ws session: half-open peer (no frames, no pongs) is detected by the i
     s->start();
 
     const auto t0 = std::chrono::steady_clock::now();
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     const auto dt = std::chrono::steady_clock::now() - t0;
     CHECK(rec.ready == 1);
     CHECK(rec.closed[0].kind == FailKind::Retry);
@@ -203,7 +208,8 @@ TEST_CASE("ws session: subscription ACK never arrives -> subscribe timeout", "[i
     s->start();
 
     const auto t0 = std::chrono::steady_clock::now();
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     const auto dt = std::chrono::steady_clock::now() - t0;
     CHECK(rec.ready == 0);
     CHECK(rec.closed[0].kind == FailKind::Retry);
@@ -224,7 +230,8 @@ TEST_CASE("ws session: wrong chain id -> ConfigFatal", "[integration]") {
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.ready == 0);
     CHECK(rec.closed[0].kind == FailKind::ConfigFatal);
     CHECK(rec.closed[0].reason.find("chain id mismatch") != std::string::npos);
@@ -234,10 +241,12 @@ TEST_CASE("ws session: upgrade rejections are classified", "[integration]") {
     const auto run = [](MockWsOptions opts) {
         net::io_context ioc;
         Rec rec;
-        MockWsServer srv(ioc, [](MockWsConn&) -> net::awaitable<void> { co_return; }, std::move(opts));
+        MockWsServer srv(
+            ioc, [](MockWsConn&) -> net::awaitable<void> { co_return; }, std::move(opts));
         auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
         s->start();
-        REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+        REQUIRE(run_until(
+            ioc, [&] { return !rec.closed.empty(); }, 5s));
         CHECK(rec.ready == 0);
         return rec.closed[0];
     };
@@ -248,8 +257,8 @@ TEST_CASE("ws session: upgrade rejections are classified", "[integration]") {
         CHECK(c.reason.find("HTTP 401") != std::string::npos);
     }
     SECTION("429 + Retry-After: 3 -> RateLimited carrying the hint") {
-        const auto c = run(MockWsOptions{.reject_status = 429, .reject_body = "too many requests",
-                                         .reject_headers = {{"Retry-After", "3"}}});
+        const auto c = run(MockWsOptions{
+            .reject_status = 429, .reject_body = "too many requests", .reject_headers = {{"Retry-After", "3"}}});
         CHECK(c.kind == FailKind::RateLimited);
         CHECK(c.retry_after == 3s);
     }
@@ -273,7 +282,8 @@ TEST_CASE("ws session: provider quota error on subscribe -> QuotaExhausted", "[i
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.closed[0].kind == FailKind::QuotaExhausted);
 }
 
@@ -292,9 +302,10 @@ TEST_CASE("ws session: unknown subscription ids are dropped and counted, not del
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    const bool got = run_until(ioc, [&] { return rec.heads.size() == 1; }, 5s);
-    INFO("ready=" << rec.ready << " closed=" << rec.closed.size() << " reason="
-                  << (rec.closed.empty() ? "<none>" : rec.closed[0].reason)
+    const bool got = run_until(
+        ioc, [&] { return rec.heads.size() == 1; }, 5s);
+    INFO("ready=" << rec.ready << " closed=" << rec.closed.size()
+                  << " reason=" << (rec.closed.empty() ? "<none>" : rec.closed[0].reason)
                   << " unknown=" << s->unknown_subscription_msgs());
     REQUIRE(got);
     CHECK(s->unknown_subscription_msgs() == 1);
@@ -312,7 +323,8 @@ TEST_CASE("ws session: malformed frame ends the session with Retry", "[integrati
     auto s = WsSession::create(ioc.get_executor(), cfg(srv), handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.ready == 1);
     CHECK(rec.closed[0].kind == FailKind::Retry);
     CHECK_FALSE(rec.closed[0].reason.empty());
@@ -330,7 +342,8 @@ TEST_CASE("ws session: connection refused -> Retry", "[integration]") {
     auto s = WsSession::create(ioc.get_executor(), c, handlers(rec));
     s->start();
 
-    REQUIRE(run_until(ioc, [&] { return !rec.closed.empty(); }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return !rec.closed.empty(); }, 5s));
     CHECK(rec.closed[0].kind == FailKind::Retry);
     CHECK(rec.closed[0].reason.find("connect failed") != std::string::npos);
 }

@@ -1,12 +1,11 @@
-#include <catch2/catch_test_macros.hpp>
+#include "app/pool_config.hpp"
 
+#include <boost/asio/io_context.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <map>
 #include <sstream>
 
-#include <boost/asio/io_context.hpp>
-
-#include "app/pool_config.hpp"
 #include "core/error.hpp"
 
 using namespace std::chrono_literals;
@@ -93,6 +92,7 @@ TEST_CASE("make_pool_config maps base.toml onto the pool", "[unit][pool_config]"
 
 TEST_CASE("no enabled WS provider is rejected at the config layer, before the pool", "[unit][pool_config]") {
     EnvMap env = full_env();
-    for (const auto* k : {"BASE_WSS_URL_QUICKNODE", "BASE_WSS_URL", "BASE_WSS_URL_ALCHEMY"}) env.erase(k);
+    for (const auto* k : {"BASE_WSS_URL_QUICKNODE", "BASE_WSS_URL", "BASE_WSS_URL_ALCHEMY"})
+        env.erase(k);
     CHECK_THROWS_AS(load_base(env), evml::core::ConfigError);
 }

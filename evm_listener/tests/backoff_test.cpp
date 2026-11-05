@@ -1,11 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "rpc/backoff.hpp"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <map>
 #include <numeric>
 #include <vector>
-
-#include "rpc/backoff.hpp"
 
 using evml::rpc::Backoff;
 using ms = std::chrono::milliseconds;
@@ -21,7 +20,8 @@ TEST_CASE("backoff window doubles up to the cap") {
 
 TEST_CASE("backoff delays are full-jitter within [0, window] and actually spread") {
     Backoff b(42, ms(250), ms(30000));
-    for (int i = 0; i < 12; ++i) b.next();  // saturate at cap
+    for (int i = 0; i < 12; ++i)
+        b.next();  // saturate at cap
     REQUIRE(b.window() == ms(30000));
 
     std::vector<std::int64_t> samples;
@@ -53,7 +53,8 @@ TEST_CASE("backoff is deterministic per seed and differs across seeds") {
 
 TEST_CASE("backoff resets only after a long enough live period") {
     Backoff b(1, ms(250), ms(30000), ms(30000));
-    for (int i = 0; i < 5; ++i) b.next();
+    for (int i = 0; i < 5; ++i)
+        b.next();
     REQUIRE(b.attempt() == 5);
 
     b.report_live(ms(29999));  // flapping session: no reset
@@ -66,7 +67,8 @@ TEST_CASE("backoff resets only after a long enough live period") {
 
 TEST_CASE("backoff never overflows for huge attempt counts") {
     Backoff b(1, ms(250), ms(30000));
-    for (int i = 0; i < 100000; ++i) b.next();
+    for (int i = 0; i < 100000; ++i)
+        b.next();
     CHECK(b.window() == ms(30000));
 }
 

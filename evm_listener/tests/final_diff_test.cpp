@@ -1,8 +1,9 @@
+#include "pipeline/final_diff.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "base_config.hpp"
 #include "pipeline/event.hpp"
-#include "pipeline/final_diff.hpp"
 
 using namespace evml::pipeline;
 using evml::test::hash_of;

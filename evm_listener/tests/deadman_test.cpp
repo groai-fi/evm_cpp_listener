@@ -1,20 +1,21 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "ops/deadman.hpp"
+
+#include <spdlog/sinks/ostream_sink.h>
 
 #include <algorithm>
+#include <boost/asio.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cctype>
 #include <chrono>
 #include <memory>
 #include <sstream>
 #include <string>
 
-#include <boost/asio.hpp>
-#include <spdlog/sinks/ostream_sink.h>
-
 #include "core/log.hpp"
 #include "mock_http_server.hpp"
-#include "ops/deadman.hpp"
 
+using Catch::Matchers::ContainsSubstring;
 using evml::ops::AlertClock;
 using evml::ops::Deadman;
 using evml::ops::DeadmanFacts;
@@ -22,7 +23,6 @@ using evml::ops::DeadmanOptions;
 using evml::test::MockHttpServer;
 using evml::test::MockReply;
 using evml::test::MockRequest;
-using Catch::Matchers::ContainsSubstring;
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -63,7 +63,8 @@ void drive(net::io_context& ioc, Pred done) {
 void settle(net::io_context& ioc) {
     ioc.restart();
     const auto end = std::chrono::steady_clock::now() + 150ms;
-    while (std::chrono::steady_clock::now() < end) ioc.run_one_for(10ms);
+    while (std::chrono::steady_clock::now() < end)
+        ioc.run_one_for(10ms);
 }
 
 const AlertClock::time_point t0 = AlertClock::time_point{} + 1000s;

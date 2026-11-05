@@ -1,12 +1,12 @@
+#include "core/config.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
 
-#include "core/config.hpp"
 #include "core/error.hpp"
 
 using namespace evml::core;
@@ -85,7 +85,8 @@ TEST_CASE("base.toml: sink spill settings (process-scoped, ephemeral disk)", "[u
     CHECK(c.sink.spill_max_bytes == 536870912);
 }
 
-TEST_CASE("base.toml: the downstream consumer group is watched; removing the keys disables the probe", "[unit][config]") {
+TEST_CASE("base.toml: the downstream consumer group is watched; removing the keys disables the probe",
+          "[unit][config]") {
     const Config c = parse_with(base_toml(), full_env());
     REQUIRE(c.sink.consumer_groups.size() == 1);
     CHECK(c.sink.consumer_groups[0].stream == StreamKind::Events);
@@ -93,7 +94,8 @@ TEST_CASE("base.toml: the downstream consumer group is watched; removing the key
     CHECK(c.sink.consumer_lag_warn_s == 43200);
     CHECK(c.sink.consumer_lag_crit_s == 86400);
 
-    std::string bare = mutate(base_toml(), "consumer_groups     = [{ stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" }]\n", "");
+    std::string bare = mutate(
+        base_toml(), "consumer_groups     = [{ stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" }]\n", "");
     bare = mutate(bare, "consumer_lag_warn_s = 43200   # 12 h = 25% of the 48 h retention\n", "");
     bare = mutate(bare, "consumer_lag_crit_s = 86400   # 24 h = 50%: half the safety margin is gone\n", "");
     const Config d = parse_with(bare, full_env());
@@ -144,7 +146,8 @@ TEST_CASE("providers with unset env are skipped and the rest keep their order", 
     CHECK(c.getlogs_chain[1].name == "ankr");
     CHECK(c.getlogs_chain[2].name == "base_public");
     std::string all_notes;
-    for (const auto& n : c.notes) all_notes += n + "\n";
+    for (const auto& n : c.notes)
+        all_notes += n + "\n";
     CHECK_THAT(all_notes, ContainsSubstring("env BASE_WSS_URL_QUICKNODE unset"));
     CHECK_THAT(all_notes, ContainsSubstring("env BASE_RPC_URL_ALCHEMY unset"));
 }
@@ -172,10 +175,12 @@ TEST_CASE("only WS providers set: no getLogs provider except the public one is s
 }
 
 TEST_CASE("no getLogs provider at all fails with the env names", "[unit][config]") {
-    const std::string text = mutate(base_toml(), "getlogs_order          = [\"infura\", \"alchemy\", \"ankr\", \"base_public\", \"quicknode\"]",
-                                    "getlogs_order          = [\"infura\"]");
+    const std::string text = mutate(
+        base_toml(), "getlogs_order          = [\"infura\", \"alchemy\", \"ankr\", \"base_public\", \"quicknode\"]",
+        "getlogs_order          = [\"infura\"]");
     const EnvMap env = {{"BASE_WSS_URL", "wss://infura.example/ws/v3/SECRETINFURA"}};
-    CHECK_THROWS_WITH(parse_with(text, env), ContainsSubstring("no getLogs provider enabled; set at least one of: BASE_RPC_URL"));
+    CHECK_THROWS_WITH(parse_with(text, env),
+                      ContainsSubstring("no getLogs provider enabled; set at least one of: BASE_RPC_URL"));
 }
 
 TEST_CASE("route lookup and filters", "[unit][config]") {
@@ -217,7 +222,8 @@ TEST_CASE("notes carry no secrets and warn about disabled alerting", "[unit][con
     env.erase("BASE_RPC_URL_ALCHEMY");
     const Config c = parse_with(base_toml(), env);
     std::string all_notes;
-    for (const auto& n : c.notes) all_notes += n + "\n";
+    for (const auto& n : c.notes)
+        all_notes += n + "\n";
     CHECK_THAT(all_notes, ContainsSubstring("alerts disabled: env N8N_ALERT_WEBHOOK_URL unset"));
     CHECK_THAT(all_notes, ContainsSubstring("dead-man's switch disabled: env DEADMAN_PING_URL unset"));
     CHECK(all_notes.find("SECRET") == std::string::npos);
@@ -239,7 +245,8 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("[sink].wal_dir: unknown key"));
     }
     SECTION("missing table") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "[backfill]", "[backfill_x]"), env), ContainsSubstring("unknown key"));
+        CHECK_THROWS_WITH(parse_with(mutate(base, "[backfill]", "[backfill_x]"), env),
+                          ContainsSubstring("unknown key"));
     }
     SECTION("bad shard id") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "\"base_eurc_usdc\"", "\"Base-EURC\""), env),
@@ -250,7 +257,8 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("[[contracts]][0].address: expected 0x + 40 hex digits"));
     }
     SECTION("duplicate address (case-insensitive)") {
-        const std::string text = mutate(base, "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7", "0xC5E51044EB7318950B1AFB044FCCFB25782C48C1");
+        const std::string text =
+            mutate(base, "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7", "0xC5E51044EB7318950B1AFB044FCCFB25782C48C1");
         CHECK_THROWS_WITH(parse_with(text, env), ContainsSubstring("duplicate contract address"));
     }
     SECTION("duplicate contract name") {
@@ -258,11 +266,13 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("duplicate contract name"));
     }
     SECTION("non-canonical event signature (named params)") {
-        const std::string text = mutate(base, "\"Deposit(address,uint256,uint128)\"", "\"Deposit(address user,uint256,uint128)\"");
+        const std::string text =
+            mutate(base, "\"Deposit(address,uint256,uint128)\"", "\"Deposit(address user,uint256,uint128)\"");
         CHECK_THROWS_WITH(parse_with(text, env), ContainsSubstring("non-canonical event signature"));
     }
     SECTION("duplicate event within a contract") {
-        const std::string text = mutate(base, "\"ClaimRewards(address,uint256)\"", "\"Deposit(address,uint256,uint128)\"");
+        const std::string text =
+            mutate(base, "\"ClaimRewards(address,uint256)\"", "\"Deposit(address,uint256,uint128)\"");
         CHECK_THROWS_WITH(parse_with(text, env), ContainsSubstring("duplicate event"));
     }
     SECTION("bad stream override") {
@@ -276,19 +286,26 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
     SECTION("finality=depth is rejected in v1") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "finality    = \"safe\"", "finality    = \"depth\""), env),
                           ContainsSubstring("finality=depth is not supported in v1"));
-        CHECK_THROWS_WITH(parse_with(mutate(base, "default_finality   = \"finalized\"", "default_finality   = \"depth\""), env),
-                          ContainsSubstring("finality=depth is not supported in v1"));
+        CHECK_THROWS_WITH(
+            parse_with(mutate(base, "default_finality   = \"finalized\"", "default_finality   = \"depth\""), env),
+            ContainsSubstring("finality=depth is not supported in v1"));
     }
     SECTION("redundancy.mode=hedged is rejected in v1") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "mode                   = \"failover\"", "mode                   = \"hedged\""), env),
-                          ContainsSubstring("mode=hedged is not supported in v1"));
+        CHECK_THROWS_WITH(
+            parse_with(mutate(base, "mode                   = \"failover\"", "mode                   = \"hedged\""),
+                       env),
+            ContainsSubstring("mode=hedged is not supported in v1"));
     }
     SECTION("start_block < 1 is rejected") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000", "start_block = 0"), env),
                           ContainsSubstring("start_block: must be >= 1"));
     }
     SECTION("events stream requires an explicit start_block") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "start_block = 52060000   # Bot B first deployment is block 52060327 (2026-10-02); no history needed before it\n", ""), env),
+        CHECK_THROWS_WITH(parse_with(mutate(base,
+                                            "start_block = 52060000   # Bot B first deployment is block 52060327 "
+                                            "(2026-10-02); no history needed before it\n",
+                                            ""),
+                                     env),
                           ContainsSubstring("start_block: required for stream=events"));
     }
     SECTION("start_block must be integer or \"gate\"") {
@@ -296,8 +313,9 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("expected a non-negative integer or \"gate\""));
     }
     SECTION("ws_order referencing an undeclared provider") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "[\"quicknode\", \"infura\", \"alchemy\"]", "[\"quicknode\", \"nope\"]"), env),
-                          ContainsSubstring("ws_order: references undeclared provider \"nope\""));
+        CHECK_THROWS_WITH(
+            parse_with(mutate(base, "[\"quicknode\", \"infura\", \"alchemy\"]", "[\"quicknode\", \"nope\"]"), env),
+            ContainsSubstring("ws_order: references undeclared provider \"nope\""));
     }
     SECTION("http_url literal must be credential-free") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "https://mainnet.base.org", "https://mainnet.base.org/v2/KEY"), env),
@@ -306,11 +324,14 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
                           ContainsSubstring("literal URLs must be credential-free"));
     }
     SECTION("http_env and http_url are mutually exclusive") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "http_url = \"https://mainnet.base.org\"", "http_url = \"https://mainnet.base.org\"\nhttp_env = \"X\""), env),
+        CHECK_THROWS_WITH(parse_with(mutate(base, "http_url = \"https://mainnet.base.org\"",
+                                            "http_url = \"https://mainnet.base.org\"\nhttp_env = \"X\""),
+                                     env),
                           ContainsSubstring("set either http_env or http_url"));
     }
     SECTION("lease renew must be below ttl") {
-        CHECK_THROWS_WITH(parse_with(mutate(base, "renew_ms = 5000", "renew_ms = 15000"), env), ContainsSubstring("[lease].renew_ms: must be < ttl_ms"));
+        CHECK_THROWS_WITH(parse_with(mutate(base, "renew_ms = 5000", "renew_ms = 15000"), env),
+                          ContainsSubstring("[lease].renew_ms: must be < ttl_ms"));
     }
     SECTION("consumer lag thresholds: warn < crit < retention") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "consumer_lag_warn_s = 43200", "consumer_lag_warn_s = 86400"), env),
@@ -331,7 +352,8 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "[" + good + "]", "\"g\""), env),
                           ContainsSubstring("[sink].consumer_groups: expected an array"));
         // The same group name on the other stream is a different group.
-        const Config c = parse_with(mutate(base, good, good + ", { stream = \"registry\", group = \"strat:aero_eurcusdc:botB_v1\" }"), env);
+        const Config c = parse_with(
+            mutate(base, good, good + ", { stream = \"registry\", group = \"strat:aero_eurcusdc:botB_v1\" }"), env);
         CHECK(c.sink.consumer_groups.size() == 2);
     }
     SECTION("out-of-range integers are rejected") {
@@ -357,7 +379,8 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
     SECTION("webhook URL without token") {
         EnvMap bad = env;
         bad.erase("N8N_ALERT_WEBHOOK_TOKEN");
-        CHECK_THROWS_WITH(parse_with(base, bad), ContainsSubstring("N8N_ALERT_WEBHOOK_URL is set but N8N_ALERT_WEBHOOK_TOKEN is not"));
+        CHECK_THROWS_WITH(parse_with(base, bad),
+                          ContainsSubstring("N8N_ALERT_WEBHOOK_URL is set but N8N_ALERT_WEBHOOK_TOKEN is not"));
     }
     SECTION("webhook must be https") {
         EnvMap bad = env;
@@ -388,10 +411,18 @@ TEST_CASE("base.toml: reconcile and pending-buffer keys", "[unit][config]") {
     CHECK_FALSE(c.ws_chain[1].reconcile_burst.has_value());
 
     // Every key is optional: a config that predates them gets the plan defaults.
-    std::string bare = mutate(base_toml(), "pending_max_logs   = 200000           # staged WS logs kept for the cross-check; oldest evicted beyond this\n", "");
-    bare = mutate(bare, "reconcile_rps = 10           # Discover plan allows 15 RPS; 10 RPS * 5 blocks = 50 blocks/s catch-up\n", "");
+    std::string bare = mutate(
+        base_toml(),
+        "pending_max_logs   = 200000           # staged WS logs kept for the cross-check; oldest evicted beyond this\n",
+        "");
+    bare = mutate(
+        bare, "reconcile_rps = 10           # Discover plan allows 15 RPS; 10 RPS * 5 blocks = 50 blocks/s catch-up\n",
+        "");
     bare = mutate(bare, "reconcile_burst = 15\n", "");
-    bare = mutate(bare, "reconcile_rps          = 2      # per-provider token bucket for reconcile calls (getLogs retries, block lookups)\n", "");
+    bare = mutate(bare,
+                  "reconcile_rps          = 2      # per-provider token bucket for reconcile calls (getLogs retries, "
+                  "block lookups)\n",
+                  "");
     bare = mutate(bare, "reconcile_burst        = 4      # bucket capacity; must be >= reconcile_rps\n", "");
     const Config d = parse_with(bare, full_env());
     CHECK(d.chain.pending_max_logs == 200000);
@@ -412,17 +443,23 @@ TEST_CASE("reconcile and pending-buffer keys reject out-of-range values", "[unit
                       ContainsSubstring("[redundancy].reconcile_burst: out of range"));
     CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_rps = 10", "reconcile_rps = 0"), env),
                       ContainsSubstring("[[providers]][0].reconcile_rps: out of range"));
-    CHECK_THROWS_WITH(parse_with(mutate(base, "reconcile_burst = 15", "reconcile_burst = 5"), env),
-                      ContainsSubstring("[[providers]][0].reconcile_burst: effective burst (5) must be >= effective reconcile_rps (10)"));
-    SECTION("omitted per-provider reconcile_burst falls back to [redundancy].reconcile_burst and fails fast when < reconcile_rps") {
+    CHECK_THROWS_WITH(
+        parse_with(mutate(base, "reconcile_burst = 15", "reconcile_burst = 5"), env),
+        ContainsSubstring(
+            "[[providers]][0].reconcile_burst: effective burst (5) must be >= effective reconcile_rps (10)"));
+    SECTION(
+        "omitted per-provider reconcile_burst falls back to [redundancy].reconcile_burst and fails fast when < "
+        "reconcile_rps") {
         CHECK_THROWS_WITH(
             parse_with(mutate(base, "reconcile_burst = 15\n", ""), env),
-            ContainsSubstring("[[providers]][0].reconcile_burst: effective burst (4) must be >= effective reconcile_rps (10)"));
+            ContainsSubstring(
+                "[[providers]][0].reconcile_burst: effective burst (4) must be >= effective reconcile_rps (10)"));
     }
     // burst below rps: 3 < 5
     const std::string low_burst = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 5 "),
                                          "reconcile_burst        = 4 ", "reconcile_burst        = 3 ");
-    CHECK_THROWS_WITH(parse_with(low_burst, env), ContainsSubstring("[redundancy].reconcile_burst: must be >= reconcile_rps"));
+    CHECK_THROWS_WITH(parse_with(low_burst, env),
+                      ContainsSubstring("[redundancy].reconcile_burst: must be >= reconcile_rps"));
     // burst equal to rps is allowed
     const std::string equal = mutate(mutate(base, "reconcile_rps          = 2 ", "reconcile_rps          = 4 "),
                                      "reconcile_burst        = 4 ", "reconcile_burst        = 4 ");
@@ -495,18 +532,14 @@ TEST_CASE("base.toml: fast_stream opt-in on pools, default false on others, and 
     CHECK(d.sink.fast_retention_ms == 3600000);
 
     // Invalid fast_retention_ms (< 1000, 0, or negative) fails fast.
-    CHECK_THROWS_WITH(
-        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 0"), env),
-        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 0)"));
-    CHECK_THROWS_WITH(
-        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = -5"), env),
-        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got -5)"));
-    CHECK_THROWS_WITH(
-        parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 999"), env),
-        ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 999)"));
+    CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 0"), env),
+                      ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 0)"));
+    CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = -5"), env),
+                      ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got -5)"));
+    CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "fast_retention_ms  = 3600000", "fast_retention_ms  = 999"), env),
+                      ContainsSubstring("[sink].fast_retention_ms: out of range (min 1000, got 999)"));
 
     // Finality::Latest is runtime-only and rejected in TOML finality settings.
-    CHECK_THROWS_WITH(
-        parse_with(mutate(base_toml(), "finality    = \"safe\"", "finality    = \"latest\""), env),
-        ContainsSubstring("must be one of safe|finalized|depth"));
+    CHECK_THROWS_WITH(parse_with(mutate(base_toml(), "finality    = \"safe\"", "finality    = \"latest\""), env),
+                      ContainsSubstring("must be one of safe|finalized|depth"));
 }

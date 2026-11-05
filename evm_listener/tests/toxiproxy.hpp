@@ -8,20 +8,18 @@
 // `add_toxic()` shapes the traffic (latency, reset_peer).
 #pragma once
 
-#include <catch2/catch_test_macros.hpp>
-
-#include <cstdlib>
-#include <iostream>
-#include <random>
-#include <stdexcept>
-#include <string>
-
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <cstdlib>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <string>
 
 #include "sink/redis_startup.hpp"
 
@@ -29,11 +27,15 @@ namespace evml::testing {
 
 inline std::string require_env(const char* name) {
     const char* v = std::getenv(name);
-    if (!v || !*v) FAIL(std::string(name) + " is not set: the sink integration tests must run in the dev container (never skipped)");
+    if (!v || !*v)
+        FAIL(std::string(name) +
+             " is not set: the sink integration tests must run in the dev container (never skipped)");
     if (std::string_view(name) == "REDIS_URL") {
         const char* allow = std::getenv("EVML_TEST_ALLOW_DESTRUCTIVE");
         if (!evml::sink::is_allowed_test_redis_host(v, allow ? allow : "")) {
-            FAIL("REDIS_URL does not target an allowed local test Redis host (redis, localhost, 127.0.0.1, ::1, toxiproxy) and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
+            FAIL(
+                "REDIS_URL does not target an allowed local test Redis host (redis, localhost, 127.0.0.1, ::1, "
+                "toxiproxy) and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
         }
     }
     return v;
@@ -48,10 +50,12 @@ public:
         std::random_device rd;
         name_ = "evml_" + std::to_string(rd()) + std::to_string(rd());
         boost::json::object body{{"name", name_}, {"listen", "0.0.0.0:0"}, {"upstream", upstream_}, {"enabled", true}};
-        const auto resp = boost::json::parse(call(boost::beast::http::verb::post, "/proxies", boost::json::serialize(body)));
+        const auto resp =
+            boost::json::parse(call(boost::beast::http::verb::post, "/proxies", boost::json::serialize(body)));
         const std::string listen = std::string(resp.as_object().at("listen").as_string());
         const auto colon = listen.rfind(':');
-        if (colon == std::string::npos) throw std::runtime_error("toxiproxy: unexpected listen address '" + listen + "'");
+        if (colon == std::string::npos)
+            throw std::runtime_error("toxiproxy: unexpected listen address '" + listen + "'");
         port_ = listen.substr(colon + 1);
         if (port_ == "0") throw std::runtime_error("toxiproxy did not assign a port: '" + listen + "'");
     }
@@ -77,7 +81,8 @@ public:
     // `type`: "latency" (attrs {"latency":20}), "reset_peer" (attrs {"timeout":0}), ...
     void add_toxic(const std::string& toxic_name, const std::string& type, const boost::json::object& attributes,
                    const std::string& stream = "downstream") {
-        boost::json::object body{{"name", toxic_name}, {"type", type}, {"stream", stream}, {"toxicity", 1.0}, {"attributes", attributes}};
+        boost::json::object body{
+            {"name", toxic_name}, {"type", type}, {"stream", stream}, {"toxicity", 1.0}, {"attributes", attributes}};
         call(boost::beast::http::verb::post, "/proxies/" + name_ + "/toxics", boost::json::serialize(body));
     }
     void remove_toxic(const std::string& toxic_name) {
@@ -99,10 +104,12 @@ private:
     // "redis://host:port/db" -> "host:port" (the address toxiproxy forwards to, resolved inside its own container).
     static std::string upstream_of(const std::string& redis_url) {
         const std::string scheme = "redis://";
-        if (redis_url.rfind(scheme, 0) != 0) throw std::runtime_error("REDIS_URL must start with redis://: " + redis_url);
+        if (redis_url.rfind(scheme, 0) != 0)
+            throw std::runtime_error("REDIS_URL must start with redis://: " + redis_url);
         std::string hp = redis_url.substr(scheme.size());
         if (const auto slash = hp.find('/'); slash != std::string::npos) hp.resize(slash);
-        if (hp.find('@') != std::string::npos) throw std::runtime_error("REDIS_URL with credentials is not supported by the toxiproxy helper");
+        if (hp.find('@') != std::string::npos)
+            throw std::runtime_error("REDIS_URL with credentials is not supported by the toxiproxy helper");
         if (hp.find(':') == std::string::npos) hp += ":6379";
         return hp;
     }
@@ -156,10 +163,12 @@ public:
         std::random_device rd;
         name_ = "evml_http_" + std::to_string(rd()) + std::to_string(rd());
         boost::json::object body{{"name", name_}, {"listen", "0.0.0.0:0"}, {"upstream", upstream_}, {"enabled", true}};
-        const auto resp = boost::json::parse(call(boost::beast::http::verb::post, "/proxies", boost::json::serialize(body)));
+        const auto resp =
+            boost::json::parse(call(boost::beast::http::verb::post, "/proxies", boost::json::serialize(body)));
         const std::string listen = std::string(resp.as_object().at("listen").as_string());
         const auto colon = listen.rfind(':');
-        if (colon == std::string::npos) throw std::runtime_error("toxiproxy: unexpected listen address '" + listen + "'");
+        if (colon == std::string::npos)
+            throw std::runtime_error("toxiproxy: unexpected listen address '" + listen + "'");
         port_ = listen.substr(colon + 1);
         if (port_ == "0") throw std::runtime_error("toxiproxy did not assign a port: '" + listen + "'");
     }

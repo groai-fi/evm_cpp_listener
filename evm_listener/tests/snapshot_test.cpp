@@ -1,10 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "ops/snapshot.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <string>
 
 #include "ops/alerts.hpp"
-#include "ops/snapshot.hpp"
 
 using evml::ops::AlertClock;
 using evml::ops::AlertEngine;
@@ -69,7 +69,8 @@ TEST_CASE("snapshot: a leader's driver, sink and ring facts are copied", "[snaps
     CHECK(s.events.empty());
 }
 
-TEST_CASE("snapshot: stalled_detail and stalled_provider are set only while the driver reports a stalled sweep", "[snapshot]") {
+TEST_CASE("snapshot: stalled_detail and stalled_provider are set only while the driver reports a stalled sweep",
+          "[snapshot]") {
     SnapshotBuilder b;
     auto in = leader_inputs();
     in.getlogs_provider = "infura";
@@ -223,7 +224,8 @@ TEST_CASE("snapshot: provider health becomes quota / auth facts and any_healthy_
     SnapshotBuilder b;
     auto in = leader_inputs();
     ProviderHealth up{"infura", State::Up, 0, std::nullopt, "", std::nullopt};
-    ProviderHealth quota{"alchemy", State::Cooldown, 200, -32005, "rpc error -32005: Monthly capacity limit exceeded", 90'000ms};
+    ProviderHealth quota{"alchemy", State::Cooldown, 200, -32005, "rpc error -32005: Monthly capacity limit exceeded",
+                         90'000ms};
     ProviderHealth auth{"ankr", State::Disabled, 401, std::nullopt, "http 401: bad key", 30'000ms};
     in.providers = {up, quota, auth};
     auto s = b.build(in);
@@ -261,7 +263,8 @@ TEST_CASE("snapshot: an increase of a provider's inconsistency total is one even
     CHECK(b.build(in).events.empty());  // no increase, no event
 }
 
-TEST_CASE("snapshot: head silence and the two safe tags reach the engine; a stalled WS and a lagging getLogs alert", "[snapshot]") {
+TEST_CASE("snapshot: head silence and the two safe tags reach the engine; a stalled WS and a lagging getLogs alert",
+          "[snapshot]") {
     SnapshotBuilder b;
     AlertEngine engine{AlertThresholds{}};  // head_stall_ms 30000, getlogs lag 30 blocks for 120 s
     auto in = leader_inputs();
@@ -296,10 +299,11 @@ TEST_CASE("snapshot: head silence and the two safe tags reach the engine; a stal
     CHECK(engine.evaluate(b.build(quiet)).empty());
 }
 
-TEST_CASE("snapshot: host-local Redis facts are copied in any role, and raise Redis alerts for a standby", "[snapshot]") {
+TEST_CASE("snapshot: host-local Redis facts are copied in any role, and raise Redis alerts for a standby",
+          "[snapshot]") {
     SnapshotBuilder b;
     AlertEngine engine{AlertThresholds{}};  // redis_unreachable_s = 60
-    SnapshotInputs in;  // not leader
+    SnapshotInputs in;                      // not leader
     in.now = t0;
     in.chain = "base";
     in.redis_unreachable_s = 95;
@@ -382,7 +386,8 @@ TEST_CASE("snapshot: the Leader Changed event names the old and new host, and al
     CHECK(engine.evaluate(b.build(in)).empty());  // once per occurrence
 }
 
-TEST_CASE("snapshot: a switch back to the primary raises Provider Failover with reason switch_back and its own wording", "[snapshot]") {
+TEST_CASE("snapshot: a switch back to the primary raises Provider Failover with reason switch_back and its own wording",
+          "[snapshot]") {
     const auto sb = evml::ops::provider_failover_event("infura", "quicknode", "switch_back");
     CHECK(sb.kind == AlertEvent::Kind::ProviderFailover);  // same alert kind and title as a failover
     CHECK(sb.message == "the WS provider switched back from infura to quicknode");
@@ -437,4 +442,3 @@ TEST_CASE("snapshot: tenancy_violations_total counter increase emits RedisTenanc
     CHECK(alerts[0].title == "Redis Tenancy Violation");
     CHECK_FALSE(alerts[0].resolved);
 }
-

@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
+#include "core/keccak.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 
 #include "core/error.hpp"
-#include "core/keccak.hpp"
 
 using namespace evml::core;
 
@@ -60,8 +60,8 @@ TEST_CASE("validate_event_signature rejects non-canonical forms", "[unit][keccak
     CHECK_THROWS_AS(topic0("(address)"), ConfigError);                                        // no name
     CHECK_THROWS_AS(topic0("Transfer(address"), ConfigError);                                 // unbalanced
     CHECK_THROWS_AS(topic0("Transfer)address("), ConfigError);
-    CHECK_THROWS_AS(topic0("Transfer(address,,uint256)"), ConfigError);                       // empty component
+    CHECK_THROWS_AS(topic0("Transfer(address,,uint256)"), ConfigError);  // empty component
     CHECK_THROWS_AS(topic0("Transfer(address,)"), ConfigError);
-    CHECK_THROWS_AS(topic0("Transfer(address)x"), ConfigError);                               // trailing junk
+    CHECK_THROWS_AS(topic0("Transfer(address)x"), ConfigError);  // trailing junk
     CHECK_THROWS_AS(topic0("Transfer(address);drop"), ConfigError);
 }

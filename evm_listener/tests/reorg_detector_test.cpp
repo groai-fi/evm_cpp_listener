@@ -1,8 +1,7 @@
-#include <catch2/catch_test_macros.hpp>
-
-#include <stdexcept>
-
 #include "chain/reorg_detector.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+#include <stdexcept>
 
 using namespace evml::chain;
 using evml::core::Hash32;
@@ -13,7 +12,8 @@ namespace {
 Hash32 hash_for(std::uint64_t n, std::uint8_t branch) {
     Hash32 h;
     h.bytes[0] = branch;
-    for (std::size_t i = 0; i < 8; ++i) h.bytes[1 + i] = static_cast<std::uint8_t>(n >> (8 * i));
+    for (std::size_t i = 0; i < 8; ++i)
+        h.bytes[1 + i] = static_cast<std::uint8_t>(n >> (8 * i));
     return h;
 }
 
@@ -30,7 +30,8 @@ struct Branch {
 const Branch kMain{0, 0};
 
 void seed(ReorgDetector& d, std::uint64_t from, std::uint64_t to) {
-    for (std::uint64_t n = from; n <= to; ++n) d.on_head(kMain.at(n));
+    for (std::uint64_t n = from; n <= to; ++n)
+        d.on_head(kMain.at(n));
 }
 
 // Drives a walk to completion fetching from `chain`; returns the number of fetches.
@@ -105,7 +106,8 @@ TEST_CASE("reorg: depth-3 reorg where the new chain is one block longer", "[unit
     const auto info = d.apply(w);
     CHECK(info.depth == 3);
     CHECK(*d.top() == 101);
-    for (std::uint64_t n = 98; n <= 101; ++n) CHECK(*d.hash_at(n) == alt.at(n).hash);
+    for (std::uint64_t n = 98; n <= 101; ++n)
+        CHECK(*d.hash_at(n) == alt.at(n).hash);
     CHECK(*d.hash_at(97) == kMain.at(97).hash);
 }
 
@@ -255,4 +257,3 @@ TEST_CASE("reorg: timestamp_of returns non-zero timestamp only when number and h
     CHECK_FALSE(d.timestamp_of(100, b100.hash).has_value());
     CHECK(d.timestamp_of(100, alt100.hash) == std::optional<std::uint64_t>{1700000202ULL});
 }
-

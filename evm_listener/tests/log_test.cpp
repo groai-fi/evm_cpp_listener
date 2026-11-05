@@ -1,11 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "core/log.hpp"
 
-#include <boost/json.hpp>
 #include <spdlog/sinks/ostream_sink.h>
 
+#include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <sstream>
-
-#include "core/log.hpp"
 
 namespace {
 using namespace evml::core;

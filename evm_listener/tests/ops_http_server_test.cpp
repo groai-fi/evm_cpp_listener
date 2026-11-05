@@ -1,21 +1,20 @@
+#include "ops/ops_http_server.hpp"
+
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <chrono>
 #include <future>
 #include <stdexcept>
 #include <string>
 
-#include <boost/asio.hpp>
-#include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
-
 #include "core/log.hpp"
-#include "ops/ops_http_server.hpp"
 
+using Catch::Matchers::ContainsSubstring;
 using evml::ops::OpsHttpServer;
 using evml::ops::OpsResponse;
-using Catch::Matchers::ContainsSubstring;
 
 namespace net = boost::asio;
 namespace beast = boost::beast;
@@ -70,7 +69,8 @@ net::awaitable<bool> server_closes_idle(tcp::endpoint ep) {
 template <class T>
 T run(net::io_context& ioc, net::awaitable<T> aw) {
     auto fut = net::co_spawn(ioc, std::move(aw), net::use_future);
-    ioc.restart();  // a previous poll() that ran out of work leaves the context stopped; run_one_for would then do nothing
+    ioc.restart();  // a previous poll() that ran out of work leaves the context stopped; run_one_for would then do
+                    // nothing
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (fut.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
         if (std::chrono::steady_clock::now() > deadline) FAIL("ops http test timed out");
@@ -87,7 +87,9 @@ OpsHttpServer::Routes basic_routes() {
     return r;
 }
 
-tcp::endpoint loopback4(const OpsHttpServer& s) { return {net::ip::make_address("127.0.0.1"), s.port()}; }
+tcp::endpoint loopback4(const OpsHttpServer& s) {
+    return {net::ip::make_address("127.0.0.1"), s.port()};
+}
 
 }  // namespace
 
@@ -184,5 +186,6 @@ TEST_CASE("ops http: bad construction arguments are rejected", "[ops_http]") {
     auto missing = basic_routes();
     missing.metrics = nullptr;
     CHECK_THROWS_AS(OpsHttpServer(ioc, "127.0.0.1:0", std::move(missing)), std::invalid_argument);
-    CHECK_THROWS_AS(OpsHttpServer(ioc, "127.0.0.1:0", basic_routes(), std::chrono::milliseconds(0)), std::invalid_argument);
+    CHECK_THROWS_AS(OpsHttpServer(ioc, "127.0.0.1:0", basic_routes(), std::chrono::milliseconds(0)),
+                    std::invalid_argument);
 }

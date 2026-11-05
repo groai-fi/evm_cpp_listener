@@ -1,14 +1,13 @@
 #pragma once
 
+#include <boost/asio.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
-
-#include <boost/asio.hpp>
-#include <catch2/catch_test_macros.hpp>
 
 namespace evml::test {
 

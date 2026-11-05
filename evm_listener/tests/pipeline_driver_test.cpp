@@ -1,10 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "pipeline/pipeline_driver.hpp"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <memory>
 
 #include "pipeline/coverage.hpp"
-#include "pipeline/pipeline_driver.hpp"
 #include "sweep_fakes.hpp"
 
 using namespace evml::pipeline;
@@ -69,7 +69,8 @@ TEST_CASE("driver: invalid options are rejected", "[unit][driver]") {
     Rig r;
     DriverOptions opt;
     opt.final_every = 0;
-    CHECK_THROWS_AS(PipelineDriver(r.cfg, *r.sw, r.sink, r.src, [] { return std::uint64_t{0}; }, opt),
+    CHECK_THROWS_AS(PipelineDriver(
+                        r.cfg, *r.sw, r.sink, r.src, [] { return std::uint64_t{0}; }, opt),
                     std::invalid_argument);
     auto cfg = load_base_config();
     cfg.watchdog.progress_stall_ms = 0;
@@ -144,8 +145,7 @@ TEST_CASE("driver: a restart restores the cursors and rewrites nothing", "[unit]
     CHECK(r.sink.init_calls == 0);
 }
 
-TEST_CASE("driver: a restart with a released window reverifies it once; with no window it does not",
-          "[unit][driver]") {
+TEST_CASE("driver: a restart with a released window reverifies it once; with no window it does not", "[unit][driver]") {
     Rig none;
     none.start(100, 100);  // C_f == C_s: nothing is released above C_f
     CHECK_FALSE(none.drv->status().reverify_pending);
@@ -203,9 +203,12 @@ TEST_CASE("driver: an uncovered contract is fatal and named", "[unit][driver]") 
 }
 
 TEST_CASE("driver: a covered manifest difference is rewritten once", "[unit][driver]") {
-    Rig r;
+    const auto old_manifest = contract_manifest(load_base_config());
+    auto cfg = load_base_config();
+    cfg.contracts[0].start_block = 52060500;  // later than stored: covered
+    Rig r(std::move(cfg));
     r.seed(kAfterStart, kAfterStart);
-    r.cfg.contracts[0].start_block = 52060500;  // later than stored: covered
+    r.sink.stored.contracts = old_manifest;
     REQUIRE(r.sink.stored.contracts != contract_manifest(r.cfg));
     CHECK(r.tick().wait.count() == 0);
     CHECK(r.drv->status().state == PipelineState::CatchingUp);
@@ -213,14 +216,16 @@ TEST_CASE("driver: a covered manifest difference is rewritten once", "[unit][dri
     CHECK(r.sink.stored.contracts == contract_manifest(r.cfg));
 }
 
-TEST_CASE("driver: catch-up runs safe first, never finalizes past a safe checkpoint, then goes live", "[unit][driver]") {
+TEST_CASE("driver: catch-up runs safe first, never finalizes past a safe checkpoint, then goes live",
+          "[unit][driver]") {
     Rig r;
     r.start(100, 100);
     r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
     r.drv->set_gates(110, 108);
 
     CHECK(r.drv->status().state == PipelineState::CatchingUp);
-    for (int i = 0; i < 2; ++i) CHECK(r.tick().wait.count() == 0);
+    for (int i = 0; i < 2; ++i)
+        CHECK(r.tick().wait.count() == 0);
     CHECK(r.sw->c_s() == 110);
     CHECK(r.sw->c_f() == 108);
 
@@ -230,8 +235,10 @@ TEST_CASE("driver: catch-up runs safe first, never finalizes past a safe checkpo
 
     std::uint64_t max_safe = 0;
     for (const auto& [kind, block] : r.sink.checkpoints) {
-        if (kind == CheckpointKind::Safe) max_safe = std::max(max_safe, block);
-        else CHECK(block <= max_safe);
+        if (kind == CheckpointKind::Safe)
+            max_safe = std::max(max_safe, block);
+        else
+            CHECK(block <= max_safe);
     }
     CHECK(r.sink.emitted.size() == 1);
 }
@@ -276,7 +283,8 @@ TEST_CASE("driver: missed progress deadlines report the provider and reset on pr
     r.start(100, 100);
     r.drv->set_gates(110, 100);
     const std::uint64_t deadline = r.cfg.watchdog.progress_stall_ms;
-    for (int i = 0; i < 4; ++i) r.src.overrides.push_back(retry_failure());
+    for (int i = 0; i < 4; ++i)
+        r.src.overrides.push_back(retry_failure());
 
     for (int i = 0; i < 4; ++i) {
         r.now = static_cast<std::uint64_t>(i) * deadline;

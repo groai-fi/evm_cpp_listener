@@ -1,12 +1,12 @@
-#include <catch2/catch_test_macros.hpp>
+#include "provider/provider_pool.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 
 #include "core/hex.hpp"
 #include "mock_http_server.hpp"
 #include "mock_ws_server.hpp"
-#include "provider/provider_pool.hpp"
 #include "test_util.hpp"
 
 using namespace evml::provider;
@@ -21,7 +21,7 @@ constexpr const char* kHeadsSub = "0x9ce59a13059e417087c02d3236a0b1cc";
 constexpr const char* kLogsSub = "0x4a8a4c0d8a3b4e5f9d7c1b2a3e4f5a6b";
 constexpr const char* kPoolAddr = "0xe846373c1a92b167b4e9cd5d8e4d6b1db9e90ec7";
 constexpr const char* kSwapTopic = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
-constexpr std::uint64_t kHead = 0x31cbb7f;  // block number inside fixtures/ws_new_head.json
+constexpr std::uint64_t kHead = 0x31cbb7f;            // block number inside fixtures/ws_new_head.json
 constexpr const char* kDeadWs = "ws://127.0.0.1:9/";  // validated but never connected to (pool not started)
 
 std::string fixture(const char* name) {
@@ -75,7 +75,9 @@ Rpc parse_req(const MockRequest& r) {
             v.at("params").as_array()};
 }
 
-MockReply ok_reply(std::uint64_t id, const std::string& result_json) { return MockReply{.body = reply(id, result_json)}; }
+MockReply ok_reply(std::uint64_t id, const std::string& result_json) {
+    return MockReply{.body = reply(id, result_json)};
+}
 
 // What a healthy node answers; unknown methods fail loudly (HTTP 500) instead of being papered over.
 struct Chain {
@@ -136,19 +138,21 @@ struct Rec {
 
 PoolHandlers handlers(Rec& r) {
     PoolHandlers h;
-    h.on_head = [&r](const evml::rpc::Head& x, const std::string& p) { r.heads.emplace_back(x.number, p); };
+    h.on_head = [&r](const evml::rpc::Head& x, std::string_view p) { r.heads.emplace_back(x.number, std::string(p)); };
     h.on_transition = [&r](const Transition& t, std::string_view why) {
-        r.transitions.push_back(t.provider + ":" + to_string(t.from) + "->" + to_string(t.to) + " (" + std::string(why) + ")");
+        r.transitions.push_back(t.provider + ":" + to_string(t.from) + "->" + to_string(t.to) + " (" +
+                                std::string(why) + ")");
     };
     h.on_ws_active_changed = [&r](const std::optional<std::string>&, const std::optional<std::string>& p,
                                   std::string_view) { r.active.push_back(p ? *p : "-"); };
-    h.on_ws_down = [&r](const evml::rpc::WsClosed& c, const std::string&) { r.down_reasons.push_back(c.reason); };
+    h.on_ws_down = [&r](const evml::rpc::WsClosed& c, std::string_view) { r.down_reasons.push_back(c.reason); };
     return h;
 }
 
 void shutdown(net::io_context& ioc, const std::shared_ptr<ProviderPool>& p) {
     p->stop();
-    run_until(ioc, [] { return false; }, 150ms);  // let aborted I/O unwind
+    run_until(
+        ioc, [] { return false; }, 150ms);  // let aborted I/O unwind
 }
 
 RequestBuilder get_logs_request() {
@@ -178,11 +182,12 @@ TEST_CASE("pool: create() rejects inconsistent configs") {
     CHECK_THROWS_AS(make(base_cfg({}, {"A"}, {"A"})), std::invalid_argument);
     CHECK_THROWS_AS(make(base_cfg(eps, {}, {"A"})), std::invalid_argument);
     CHECK_THROWS_AS(make(base_cfg(eps, {"A"}, {})), std::invalid_argument);
-    CHECK_THROWS_AS(make(base_cfg(eps, {"Z"}, {"A"})), std::invalid_argument);   // unknown name
-    CHECK_THROWS_AS(make(base_cfg(eps, {"B"}, {"A"})), std::invalid_argument);   // B has no ws_url
+    CHECK_THROWS_AS(make(base_cfg(eps, {"Z"}, {"A"})), std::invalid_argument);  // unknown name
+    CHECK_THROWS_AS(make(base_cfg(eps, {"B"}, {"A"})), std::invalid_argument);  // B has no ws_url
     CHECK_THROWS_AS(make(base_cfg(eps, {"A"}, {"Z"})), std::invalid_argument);
     CHECK_THROWS_AS(make(base_cfg({eps[0], eps[0]}, {"A"}, {"A"})), std::invalid_argument);  // duplicate
-    CHECK_THROWS_AS(make(base_cfg({{"A", "ws://127.0.0.1:9/", ""}}, {"A"}, {"A"})), std::invalid_argument);  // no http_url
+    CHECK_THROWS_AS(make(base_cfg({{"A", "ws://127.0.0.1:9/", ""}}, {"A"}, {"A"})),
+                    std::invalid_argument);  // no http_url
 
     auto no_chain = base_cfg(eps, {"A"}, {"A"});
     no_chain.chain_id = 0;
@@ -224,13 +229,16 @@ TEST_CASE("pool: three session failures on A fail over to B and heads flow", "[i
     Rec rec;
     auto pool = ProviderPool::create(
         ioc.get_executor(),
-        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}), handlers(rec));
+        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}),
+        handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B" && !rec.heads.empty(); }, 8s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->active_ws() == "B" && !rec.heads.empty(); }, 8s));
     CHECK(a_conns >= 3);
     std::string trs;
-    for (const auto& t : rec.transitions) trs += t + " | ";
+    for (const auto& t : rec.transitions)
+        trs += t + " | ";
     INFO("transitions: " << trs);
     CHECK(pool->state("A") == State::Down);
     CHECK(rec.heads[0].first == kHead);
@@ -261,17 +269,23 @@ TEST_CASE("pool: quota error on subscribe fails over immediately and A is not re
     Rec rec;
     auto pool = ProviderPool::create(
         ioc.get_executor(),
-        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}), handlers(rec));
+        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}),
+        handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B" && wsB.upgrades() == 1; }, 5s));
-    run_until(ioc, [] { return false; }, 300ms);
+    REQUIRE(run_until(
+        ioc, [&] { return pool->active_ws() == "B" && wsB.upgrades() == 1; }, 5s));
+    run_until(
+        ioc, [] { return false; }, 300ms);
     CHECK(a_conns == 1);
-    const bool cooled = run_until(ioc, [&] { return pool->state("A") == State::Cooldown; }, 5s);
+    const bool cooled = run_until(
+        ioc, [&] { return pool->state("A") == State::Cooldown; }, 5s);
     std::string trs;
-    for (const auto& t : rec.transitions) trs += t + " | ";
+    for (const auto& t : rec.transitions)
+        trs += t + " | ";
     INFO("transitions: " << trs);
-    INFO("a_conns=" << a_conns << " active=" << pool->active_ws().value_or("-") << " A=" << to_string(pool->state("A")));
+    INFO("a_conns=" << a_conns << " active=" << pool->active_ws().value_or("-")
+                    << " A=" << to_string(pool->state("A")));
     REQUIRE(cooled);
     CHECK(pool->state("A") == State::Cooldown);
     CHECK(contains(rec.transitions, "A:up->cooldown"));
@@ -307,10 +321,12 @@ TEST_CASE("pool: wrong chain on A makes A Fatal and B becomes active", "[integra
     Rec rec;
     auto pool = ProviderPool::create(
         ioc.get_executor(),
-        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}), handlers(rec));
+        base_cfg({{"A", wsA.url(), httpA.url()}, {"B", wsB.url(), httpB.url()}}, {"A", "B"}, {"B", "A"}),
+        handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B"; }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->active_ws() == "B"; }, 5s));
     CHECK(pool->state("A") == State::Fatal);
     CHECK(wsA.connections() == 1);
     shutdown(ioc, pool);
@@ -343,11 +359,14 @@ TEST_CASE("pool: A recovers (probe) and takes over again after prefer_primary_af
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
     pool->start();
 
-    const bool ok = run_until(ioc, [&] { return rec.active.size() == 3 && !rec.heads.empty(); }, 15s);
+    const bool ok = run_until(
+        ioc, [&] { return rec.active.size() == 3 && !rec.heads.empty(); }, 15s);
     std::string trs;
-    for (const auto& t : rec.transitions) trs += t + " | ";
+    for (const auto& t : rec.transitions)
+        trs += t + " | ";
     std::string acts;
-    for (const auto& a : rec.active) acts += a + " -> ";
+    for (const auto& a : rec.active)
+        acts += a + " -> ";
     INFO("transitions: " << trs);
     INFO("active history: " << acts);
     INFO("heads count: " << rec.heads.size() << " a_conns: " << a_conns);
@@ -379,7 +398,8 @@ TEST_CASE("pool: a stalled newHeads stream restarts the session", "[integration]
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return wsA.connections() >= 2; }, 6s));
+    REQUIRE(run_until(
+        ioc, [&] { return wsA.connections() >= 2; }, 6s));
     CHECK(contains(rec.down_reasons, "stalled"));
     CHECK(pool->active_ws() == "A");  // one stall is a single failure, not yet a failover
     shutdown(ioc, pool);
@@ -409,7 +429,8 @@ TEST_CASE("pool: WS head lagging the getLogs provider's head fails over to the o
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
     pool->start();
 
-    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "B"; }, 8s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->active_ws() == "B"; }, 8s));
     REQUIRE_FALSE(rec.transitions.empty());
     CHECK(rec.transitions[0].find("A:up->down") == 0);
     CHECK(rec.transitions[0].find("lagging") != std::string::npos);
@@ -429,8 +450,7 @@ TEST_CASE("pool: call() falls through a quota-exhausted provider to the next", "
     });
     MockHttpServer h2(ioc, healthy(chain));
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
+        ioc.get_executor(), base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
 
     const auto o = run_sync(ioc, pool->call(get_logs_request()));
     CHECK(o.ok);
@@ -458,8 +478,7 @@ TEST_CASE("pool: RangeTooLarge returns immediately and does not penalise or skip
     });
     MockHttpServer h2(ioc, healthy(chain));
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
+        ioc.get_executor(), base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
 
     const auto o = run_sync(ioc, pool->call(get_logs_request()));
     CHECK_FALSE(o.ok);
@@ -476,8 +495,7 @@ TEST_CASE("pool: call() returns the last error when every provider fails", "[int
     MockHttpServer h1(ioc, [](const MockRequest&) { return MockReply{.status = 500, .body = "boom-1"}; });
     MockHttpServer h2(ioc, [](const MockRequest&) { return MockReply{.status = 500, .body = "boom-2"}; });
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
+        ioc.get_executor(), base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
 
     const auto o = run_sync(ioc, pool->call(get_logs_request()));
     CHECK_FALSE(o.ok);
@@ -505,8 +523,7 @@ TEST_CASE("pool: tags are cached per answering provider and never mixed after a 
         return serve_b(r);
     });
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"A", kDeadWs, ha.url()}, {"B", kDeadWs, hb.url()}}, {"A"}, {"B", "A"}), {});
+        ioc.get_executor(), base_cfg({{"A", kDeadWs, ha.url()}, {"B", kDeadWs, hb.url()}}, {"A"}, {"B", "A"}), {});
 
     const auto s1 = run_sync(ioc, pool->read_tag("B", Tag::Safe));
     REQUIRE(s1.has_value());
@@ -529,7 +546,8 @@ TEST_CASE("pool: tags are cached per answering provider and never mixed after a 
     shutdown(ioc, pool);
 }
 
-TEST_CASE("pool: on_tag fires with provider/tag/number on cold start and only while the pool is running", "[integration]") {
+TEST_CASE("pool: on_tag fires with provider/tag/number on cold start and only while the pool is running",
+          "[integration][pool]") {
     net::io_context ioc;
     Chain chain;
     chain.safe = 150;
@@ -542,14 +560,15 @@ TEST_CASE("pool: on_tag fires with provider/tag/number on cold start and only wh
     };
     std::vector<Seen> seen;
     PoolHandlers h;
-    h.on_tag = [&](const std::string& p, Tag t, std::uint64_t n, const evml::core::Hash32&) {
-        seen.push_back({p, t, n});
+    h.on_tag = [&](std::string_view p, Tag t, std::uint64_t n, const evml::core::Hash32&) {
+        seen.push_back({std::string(p), t, n});
     };
     auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", kDeadWs, ha.url()}}, {"A"}, {"A"}), h);
     pool->start();
 
     // start() primes both safe and finalized tags immediately on cold start without waiting for safe_poll.
-    REQUIRE(run_until(ioc, [&] { return seen.size() >= 2; }, 2s));
+    REQUIRE(run_until(
+        ioc, [&] { return seen.size() >= 2; }, 2s));
     REQUIRE(seen.size() == 2);
     CHECK(seen[0].provider == "A");
     CHECK(seen[0].tag == Tag::Safe);
@@ -559,7 +578,8 @@ TEST_CASE("pool: on_tag fires with provider/tag/number on cold start and only wh
     CHECK(seen[1].number == 120);
 
     pool->stop();
-    run_until(ioc, [] { return false; }, 150ms);
+    run_until(
+        ioc, [] { return false; }, 150ms);
     ioc.restart();
     (void)run_sync(ioc, pool->read_tag("A", Tag::Safe));
     CHECK(seen.size() == 2);  // stopped pool does not call handlers
@@ -577,8 +597,7 @@ TEST_CASE("pool: call_to asks only the named provider and does not fail over", "
     MockHttpServer h1(ioc, [](const MockRequest&) { return MockReply{.status = 500, .body = "boom-1"}; });
     MockHttpServer h2(ioc, healthy(chain));
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
+        ioc.get_executor(), base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), {});
 
     const auto bad = run_sync(ioc, pool->call_to("H1", get_logs_request()));
     CHECK_FALSE(bad.ok);
@@ -622,9 +641,8 @@ TEST_CASE("pool: per-provider token buckets pace providers independently", "[int
     Chain chain;
     MockHttpServer h1(ioc, healthy(chain));
     MockHttpServer h2(ioc, healthy(chain));
-    auto cfg = base_cfg(
-        {{"H1", kDeadWs, h1.url(), 50u, 50u}, {"H2", kDeadWs, h2.url(), std::nullopt, std::nullopt}},
-        {"H1"}, {"H1", "H2"});
+    auto cfg = base_cfg({{"H1", kDeadWs, h1.url(), 50u, 50u}, {"H2", kDeadWs, h2.url(), std::nullopt, std::nullopt}},
+                        {"H1"}, {"H1", "H2"});
     cfg.reconcile_rps = 2;
     cfg.reconcile_burst = 2;
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), {});
@@ -656,8 +674,8 @@ TEST_CASE("pool: report_bad counts toward Down and pick_getlogs_excluding skips 
     MockHttpServer h2(ioc, healthy(chain));
     Rec rec;
     auto pool = ProviderPool::create(
-        ioc.get_executor(),
-        base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}), handlers(rec));
+        ioc.get_executor(), base_cfg({{"H1", kDeadWs, h1.url()}, {"H2", kDeadWs, h2.url()}}, {"H1"}, {"H1", "H2"}),
+        handlers(rec));
 
     CHECK(pool->pick_getlogs_excluding({}) == std::optional<std::string>("H1"));
     CHECK(pool->pick_getlogs_excluding({"H1"}) == std::optional<std::string>("H2"));
@@ -708,7 +726,8 @@ TEST_CASE("pool: create() rejects an invalid pacing config", "[unit]") {
     }
 }
 
-TEST_CASE("pool: head silence keeps counting after every WS provider went Down, so a stall can still alert", "[integration]") {
+TEST_CASE("pool: head silence keeps counting after every WS provider went Down, so a stall can still alert",
+          "[integration]") {
     net::io_context ioc;
     Chain chain;
     MockWsServer wsA(ioc, [](MockWsConn& c) -> net::awaitable<void> {
@@ -718,14 +737,17 @@ TEST_CASE("pool: head silence keeps counting after every WS provider went Down, 
     MockHttpServer httpA(ioc, healthy(chain));
 
     Rec rec;
-    auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", wsA.url(), httpA.url()}}, {"A"}, {"A"}), handlers(rec));
+    auto pool = ProviderPool::create(ioc.get_executor(), base_cfg({{"A", wsA.url(), httpA.url()}}, {"A"}, {"A"}),
+                                     handlers(rec));
     CHECK_FALSE(pool->ms_since_head());  // not started
 
     pool->start();
-    REQUIRE(run_until(ioc, [&] { return pool->state("A") == State::Down && !pool->active_ws(); }, 8s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->state("A") == State::Down && !pool->active_ws(); }, 8s));
     const auto first = pool->ms_since_head();
     REQUIRE(first);  // no active provider, but the silence is still measured
-    run_until(ioc, [] { return false; }, 300ms);
+    run_until(
+        ioc, [] { return false; }, 300ms);
     const auto later = pool->ms_since_head();
     REQUIRE(later);
     CHECK(*later >= *first + 250);
@@ -748,7 +770,8 @@ TEST_CASE("pool: ms_since_head is unknown when the pool does not subscribe to he
     cfg.subscribe_heads = false;  // logs only
     auto pool = ProviderPool::create(ioc.get_executor(), std::move(cfg), handlers(rec));
     pool->start();
-    REQUIRE(run_until(ioc, [&] { return pool->active_ws() == "A"; }, 5s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->active_ws() == "A"; }, 5s));
     CHECK_FALSE(pool->ms_since_head());
     shutdown(ioc, pool);
 }
@@ -773,26 +796,21 @@ TEST_CASE("pool: stop() cancels in-flight HTTP call and token-bucket sleep immed
     std::optional<RpcOutcome> call_out;
     std::optional<RpcOutcome> paced_out;
     net::co_spawn(
-        ioc,
-        [&]() -> net::awaitable<void> {
-            call_out = co_await pool->call(get_logs_request());
-        },
-        net::detached);
+        ioc, [&]() -> net::awaitable<void> { call_out = co_await pool->call(get_logs_request()); }, net::detached);
     // Exhaust burst with one request on H2, then queue a second call_to on H2 that must wait ~1s on token-bucket timer
     CHECK(run_sync(ioc, pool->call_to("H2", get_logs_request())).ok);
     ioc.restart();
     net::co_spawn(
-        ioc,
-        [&]() -> net::awaitable<void> {
-            paced_out = co_await pool->call_to("H2", get_logs_request());
-        },
+        ioc, [&]() -> net::awaitable<void> { paced_out = co_await pool->call_to("H2", get_logs_request()); },
         net::detached);
 
-    REQUIRE(run_until(ioc, [&] { return h1.requests() == 1 && pool->throttled_total("H2") == 1; }, 2s));
+    REQUIRE(run_until(
+        ioc, [&] { return h1.requests() == 1 && pool->throttled_total("H2") == 1; }, 2s));
 
     const auto t0 = std::chrono::steady_clock::now();
     pool->stop();
-    REQUIRE(run_until(ioc, [&] { return call_out.has_value() && paced_out.has_value(); }, 200ms));
+    REQUIRE(run_until(
+        ioc, [&] { return call_out.has_value() && paced_out.has_value(); }, 200ms));
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     CHECK(elapsed < 200ms);
     CHECK_FALSE(call_out->ok);
@@ -834,7 +852,8 @@ TEST_CASE("pool: start_http_only() probes Down providers back to Up without open
     CHECK(pool->state("H1") == State::Down);
 
     h1_down = false;
-    REQUIRE(run_until(ioc, [&] { return pool->state("H1") == State::Up; }, 2s));
+    REQUIRE(run_until(
+        ioc, [&] { return pool->state("H1") == State::Up; }, 2s));
     CHECK(ws_upgrades == 0);
     CHECK(pool->rpc_requests_total("H1").at("eth_blockNumber") >= 1);
     shutdown(ioc, pool);

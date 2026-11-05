@@ -1,6 +1,5 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <map>
 #include <memory>
 #include <random>
@@ -62,10 +61,11 @@ struct Mode {
 // with new versions and new random logs, so logs can vanish, appear or move.
 class Sim {
 public:
-    Sim(std::uint64_t seed, Mode mode)
-        : cfg_(load_base_config()), mode_(mode), rng_(seed), seed_(seed) {
-        if (mode.restarts) sink_ = std::make_unique<RedisLikeSink>();
-        else sink_ = std::make_unique<MemorySink>();
+    Sim(std::uint64_t seed, Mode mode) : cfg_(load_base_config()), mode_(mode), rng_(seed), seed_(seed) {
+        if (mode.restarts)
+            sink_ = std::make_unique<RedisLikeSink>();
+        else
+            sink_ = std::make_unique<MemorySink>();
         sink_->stored.safe = kStart;
         sink_->stored.finalized = kStart;
         sink_->stored.contracts = contract_manifest(cfg_);
@@ -73,7 +73,8 @@ public:
     }
 
     void run_steps(std::size_t n) {
-        for (std::size_t i = 0; i < n; ++i) step(i);
+        for (std::size_t i = 0; i < n; ++i)
+            step(i);
     }
 
     std::size_t reverts() const { return sink_->count(EventType::Revert); }
@@ -124,7 +125,8 @@ private:
         Blk b;
         b.version = ++versions_;
         const std::uint64_t n = rng_() % 3;
-        for (std::uint64_t i = 0; i < n; ++i) b.logs.emplace_back(rng_() % kContracts, i);
+        for (std::uint64_t i = 0; i < n; ++i)
+            b.logs.emplace_back(rng_() % kContracts, i);
         return b;
     }
 
@@ -176,7 +178,8 @@ private:
 
     void advance() {
         const std::uint64_t n = 1 + rng_() % 6;
-        for (std::uint64_t i = 0; i < n; ++i) chain_[++head_] = mine();
+        for (std::uint64_t i = 0; i < n; ++i)
+            chain_[++head_] = mine();
         dirty_ = true;
     }
 
@@ -184,7 +187,8 @@ private:
         const std::uint64_t lowest = std::max(g_f_ + 1, kStart + 1);
         if (head_ < lowest) return;
         const std::uint64_t from = lowest + rng_() % (head_ - lowest + 1);
-        for (std::uint64_t b = from; b <= head_; ++b) chain_[b] = mine();
+        for (std::uint64_t b = from; b <= head_; ++b)
+            chain_[b] = mine();
         dirty_ = true;
         // Half the time the host notices (SafeRegression / hash mismatch); otherwise the sweeps must catch it alone.
         if (from <= g_s_ && roll(50)) drv_->on_safe_reorg_signal("test reorg");
@@ -199,8 +203,10 @@ private:
         if (mode_.reorgs && roll(12)) reorg();
         if (dirty_) sync_source();
         if (src_.overrides.empty()) {
-            if (roll(10)) src_.overrides.push_back(retry_failure());
-            else if (roll(5)) src_.overrides.push_back(corrupt_failure(cfg_));
+            if (roll(10))
+                src_.overrides.push_back(retry_failure());
+            else if (roll(5))
+                src_.overrides.push_back(corrupt_failure(cfg_));
         }
         if (roll(8)) src_.corrupt_next_log_hash = true;
         sink_->saturated_flag = roll(10);
@@ -228,8 +234,10 @@ private:
             const auto index = static_cast<std::uint64_t>(std::stoull(field(e, "log_index")));
             // I6: types alternate per event_id, starting with log.
             const auto prev = last_type_.find(e.event_id);
-            if (prev == last_type_.end()) REQUIRE(e.type == EventType::Log);
-            else REQUIRE(prev->second != e.type);
+            if (prev == last_type_.end())
+                REQUIRE(e.type == EventType::Log);
+            else
+                REQUIRE(prev->second != e.type);
             last_type_[e.event_id] = e.type;
             net_[e.event_id] = {block, e.type};
             if (e.type != EventType::Log) continue;
@@ -291,14 +299,15 @@ void run_property(Mode mode, std::uint64_t first_seed, std::uint64_t seeds) {
     }
     CHECK(bad_reports > 0);
     // The reorg modes must actually retract logs, otherwise the checks above prove nothing about reorgs.
-    if (mode.reorgs) CHECK(reverts > 0);
-    else CHECK(reverts == 0);
+    if (mode.reorgs)
+        CHECK(reverts > 0);
+    else
+        CHECK(reverts == 0);
 }
 
 }  // namespace
 
-TEST_CASE("property: without reorgs I1 to I4 and I6 hold under retries, pauses and range limits",
-          "[unit][property]") {
+TEST_CASE("property: without reorgs I1 to I4 and I6 hold under retries, pauses and range limits", "[unit][property]") {
     run_property(Mode{false, false}, 1000, 20);  // 20 x 200 ticks
 }
 
@@ -349,7 +358,8 @@ struct Env {
     }
     std::set<std::string> net_present() const {
         std::map<std::string, EventType> last;
-        for (const auto& e : sink.emitted) last[e.event_id] = e.type;
+        for (const auto& e : sink.emitted)
+            last[e.event_id] = e.type;
         std::set<std::string> out;
         for (const auto& [id, t] : last)
             if (t == EventType::Log) out.insert(id);
@@ -370,7 +380,8 @@ TEST_CASE("scenario: a 3 block reorg below the safe tag is retracted and replace
 
     env.set_chain({{105, 11}, {106, 12}, {107, 13}});
     env.drv->on_safe_reorg_signal("safe tag moved back");
-    for (int i = 0; i < 10 && env.drv->status().reverify_pending; ++i) env.tick();
+    for (int i = 0; i < 10 && env.drv->status().reverify_pending; ++i)
+        env.tick();
 
     const auto st = env.drv->status();
     CHECK_FALSE(st.reverify_pending);
@@ -394,7 +405,8 @@ TEST_CASE("scenario: a restart between the safe and final sweeps still retracts 
     env.boot();  // crash: in-process state gone, Redis state kept
     env.set_chain({{105, 2}});
     env.drv->set_gates(110, 110);
-    for (int i = 0; i < 30 && env.sw->c_f() < 110; ++i) env.tick();
+    for (int i = 0; i < 30 && env.sw->c_f() < 110; ++i)
+        env.tick();
 
     CHECK(env.sw->c_f() == 110);
     REQUIRE(env.sink.count(EventType::Revert) == 1);

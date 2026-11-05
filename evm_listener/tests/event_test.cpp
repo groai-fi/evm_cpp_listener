@@ -1,7 +1,8 @@
+#include "pipeline/event.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "base_config.hpp"
-#include "pipeline/event.hpp"
 #include "pipeline/log_validation.hpp"
 
 using namespace evml::pipeline;
@@ -41,7 +42,8 @@ evml::rpc::Log log_of(const evml::core::ContractCfg& k, std::size_t event_idx, s
 TEST_CASE("event id and dedup key", "[unit][event]") {
     const auto id = make_event_id(8453, hash_of(0xab), 7);
     std::string hex_ab;
-    for (int i = 0; i < 32; ++i) hex_ab += "ab";
+    for (int i = 0; i < 32; ++i)
+        hex_ab += "ab";
     CHECK(id == "8453:0x" + hex_ab + ":7");
     CHECK(make_event_id(8453, hash_of(0xab), 7) != make_event_id(8453, hash_of(0xac), 7));  // reorg => new id
     CHECK(make_event_id(8453, hash_of(0xab), 7) != make_event_id(8453, hash_of(0xab), 8));
@@ -70,8 +72,9 @@ TEST_CASE("make_event: pool log is safe-class on the events stream with the full
     CHECK(dedup_key(e) == "dedup:" + e.event_id);
 }
 
-TEST_CASE("make_event: gauge is finalized-class, factory goes to the registry stream, a revert shares its log's dedup key",
-          "[unit][event]") {
+TEST_CASE(
+    "make_event: gauge is finalized-class, factory goes to the registry stream, a revert shares its log's dedup key",
+    "[unit][event]") {
     const auto cfg = load_base_config();
     const auto gauge = make_event(log_of(contract(cfg, "eurc_usdc_cl50_gauge"), 1, 52060600, 0), cfg, kCtx,
                                   EventType::Log, 1, "infura", 0, 0);
@@ -85,7 +88,7 @@ TEST_CASE("make_event: gauge is finalized-class, factory goes to the registry st
 
     const auto rev = make_event(log_of(contract(cfg, "eurc_usdc_cl50_gauge"), 1, 52060600, 0), cfg, kCtx,
                                 EventType::Revert, 1, "infura", 0, 0);
-    CHECK(rev.event_id == gauge.event_id);  // same identity...
+    CHECK(rev.event_id == gauge.event_id);      // same identity...
     CHECK(dedup_key(rev) == dedup_key(gauge));  // ...and one dedup key per event: its value is the last type (rev 5)
     CHECK(dedup_key(rev) == "dedup:" + rev.event_id);
 }
@@ -107,12 +110,15 @@ TEST_CASE("to_fields: schema v=1 order and values", "[unit][event]") {
     const auto e = make_event(l, cfg, kCtx, EventType::Log, 1760000000, "infura", 111, 222);
     const auto f = to_fields(e);
 
-    const std::vector<std::string> expected_keys{
-        "v", "type", "finality", "event_id", "chain_id", "contract", "address", "event", "signature", "block_number",
-        "block_hash", "block_timestamp", "tx_hash", "tx_index", "log_index", "topics", "data", "first_source",
-        "observed_ms", "emitted_ms", "host", "shard", "listener_version"};
+    const std::vector<std::string> expected_keys{"v",         "type",         "finality",        "event_id",
+                                                 "chain_id",  "contract",     "address",         "event",
+                                                 "signature", "block_number", "block_hash",      "block_timestamp",
+                                                 "tx_hash",   "tx_index",     "log_index",       "topics",
+                                                 "data",      "first_source", "observed_ms",     "emitted_ms",
+                                                 "host",      "shard",        "listener_version"};
     REQUIRE(f.size() == expected_keys.size());
-    for (std::size_t i = 0; i < f.size(); ++i) CHECK(f[i].first == expected_keys[i]);
+    for (std::size_t i = 0; i < f.size(); ++i)
+        CHECK(f[i].first == expected_keys[i]);
 
     const auto get = [&](const std::string& k) {
         for (const auto& kv : f) {
@@ -132,7 +138,7 @@ TEST_CASE("to_fields: schema v=1 order and values", "[unit][event]") {
     CHECK(get("data") == "0x00");
 }
 
-TEST_CASE("validate_logs: accepts a sound response (including an empty one)", "[unit][validation]") {
+TEST_CASE("validate_logs: accepts a sound response (including an empty one)", "[unit][validation][log_validation]") {
     const auto cfg = load_base_config();
     const auto& pool = contract(cfg, "eurc_usdc_cl50_pool");
     CHECK_FALSE(validate_logs({}, 100, 200, cfg, std::nullopt).has_value());
@@ -141,7 +147,8 @@ TEST_CASE("validate_logs: accepts a sound response (including an empty one)", "[
     CHECK_FALSE(validate_logs(logs, 100, 200, cfg, std::nullopt).has_value());
 }
 
-TEST_CASE("validate_logs: rejects each class of provider fault with a precise message", "[unit][validation]") {
+TEST_CASE("validate_logs: rejects each class of provider fault with a precise message",
+          "[unit][validation][log_validation]") {
     const auto cfg = load_base_config();
     const auto& pool = contract(cfg, "eurc_usdc_cl50_pool");
     const auto& gauge = contract(cfg, "eurc_usdc_cl50_gauge");

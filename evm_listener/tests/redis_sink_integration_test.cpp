@@ -5,16 +5,22 @@
 // services FAIL the tests; they never skip them. Every test uses its own random shard id and its own proxy, so tests
 // do not see each other's keys; scenario 12 flushes the server-wide script cache and is therefore [redis_serial].
 
-#include <catch2/catch_test_macros.hpp>
+#include <sw/redis++/redis++.h>
 
 #include <algorithm>
 #include <atomic>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <csignal>
 #include <exception>
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -24,11 +30,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/use_future.hpp>
-#include <sw/redis++/redis++.h>
 
 #include "core/log.hpp"
 #include "pipeline/coverage.hpp"
@@ -48,8 +49,8 @@ using evml::pipeline::CheckpointKind;
 using evml::pipeline::Emission;
 using evml::pipeline::EventType;
 using evml::pipeline::ReleasedEntry;
-using evml::testing::ToxiRedis;
 using evml::testing::require_env;
+using evml::testing::ToxiRedis;
 
 namespace net = boost::asio;
 
@@ -60,7 +61,9 @@ std::string random_shard() {
     return "t_" + std::to_string(rd()) + std::to_string(rd());
 }
 
-std::string id_of(int i) { return "e" + std::to_string(i); }
+std::string id_of(int i) {
+    return "e" + std::to_string(i);
+}
 
 Emission mk(const std::string& id, std::uint64_t block, StreamKind stream = StreamKind::Events,
             std::optional<std::uint64_t> released = std::nullopt) {
@@ -165,13 +168,18 @@ struct Live {
         return ids;
     }
 
-    sw::redis::OptionalString ckpt_field(const std::string& f) { return admin.hget(keys.ckpt(), f); }
-    long long xlen(StreamKind stream) { return admin.command<long long>("XLEN", keys.stream(stream)); }
+    sw::redis::OptionalString ckpt_field(const std::string& f) {
+        return admin.hget(keys.ckpt(), f);
+    }
+    long long xlen(StreamKind stream) {
+        return admin.command<long long>("XLEN", keys.stream(stream));
+    }
 
     void expect_exactly(int n) {
         const auto ids = event_ids(StreamKind::Events);
         REQUIRE(ids.size() == static_cast<std::size_t>(n));  // no loss, no duplicates
-        for (int k = 0; k < n; ++k) REQUIRE(ids[static_cast<std::size_t>(k)] == id_of(k));  // in order
+        for (int k = 0; k < n; ++k)
+            REQUIRE(ids[static_cast<std::size_t>(k)] == id_of(k));  // in order
     }
 };
 
@@ -244,7 +252,8 @@ TEST_CASE("redis sink integration 4: spill cap saturates, the checkpoint stays f
     L.start([](RedisSinkOptions& o) { o.spill_max_bytes = 64 * 1024; });
 
     L.sink->init_checkpoint(999, {"a:1:x"});
-    for (int i = 0; i < 10; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
+    for (int i = 0; i < 10; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     L.sink->checkpoint(CheckpointKind::Safe, 1009);
     REQUIRE(L.sink->wait_idle(30s));
     REQUIRE(L.ckpt_field("safe") == std::optional<std::string>("1009"));
@@ -388,7 +397,8 @@ TEST_CASE("redis sink integration 16: replaying 50k spilled items never lets the
 
     L.px.disable();
     constexpr int kTotal = 50000;
-    for (int k = 0; k < kTotal; ++k) L.sink->emit(mk(id_of(k), 1000u + static_cast<std::uint64_t>(k)));
+    for (int k = 0; k < kTotal; ++k)
+        L.sink->emit(mk(id_of(k), 1000u + static_cast<std::uint64_t>(k)));
     REQUIRE(wait_for([&] { return L.sink->status().queue_depth == 0; }, 60s));
     CHECK(L.sink->status().spill_records > 40000);
 
@@ -400,16 +410,18 @@ TEST_CASE("redis sink integration 16: replaying 50k spilled items never lets the
     long checks = 0;
     while (L.sink->status().pending_writes != 0) {
         const auto leader = L.admin.get(L.keys.leader());
-        INFO("sink mode " << to_string(L.sink->mode()) << ", replay running for "
-                          << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
-                          << " ms");
+        INFO("sink mode "
+             << to_string(L.sink->mode()) << ", replay running for "
+             << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
+             << " ms");
         REQUIRE(leader.has_value());  // the lease key never disappeared
         REQUIRE(*leader == L.token);
         ++checks;
         REQUIRE(std::chrono::steady_clock::now() - t0 < 180s);
         std::this_thread::sleep_for(20ms);
     }
-    const auto replay_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    const auto replay_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     INFO("replay took " << replay_ms << " ms, " << checks << " lease checks");
     REQUIRE(replay_ms > kTtlMs);  // otherwise the scenario proves nothing
 
@@ -434,19 +446,22 @@ std::vector<std::string> entry_ids(Live& L, StreamKind stream) {
     std::vector<Item> items;
     L.admin.xrange(L.keys.stream(stream), "-", "+", std::back_inserter(items));
     std::vector<std::string> ids;
-    for (const auto& item : items) ids.push_back(item.first);
+    for (const auto& item : items)
+        ids.push_back(item.first);
     return ids;
 }
 
 std::uint64_t system_now_ms() {
     return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
 }
 
 }  // namespace
 
 // Scenario 19: the probe reads real XINFO GROUPS / XINFO STREAM / XRANGE / XPENDING / TIME replies and judges them.
-TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis replies", "[integration][sink]") {
+TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis replies",
+          "[integration][sink][redis_sink]") {
     Live L;
     const std::string stream = L.keys.events();
     const evml::core::ConsumerGroupCfg cfg{StreamKind::Events, "bot"};
@@ -456,7 +471,8 @@ TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis rep
     CHECK(evaluate_consumer_lag(cfg, probe.read_group_facts(stream, "bot")).missing);
 
     L.start();
-    for (int i = 0; i < 5; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
+    for (int i = 0; i < 5; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(L.sink->wait_idle(30s));
     const auto ids = entry_ids(L, StreamKind::Events);
     REQUIRE(ids.size() == 5);
@@ -470,7 +486,7 @@ TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis rep
 
     redis_cmd(L.admin, {"XGROUP", "CREATE", stream, "bot", "0"});
     redis_cmd(L.admin, {"XGROUP", "CREATE", stream, "bot2", "0"});  // never reads: nothing pending, nothing delivered
-    {  // a new group at 0: nothing delivered yet
+    {                                                               // a new group at 0: nothing delivered yet
         const auto f = probe.read_group_facts(stream, "bot");
         REQUIRE(f.group_found);
         CHECK(f.last_delivered_id == "0-0");
@@ -510,15 +526,17 @@ TEST_CASE("redis sink integration 19: consumer-group lag probe on real Redis rep
     {
         const auto f = probe.read_group_facts(stream, "bot");
         CHECK(f.first_entry_id == ids[4]);
-        INFO("max-deleted-entry-id after XTRIM MINID: '" << f.max_deleted_id << "', smallest pending: "
-                                                         << f.smallest_pending_id.value_or("<nil>"));
+        INFO("max-deleted-entry-id after XTRIM MINID: '"
+             << f.max_deleted_id << "', smallest pending: " << f.smallest_pending_id.value_or("<nil>"));
         CHECK(evaluate_consumer_lag(cfg, f).trimmed_unread);
     }
-    {  // A group with nothing pending lost unread entries: MINID trim leaves max-deleted-entry-id at 0-0, the counters show it.
+    {  // A group with nothing pending lost unread entries: MINID trim leaves max-deleted-entry-id at 0-0, the counters
+       // show it.
         const auto f = probe.read_group_facts(stream, "bot2");
         CHECK_FALSE(f.smallest_pending_id.has_value());
         CHECK(f.max_deleted_id == "0-0");
-        CHECK_FALSE(f.entries_read.has_value());  // Redis keeps entries-read nil for a group created at 0 that never read
+        CHECK_FALSE(
+            f.entries_read.has_value());  // Redis keeps entries-read nil for a group created at 0 that never read
         CHECK(f.entries_added == 5);
         CHECK(f.lag == 1);  // only ids[4] is left to read
         CHECK(evaluate_consumer_lag(evml::core::ConsumerGroupCfg{StreamKind::Events, "bot2"}, f).trimmed_unread);
@@ -553,11 +571,13 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
     L.token = kNoFence;
     L.start();
 
-    for (int i = 0; i < 50; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
+    for (int i = 0; i < 50; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(L.sink->wait_idle(30s));
 
     L.px.disable();
-    for (int i = 50; i < 100; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
+    for (int i = 50; i < 100; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.px.enable();
     REQUIRE(L.sink->wait_idle(60s));
@@ -569,7 +589,8 @@ TEST_CASE("redis sink integration 18: lease disabled, outage and restart", "[int
 
     // Crash with a non-empty spill: the spill dies with the process.
     L.px.disable();
-    for (int i = 100; i < 120; ++i) L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
+    for (int i = 100; i < 120; ++i)
+        L.sink->emit(mk(id_of(i), 1000u + static_cast<std::uint64_t>(i)));
     REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Degraded; }, 30s));
     L.sink.reset();
     L.px.enable();
@@ -647,7 +668,7 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
 
     REQUIRE(wait_for([&] { return ra.done.load() || rb.done.load(); }, 5s));
     const auto acquired_at = std::chrono::steady_clock::now();
-    std::this_thread::sleep_for(600ms);  // three polls of the loser: it must still be waiting
+    std::this_thread::sleep_for(600ms);         // three polls of the loser: it must still be waiting
     REQUIRE(ra.done.load() != rb.done.load());  // exactly one leader
     Result& winner = ra.done.load() ? ra : rb;
     Result& loser = ra.done.load() ? rb : ra;
@@ -665,7 +686,8 @@ TEST_CASE("redis sink integration 9: standby takeover within ttl + poll, old tok
 
     ScriptRunner runner(admin);
     const auto emit_with = [&](const std::string& token) {
-        return runner.run(emit_call(keys, mk("late", 1000), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, token}));
+        return runner.run(
+            emit_call(keys, mk("late", 1000), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, token}));
     };
     CHECK(emit_with(winner.token) == std::optional<std::string>("FENCED"));  // the old term can no longer write
     CHECK(emit_with(loser.token) != std::optional<std::string>("FENCED"));
@@ -692,7 +714,8 @@ struct Chain {
 
     Chain() {
         for (std::uint64_t b = 101; b <= 110; ++b) {
-            const auto h = static_cast<std::uint8_t>(b - 100);  // one hash per block: (blockHash, logIndex) must be unique
+            const auto h =
+                static_cast<std::uint8_t>(b - 100);  // one hash per block: (blockHash, logIndex) must be unique
             src.logs.push_back(evml::test::mklog(cfg, 0, b, h, 0));
             src.blocks[b] = evml::test::binfo(h);
         }
@@ -707,8 +730,8 @@ struct Process {
 
     Process(Chain& ch, evml::pipeline::Sink& sink) {
         const auto now = [] { return std::uint64_t{0}; };
-        sw = std::make_unique<Sweeper>(ch.cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, ch.src, sink,
-                                       now);
+        sw = std::make_unique<Sweeper>(ch.cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"},
+                                       ch.src, sink, now);
         drv = std::make_unique<PipelineDriver>(ch.cfg, *sw, sink, ch.src, now);
         drv->set_gates(110, 108);
     }
@@ -717,13 +740,16 @@ struct Process {
         for (int i = 0; i < 500; ++i) {
             const auto t = tick();
             REQUIRE_FALSE(t.done);
-            if (sw->c_s() >= 110 && sw->c_f() >= 108 && drv->status().state == PipelineState::Live && t.wait.count() > 0) return;
+            if (sw->c_s() >= 110 && sw->c_f() >= 108 && drv->status().state == PipelineState::Live &&
+                t.wait.count() > 0)
+                return;
             if (t.wait.count() > 0) std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(t.wait, 50ms));
         }
         const auto st = drv->status();
-        FAIL("the pipeline never reached Live: state=" << evml::pipeline::to_string(st.state) << " c_s=" << sw->c_s() << " c_f="
-                                                      << sw->c_f() << " stalled=" << st.stalled << " (" << st.stall_detail
-                                                      << ") fatal='" << st.fatal << "' frozen=" << st.frozen);
+        FAIL("the pipeline never reached Live: state=" << evml::pipeline::to_string(st.state) << " c_s=" << sw->c_s()
+                                                       << " c_f=" << sw->c_f() << " stalled=" << st.stalled << " ("
+                                                       << st.stall_detail << ") fatal='" << st.fatal
+                                                       << "' frozen=" << st.frozen);
     }
 };
 
@@ -740,7 +766,8 @@ EventIds canonical_ids(Chain& ch) {
         REQUIRE(e.type == EventType::Log);
         ids[e.stream].push_back(e.event_id);
     }
-    for (auto& [kind, v] : ids) std::sort(v.begin(), v.end());
+    for (auto& [kind, v] : ids)
+        std::sort(v.begin(), v.end());
     REQUIRE_FALSE(ids.empty());
     return ids;
 }
@@ -760,7 +787,8 @@ void expect_streams_equal(Live& L, const EventIds& expected) {
 
 // Scenario 3: the process dies while the sink is Degraded. The spill dies with it; the restart re-sweeps from the Redis
 // checkpoint (which never got ahead of the lost events) and the stream ends up with exactly the canonical set.
-TEST_CASE("redis sink integration 3: crash while Degraded, restart re-sweeps to the exact canonical set", "[integration][sink]") {
+TEST_CASE("redis sink integration 3: crash while Degraded, restart re-sweeps to the exact canonical set",
+          "[integration][sink]") {
     Chain ch;
     const EventIds expected = canonical_ids(ch);
 
@@ -789,7 +817,7 @@ TEST_CASE("redis sink integration 3: crash while Degraded, restart re-sweeps to 
     L.sink.reset();
     L.px.enable();
 
-    L.start();  // a new process on the same spill directory
+    L.start();                                   // a new process on the same spill directory
     CHECK(L.sink->status().spill_records == 0);  // the old spill was wiped, never replayed
     Process second(ch, *L.sink);
     second.drive_to_live();
@@ -827,7 +855,8 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     }
     L.admin.command<std::string>("SCRIPT", "FLUSH");
     L.sink->emit(mk("after_flush", 111));  // the old sink's next write
-    REQUIRE(wait_for([&] { return L.sink->mode() == SinkMode::Fenced; }, 30s));  // renew answers FENCED: epoch is gone too
+    REQUIRE(
+        wait_for([&] { return L.sink->mode() == SinkMode::Fenced; }, 30s));  // renew answers FENCED: epoch is gone too
     CHECK(L.sink->status().discarded_total >= 1);
     CHECK(L.event_ids(StreamKind::Events).empty());  // the old token wrote nothing after the wipe
     CHECK(L.event_ids(StreamKind::Registry).empty());
@@ -837,13 +866,14 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     L.sink.reset();
     {
         RedisppConn conn(L.direct_url, L.keys);
-        const auto grant = try_acquire_lease(conn, L.keys, "hostA", "n2", L.lease_ttl_ms);
+        const auto grant = acquire_lease(conn, L.keys, "hostA", "n2", L.lease_ttl_ms);
         REQUIRE(grant.has_value());
         CHECK(grant->token != old_token);
         L.token = grant->token;
     }
     ScriptRunner runner(L.admin);
-    CHECK(runner.run(emit_call(L.keys, mk("zombie", 112), EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, old_token})) ==
+    CHECK(runner.run(emit_call(L.keys, mk("zombie", 112),
+                               EmitParams{604800, system_now_ms() - 48ull * 3600 * 1000, old_token})) ==
           std::optional<std::string>("FENCED"));  // an old token never resumes, even though the lease key exists again
 
     L.start();
@@ -857,8 +887,8 @@ TEST_CASE("redis sink integration 6: FLUSHALL fences the old token, a re-backfil
     expect_streams_equal(L, expected);
 }
 
-TEST_CASE("redis sink integration 20: try_acquire_lease on real Redis returns epoch_n and old_host atomically",
-          "[integration][sink]") {
+TEST_CASE("redis sink integration 20: acquire_lease on real Redis returns epoch_n and old_host atomically",
+          "[integration][sink][lease]") {
     evml::core::log::init("info");
     const std::string url = require_env("REDIS_URL");
     sw::redis::Redis admin{url};
@@ -883,23 +913,118 @@ TEST_CASE("redis sink integration 20: try_acquire_lease on real Redis returns ep
     } cleanup{admin, keys};
 
     RedisppConn conn(url, keys);
-    const auto first = try_acquire_lease(conn, keys, "hostA", "n1", 2000);
+    const auto first = acquire_lease(conn, keys, "hostA", "n1", 2000);
     REQUIRE(first.has_value());
     CHECK(first->token == "1|hostA|n1");
     CHECK(first->epoch_n == 1);
     CHECK_FALSE(first->old_host.has_value());  // no previous leader on this shard
 
     admin.del(keys.leader());  // the lease expires; the epoch key stays
-    const auto second = try_acquire_lease(conn, keys, "hostB", "n2", 2000);
+    const auto second = acquire_lease(conn, keys, "hostB", "n2", 2000);
     REQUIRE(second.has_value());
     CHECK(second->token == "2|hostB|n2");
     CHECK(second->epoch_n == 2);
     CHECK(second->old_host == "hostA");
 
     admin.del(keys.leader());  // hostB re-acquires after its own lease expired: not a leader change
-    const auto third = try_acquire_lease(conn, keys, "hostB", "n3", 2000);
+    const auto third = acquire_lease(conn, keys, "hostB", "n3", 2000);
     REQUIRE(third.has_value());
     CHECK(third->token == "3|hostB|n3");
     CHECK(third->epoch_n == 3);
     CHECK_FALSE(third->old_host.has_value());
+}
+
+TEST_CASE(
+    "redis sink integration 21: RedisppConn::try_read_* return ConnError on malformed Redis data without throwing",
+    "[integration][sink]") {
+    using Catch::Matchers::ContainsSubstring;
+    evml::core::log::init("info");
+    const std::string url = require_env("REDIS_URL");
+    sw::redis::Redis admin{url};
+    const Keys keys{random_shard()};
+    struct Cleanup {
+        sw::redis::Redis& admin;
+        const Keys& keys;
+        Cleanup(sw::redis::Redis& a, const Keys& k) : admin(a), keys(k) {}
+        ~Cleanup() {
+            try {
+                std::vector<std::string> mine;
+                admin.keys(keys.pattern(), std::back_inserter(mine));
+                if (!mine.empty()) admin.del(mine.begin(), mine.end());
+            } catch (...) {
+            }
+        }
+        Cleanup(const Cleanup&) = delete;
+        Cleanup& operator=(const Cleanup&) = delete;
+        Cleanup(Cleanup&&) = delete;
+        Cleanup& operator=(Cleanup&&) = delete;
+    } cleanup{admin, keys};
+
+    RedisppConn conn(url, keys);
+
+    // 1. try_read_checkpoint: non-integer safe, unknown field, invalid contracts JSON, and WRONGTYPE.
+    admin.hset(keys.ckpt(), "safe", "not_a_number");
+    {
+        const auto r = conn.try_read_checkpoint();
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("ckpt.safe"));
+    }
+    admin.del(keys.ckpt());
+    admin.hset(keys.ckpt(), "bogus", "1");
+    {
+        const auto r = conn.try_read_checkpoint();
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("unknown field 'bogus'"));
+    }
+    admin.del(keys.ckpt());
+    admin.hset(keys.ckpt(), "contracts", "not-json");
+    {
+        const auto r = conn.try_read_checkpoint();
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("unpack_manifest"));
+    }
+    admin.del(keys.ckpt());
+    admin.set(keys.ckpt(), "wrongtype_string");
+    {
+        const auto r = conn.try_read_checkpoint();
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("WRONGTYPE"));
+    }
+    admin.del(keys.ckpt());
+
+    // 2. try_read_released: missing before-image, fractional score, +inf score, overflow >= 2^64 score, bad JSON.
+    admin.zadd(keys.released(), "m1", 100.0);
+    {
+        const auto r = conn.try_read_released(0, 1000);
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("no before image"));
+    }
+    admin.hset(keys.released_data(), "m1", pack_released(StreamKind::Events, {{"k", "v"}}));
+    admin.zadd(keys.released(), "m1", 100.5);
+    {
+        const auto r = conn.try_read_released(0, 1000);
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("not a block number"));
+    }
+    admin.zadd(keys.released(), "m1", 18446744073709551616.0);
+    {
+        const auto r = conn.try_read_released(0, std::numeric_limits<std::uint64_t>::max());
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("not a block number"));
+    }
+    admin.zadd(keys.released(), "m1", 100.0);
+    admin.hset(keys.released_data(), "m1", "invalid-json");
+    {
+        const auto r = conn.try_read_released(0, 1000);
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("unpack_released"));
+    }
+
+    // 3. try_read_group_facts: WRONGTYPE on stream key returns ConnError without throwing.
+    admin.set(keys.events(), "not_a_stream");
+    {
+        const auto r = conn.try_read_group_facts(keys.events(), "bot");
+        REQUIRE_FALSE(r.has_value());
+        CHECK_THAT(r.error().what(), ContainsSubstring("WRONGTYPE"));
+    }
 }

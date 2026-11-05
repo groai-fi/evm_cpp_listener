@@ -1,27 +1,27 @@
 // Startup Redis checks (plan 4.3). The decision table is tested without I/O; scenario 8 runs against the compose Redis
 // and toxiproxy (REDIS_URL / TOXIPROXY_URL from the process environment only, a missing one FAILS the test).
 
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "sink/redis_startup.hpp"
+
+#include <sw/redis++/redis++.h>
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <iostream>
 #include <random>
 #include <string>
 #include <vector>
 
-#include <sw/redis++/redis++.h>
-
 #include "sink/keys.hpp"
-#include "sink/redis_startup.hpp"
 #include "toxiproxy.hpp"
 
 using namespace evml::sink;
 using namespace std::chrono_literals;
 using Catch::Matchers::ContainsSubstring;
-using evml::testing::ToxiRedis;
 using evml::testing::require_env;
+using evml::testing::ToxiRedis;
 
 namespace {
 
@@ -107,7 +107,8 @@ TEST_CASE("startup: appendonly=no warns (a restart would lose the data)", "[unit
     CHECK(r.appendonly == "no");
 }
 
-TEST_CASE("startup: a non-noeviction policy that is not required is flagged misconfigured; a clean Redis is not", "[unit][sink]") {
+TEST_CASE("startup: a non-noeviction policy that is not required is flagged misconfigured; a clean Redis is not",
+          "[unit][sink]") {
     const auto lax = evaluate_startup(facts("8.4.7", "allkeys-lru"), false);
     CHECK(lax.misconfigured);
     CHECK(lax.maxmemory_policy == "allkeys-lru");
@@ -188,7 +189,8 @@ TEST_CASE("startup: a rejected AUTH is fatal, not retried (scenario 8)", "[integ
     CHECK_THROWS_WITH(await_redis_ready(url, StartupOptions{}), ContainsSubstring("AUTH rejected"));
 }
 
-TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenario 8)", "[integration][sink]") {
+TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenario 8)",
+          "[integration][sink][redis_startup]") {
     const std::string url = require_env("REDIS_URL");
     sw::redis::Redis admin(url);
     ToxiRedis px;
@@ -217,10 +219,10 @@ TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenari
     o.io_timeout = 500ms;
     int waits = 0;
     std::string family;
-    o.on_waiting = [&](const std::string& error, const std::string& fam, std::chrono::milliseconds waited) {
+    o.on_waiting = [&](std::string_view error, std::string_view fam, std::chrono::milliseconds waited) {
         REQUIRE_FALSE(error.empty());
         REQUIRE(waited >= 0ms);
-        family = fam;
+        family = std::string(fam);
         if (++waits == 3) px.enable();  // Redis comes back after three failed attempts
     };
     const auto r = await_redis_ready(px.url(), o);
@@ -229,7 +231,7 @@ TEST_CASE("startup: an unreachable Redis is waited for, never exited on (scenari
     CHECK((family == "ipv4" || family == "ipv6"));  // the log names what the hostname resolved to
 }
 
-TEST_CASE("startup: waiting ends when stop is requested", "[integration][sink]") {
+TEST_CASE("startup: waiting ends when stop is requested", "[integration][sink][redis_startup]") {
     ToxiRedis px;
     px.disable();
     StartupOptions o;
@@ -237,7 +239,7 @@ TEST_CASE("startup: waiting ends when stop is requested", "[integration][sink]")
     o.probe_max = 20ms;
     o.io_timeout = 500ms;
     int waits = 0;
-    o.on_waiting = [&](const std::string&, const std::string&, std::chrono::milliseconds) { ++waits; };
+    o.on_waiting = [&](std::string_view, std::string_view, std::chrono::milliseconds) { ++waits; };
     o.stop = [&] { return waits >= 2; };
     CHECK_FALSE(await_redis_ready(px.url(), o).has_value());
 }

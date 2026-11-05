@@ -1,15 +1,15 @@
 // Pure judgement of the consumer-group lag probe (plan 4.10): no Redis involved. The fixture numbers are synthetic
 // stream ids chosen so the expected ages are easy to check by hand.
 
+#include "sink/consumer_lag.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include "sink/consumer_lag.hpp"
-
 using namespace evml::sink;
+using Catch::Matchers::ContainsSubstring;
 using evml::core::ConsumerGroupCfg;
 using evml::core::StreamKind;
-using Catch::Matchers::ContainsSubstring;
 
 namespace {
 
@@ -102,7 +102,8 @@ TEST_CASE("consumer lag: an unparsable stream id fails loudly", "[unit][sink]") 
     CHECK_THROWS_WITH(evaluate_consumer_lag(kCfg, f), ContainsSubstring("garbage"));
 }
 
-TEST_CASE("consumer lag: trimmed_unread from the counters when nothing is pending and max-deleted-entry-id is 0-0", "[unit][sink]") {
+TEST_CASE("consumer lag: trimmed_unread from the counters when nothing is pending and max-deleted-entry-id is 0-0",
+          "[unit][sink]") {
     auto f = healthy();
     f.entries_added = 5;
     f.entries_read = 2;

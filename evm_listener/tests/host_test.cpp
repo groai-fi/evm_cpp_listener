@@ -1,12 +1,15 @@
 // Host tests (plan 60 §5.H, slice 5-D1). The in-process tests run the real host (watchdog, ops server, sink, pool,
 // sweeper, driver) against the compose Redis (REDIS_URL, process environment only) and an in-process mock JSON-RPC
 // server. Each test uses its own random shard id and removes its keys afterwards.
-#include <catch2/catch_test_macros.hpp>
+#include "app/host.hpp"
+
+#include <sw/redis++/redis++.h>
 
 #include <algorithm>
 #include <atomic>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <cstdio>
@@ -24,9 +27,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <sw/redis++/redis++.h>
-
-#include "app/host.hpp"
 #include "app/tools.hpp"
 #include "base_config.hpp"
 #include "core/config.hpp"
@@ -183,8 +183,9 @@ struct NodeState {
     bool fail{false};  // every request answers HTTP 500
     int getlogs_calls{0};
     std::map<std::uint64_t, std::string> blocks{};  // eth_getBlockByNumber(<hex number>): block JSON; absent -> null
-    std::vector<std::uint64_t> block_requests{};     // every numeric eth_getBlockByNumber, in order
-    std::vector<std::pair<std::uint64_t, std::string>> logs{};  // eth_getLogs: (block number, log JSON), served by range
+    std::vector<std::uint64_t> block_requests{};    // every numeric eth_getBlockByNumber, in order
+    std::vector<std::pair<std::uint64_t, std::string>>
+        logs{};  // eth_getLogs: (block number, log JSON), served by range
 };
 
 evml::test::MockHttpServer::Handler tunable_node(NodeState& s) {
@@ -230,7 +231,7 @@ struct RunningHost {
     std::atomic<int> demoted_events{0};
     std::atomic<std::uint64_t> ws_missed{0};  // latest on_cross_check totals
     std::atomic<std::uint64_t> ws_extra{0};
-    std::atomic<int> cross_checks{0};         // on_cross_check calls (one per swept page)
+    std::atomic<int> cross_checks{0};  // on_cross_check calls (one per swept page)
     std::atomic<std::uint16_t> ops_port{0};
     std::atomic<bool> threw{false};
     std::string what;
@@ -397,8 +398,12 @@ struct HeadRig {
     bool until(Pred p, std::chrono::milliseconds limit) {
         return evml::test::run_until(mock_ioc, p, limit);
     }
-    void wait(std::chrono::milliseconds d) { until([] { return false; }, d); }
-    bool live() { return until([this] { return host.live() || host.threw.load(); }, 30s) && !host.threw.load(); }
+    void wait(std::chrono::milliseconds d) {
+        until([] { return false; }, d);
+    }
+    bool live() {
+        return until([this] { return host.live() || host.threw.load(); }, 30s) && !host.threw.load();
+    }
     // Waits until the host stops calling eth_getLogs (all sweeps and re-verifications are done).
     int quiet() {
         int calls = ns.getlogs_calls;
@@ -413,7 +418,8 @@ struct HeadRig {
     // Queues heads lo..hi on `branch` (each one's parent is the previous block of the same branch) and waits until the
     // host has read them.
     void feed_chain(char branch, std::uint64_t lo, std::uint64_t hi) {
-        for (auto n = lo; n <= hi; ++n) feed.out.push_back(head_msg(n, hx(branch, n), hx(branch, n - 1)));
+        for (auto n = lo; n <= hi; ++n)
+            feed.out.push_back(head_msg(n, hx(branch, n), hx(branch, n - 1)));
         REQUIRE(until([this] { return feed.out.empty(); }, 10s));
         wait(500ms);
     }
@@ -454,7 +460,8 @@ TEST_CASE("host: cold start reaches Live, writes the initial checkpoint, and a s
     });
 
     const bool live = evml::test::run_until(
-        mock_ioc, [&] { return state.load() == static_cast<int>(evml::pipeline::PipelineState::Live) || threw.load(); }, 30s);
+        mock_ioc, [&] { return state.load() == static_cast<int>(evml::pipeline::PipelineState::Live) || threw.load(); },
+        30s);
     stop = true;
     host.join();
     INFO("host threw: " << what);
@@ -491,11 +498,13 @@ TEST_CASE("host: a standby takes over within the lease ttl when the leader stops
                                             provider_env(node.url(), "hostB")));
 
     a.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
     REQUIRE_FALSE(a.threw.load());
 
     b.start();
-    evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 1500ms);  // must time out
+    evml::test::run_until(
+        mock_ioc, [&] { return b.live() || b.threw.load(); }, 1500ms);  // must time out
     CHECK_FALSE(b.live());
     CHECK(b.leader_events.load() == 0);
 
@@ -510,7 +519,8 @@ TEST_CASE("host: a standby takes over within the lease ttl when the leader stops
 
     a.finish();
     CHECK(a.exit_code.load() == 0);
-    const bool took_over = evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 15s);
+    const bool took_over = evml::test::run_until(
+        mock_ioc, [&] { return b.live() || b.threw.load(); }, 15s);
     INFO("host B threw: " << b.what);
     REQUIRE_FALSE(b.threw.load());
     REQUIRE(took_over);
@@ -539,7 +549,8 @@ TEST_CASE("host: losing the lease demotes the host to standby and it leads again
     RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true), "fence.toml",
                                             provider_env(node.url(), "hostA")));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // Steal the lease: delete the leader key and acquire it as another host.
@@ -573,7 +584,8 @@ TEST_CASE("host: losing the lease demotes the host to standby and it leads again
 
 // ---- 5-D3: the gate bridge (on_tag -> FinalityGate -> driver) as seen from the host ----
 
-TEST_CASE("host: a finalized hash conflict on the current provider freezes release and stops the sweeps", "[integration]") {
+TEST_CASE("host: a finalized hash conflict on the current provider freezes release and stops the sweeps",
+          "[integration]") {
     evml::core::log::init("info");
     const std::string shard = "t_host_" + random_tag();
     const fs::path spill = fs::temp_directory_path() / ("evml-host-frozen-" + random_tag());
@@ -583,25 +595,29 @@ TEST_CASE("host: a finalized hash conflict on the current provider freezes relea
     net::io_context mock_ioc;
     NodeState ns{.safe = c0 + 300, .finalized = c0 + 250};
     evml::test::MockHttpServer node(mock_ioc, tunable_node(ns));
-    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "frozen.toml",
-                                            provider_env(node.url())));
+    RunningHost h(
+        evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "frozen.toml", provider_env(node.url())));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
     // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
     // `current_getlogs()` and records `finalized = c0 + 250` before we test load-balanced jitter and hash conflict.
-    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 1000ms);
     CHECK_FALSE(h.status().frozen);
 
     // Load-balanced stale lower finalized height is ignored and does not freeze the host.
     ns.finalized = c0 + 100;
-    evml::test::run_until(mock_ioc, [] { return false; }, 300ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 300ms);
     CHECK_FALSE(h.status().frozen);
 
     // Same finalized height with a different canonical hash is a fatal anomaly that freezes release.
     ns.finalized = c0 + 250;
     ns.finalized_hash_char = 'c';
-    const bool frozen = evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s);
+    const bool frozen = evml::test::run_until(
+        mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s);
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(frozen);
     const auto st = h.status();
@@ -612,7 +628,8 @@ TEST_CASE("host: a finalized hash conflict on the current provider freezes relea
     // Frozen means no more sweeps: even a rising safe gate does not start a getLogs call.
     ns.safe = c0 + 320;
     const int calls = ns.getlogs_calls;
-    evml::test::run_until(mock_ioc, [] { return false; }, 1500ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 1500ms);
     CHECK(ns.getlogs_calls == calls);
     CHECK(h.status().c_s == c0 + 300);
 
@@ -629,7 +646,8 @@ struct ScopedEnv {
         names.push_back(k);
     }
     ~ScopedEnv() {
-        for (const auto& k : names) ::unsetenv(k.c_str());
+        for (const auto& k : names)
+            ::unsetenv(k.c_str());
     }
     ScopedEnv(const ScopedEnv&) = delete;
     ScopedEnv& operator=(const ScopedEnv&) = delete;
@@ -668,19 +686,23 @@ TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release po
     RunningHost h(std::move(cfg));
     h.start();
 
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !pings.empty(); }, 10s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return !pings.empty(); }, 10s));
     CHECK(pings.front().method == "GET");
     CHECK(pings.front().target == "/ping/secret-uuid");
     CHECK(posts.empty());  // before the first 10 s evaluation, nothing has been posted yet
 
     // Let the dead WS providers (quicknode/infura/alchemy -> 127.0.0.1:9) finish failing over so `ankr` settles as
     // `current_getlogs()` and records `finalized = c0 + 250` before we trigger a finalized hash conflict.
-    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 1000ms);
 
     ns.finalized_hash_char = 'c';  // a finalized hash conflict at the same height: release frozen
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.status().frozen || h.threw.load(); }, 15s));
     REQUIRE_FALSE(h.threw.load());
 
     const auto find_gate_regressed = [&]() -> const evml::test::MockRequest* {
@@ -692,7 +714,8 @@ TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release po
         }
         return nullptr;
     };
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return find_gate_regressed() != nullptr || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return find_gate_regressed() != nullptr || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
     const auto* gate_req = find_gate_regressed();
     REQUIRE(gate_req != nullptr);
@@ -702,7 +725,8 @@ TEST_CASE("host: a healthy leader pings the dead-man URL and a frozen release po
     CHECK(body.at("shard").as_string() == shard);
     CHECK(body.at("host").as_string() == "test-host");
     bool has_key = false;
-    for (const auto& [k, v] : gate_req->headers) has_key |= (k == "X-API-Key" && v == "host-test-token");
+    for (const auto& [k, v] : gate_req->headers)
+        has_key |= (k == "X-API-Key" && v == "host-test-token");
     CHECK(has_key);
 
     h.finish();
@@ -723,18 +747,21 @@ TEST_CASE("host: a safe regression on the current provider makes the driver re-v
     RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000), "safereorg.toml",
                                             provider_env(node.url())));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // Quiet baseline: Live with C_f < C_s and nothing left to sweep, so no getLogs calls happen on their own.
-    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 700ms);
     const int before = ns.getlogs_calls;
-    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 700ms);
     REQUIRE(ns.getlogs_calls == before);
 
     ns.safe = c0 + 290;  // the same provider's safe tag goes backwards: possible L1 reorg
-    const bool reverified =
-        evml::test::run_until(mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 15s);
+    const bool reverified = evml::test::run_until(
+        mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 15s);
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(reverified);  // reverify_released fetched (C_f, C_s] again
 
@@ -767,7 +794,8 @@ TEST_CASE("host: failing over to a provider with lower tags neither freezes nor 
     RunningHost h(evml::core::Config::parse(host_toml(shard, spill, node_b.url(), 30000), "failover.toml",
                                             provider_env(node_a.url())));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
     CHECK(h.status().g_s == c0 + 300);
 
@@ -779,7 +807,8 @@ TEST_CASE("host: failing over to a provider with lower tags neither freezes nor 
     REQUIRE(moved);
 
     // Give the gate bridge a few more polls: a lower tag from a NEW provider must not look like a regression.
-    evml::test::run_until(mock_ioc, [] { return false; }, 1000ms);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 1000ms);
     const auto st = h.status();
     CHECK_FALSE(st.frozen);
     CHECK_FALSE(st.reverify_pending);
@@ -809,14 +838,14 @@ TEST_CASE("host: a head fork below C_s is walked back to the ring and makes the 
         r.ns.blocks[n] = head_json(n, hx('b', n), n == r.c0 + 299 ? hx('a', r.c0 + 298) : hx('b', n - 1));
     }
     r.feed.out.push_back(head_msg(r.c0 + 310, hx('b', r.c0 + 310), hx('b', r.c0 + 309)));
-    const bool reverified =
-        r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 30s);
+    const bool reverified = r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 30s);
     REQUIRE_FALSE(r.host.threw.load());
     REQUIRE(reverified);  // the fork point c0 + 298 is below C_s: eth_getLogs over (C_f, C_s] again
 
     // The walk asked for exactly the missing ancestors, newest first, and stopped at the ring.
     std::vector<std::uint64_t> expect;
-    for (auto n = r.c0 + 309; n >= r.c0 + 299; --n) expect.push_back(n);
+    for (auto n = r.c0 + 309; n >= r.c0 + 299; --n)
+        expect.push_back(n);
     CHECK(r.ns.block_requests == expect);
 
     REQUIRE(r.until([&] { return !r.host.status().reverify_pending && r.host.live(); }, 15s));
@@ -862,8 +891,7 @@ TEST_CASE("host: a head gap too long to walk resyncs the ring and makes the driv
     const int before = r.quiet();  // the sweeps caught up with the new gates
 
     r.feed.out.push_back(head_msg(r.c0 + 327, hx('a', r.c0 + 327), hx('a', r.c0 + 326)));  // 17 > the walk limit of 16
-    const bool reverified =
-        r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 15s);
+    const bool reverified = r.until([&] { return r.ns.getlogs_calls > before || r.host.threw.load(); }, 15s);
     REQUIRE_FALSE(r.host.threw.load());
     REQUIRE(reverified);
     CHECK(r.ns.block_requests.empty());  // no walk was started: a 17-block walk would hold the provider's bucket
@@ -904,8 +932,9 @@ TEST_CASE("host: the leader publishes the plan 4.7 heartbeat payload under hb:<h
     CHECK_FALSE(hb.at("active_provider").as_string().empty());
     CHECK_FALSE(hb.at("version").as_string().empty());
     CHECK(hb.at("epoch_n").is_null());  // lease disabled: there is no epoch
-    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     CHECK(static_cast<std::int64_t>(now_ms) - hb.at("ts").to_number<std::int64_t>() < 10000);
     const auto ttl = admin.ttl(key);
     CHECK(ttl > 0);
@@ -922,7 +951,8 @@ struct CrossCheckTotals {
 };
 
 // Live host at c0 + 300; then one log at block c0 + 320 is (optionally) delivered over WS and (optionally) served by
-// eth_getLogs, and the gates move past it so the safe and the final sweep both cover it. Returns the cross-check totals.
+// eth_getLogs, and the gates move past it so the safe and the final sweep both cover it. Returns the cross-check
+// totals.
 CrossCheckTotals run_cross_check(bool via_ws, bool via_sweep) {
     evml::core::log::init("info");
     HeadRig r;
@@ -1023,7 +1053,8 @@ TEST_CASE("host: a frozen io thread makes the watchdog abort the process (SIGABR
 
     // The child resolves provider env vars itself: pass them next to the inherited environment (REDIS_URL).
     std::vector<std::string> env_strings;
-    for (char** e = environ; *e; ++e) env_strings.emplace_back(*e);
+    for (char** e = environ; *e; ++e)
+        env_strings.emplace_back(*e);
     for (const char* k : {"BASE_RPC_URL", "BASE_RPC_URL_ALCHEMY", "BASE_RPC_URL_ANKR", "BASE_RPC_URL_QUICKNODE"}) {
         env_strings.push_back(std::string(k) + "=" + dead);
     }
@@ -1032,14 +1063,19 @@ TEST_CASE("host: a frozen io thread makes the watchdog abort the process (SIGABR
     }
     env_strings.push_back("EVML_HOST_ID=test-host");
     std::vector<char*> envp;
-    for (auto& s : env_strings) envp.push_back(s.data());
+    for (auto& s : env_strings)
+        envp.push_back(s.data());
     envp.push_back(nullptr);
 
     const std::string exe = EVML_LISTENER_EXE;
     const std::string cfg_arg = cfg_path.string();
     const std::string log_path = (dir / "child.log").string();
-    std::vector<char*> argv{const_cast<char*>(exe.c_str()), const_cast<char*>("--config"), const_cast<char*>(cfg_arg.c_str()),
-                            const_cast<char*>("--test-freeze-io-after"), const_cast<char*>("1"), nullptr};
+    std::vector<char*> argv{const_cast<char*>(exe.c_str()),
+                            const_cast<char*>("--config"),
+                            const_cast<char*>(cfg_arg.c_str()),
+                            const_cast<char*>("--test-freeze-io-after"),
+                            const_cast<char*>("1"),
+                            nullptr};
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
@@ -1069,12 +1105,13 @@ TEST_CASE("host: a frozen io thread makes the watchdog abort the process (SIGABR
     INFO("child log:\n" << child_log);
     REQUIRE(exited);
     REQUIRE(WIFSIGNALED(status));
-    CHECK(WTERMSIG(status) == SIGABRT);  // a shell reports this as exit code 134
+    CHECK(WTERMSIG(status) == SIGABRT);                     // a shell reports this as exit code 134
     CHECK(child_log.find("io_tick") != std::string::npos);  // the abort line names the stale heartbeat
 }
 #endif
 
-TEST_CASE("host: taking the lease over from another host fires Leader Changed once and the heartbeat carries epoch_n", "[integration]") {
+TEST_CASE("host: taking the lease over from another host fires Leader Changed once and the heartbeat carries epoch_n",
+          "[integration]") {
     evml::core::log::init("info");
     const std::string redis_url = require_env("REDIS_URL");
     const std::string shard = "t_host_" + random_tag();
@@ -1103,9 +1140,11 @@ TEST_CASE("host: taking the lease over from another host fires Leader Changed on
     RunningHost h(std::move(cfg));
     h.start();
 
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !posts.empty() || h.threw.load(); }, 30s));  // first evaluation
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return !posts.empty() || h.threw.load(); }, 30s));  // first evaluation
     REQUIRE_FALSE(h.threw.load());
 
     const auto body = boost::json::parse(posts.front().body).as_object();
@@ -1128,7 +1167,8 @@ TEST_CASE("host: taking the lease over from another host fires Leader Changed on
     CHECK(hb.at("epoch_n").to_number<std::uint64_t>() == 6);
 
     // Once per occurrence: nothing more is posted for it.
-    evml::test::run_until(mock_ioc, [] { return false; }, 12s);
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 12s);
     int leader_changed = 0;
     for (const auto& p : posts) {
         if (boost::json::parse(p.body).as_object().at("title").as_string() == "Leader Changed") ++leader_changed;
@@ -1152,8 +1192,9 @@ evml::core::EnvLookup infura_ws_env(const std::string& http_url, const std::stri
 
 // Slow (about 70 s): the pool allows a voluntary switch only 60 s after the last one (Policy::min_voluntary_gap, not
 // configurable), and a Down provider is re-probed every 30 s (Policy::probe_interval).
-TEST_CASE("host: failing over and then switching back to the primary raises Provider Failover for both, told apart by reason",
-          "[integration]") {
+TEST_CASE(
+    "host: failing over and then switching back to the primary raises Provider Failover for both, told apart by reason",
+    "[integration]") {
     evml::core::log::init("info");
     const std::string shard = "t_host_" + random_tag();
     const fs::path spill = fs::temp_directory_path() / ("evml-host-switchback-" + random_tag());
@@ -1172,9 +1213,10 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
 
     // quicknode's WS is dead: three session failures take it Down, the pool fails over to infura (mock WS). Its HTTP
     // answers the probe, so it comes back Up, and after prefer_primary_after the pool switches back to it. Heads keep
-    // flowing from infura (a base chain first, then one per second): a silent WS would be failed as stalled and the pool
-    // would cascade through every provider instead of settling on infura.
-    for (auto n = c0 + 297; n <= c0 + 310; ++n) feed.out.push_back(head_msg(n, hx('a', n), hx('a', n - 1)));
+    // flowing from infura (a base chain first, then one per second): a silent WS would be failed as stalled and the
+    // pool would cascade through every provider instead of settling on infura.
+    for (auto n = c0 + 297; n <= c0 + 310; ++n)
+        feed.out.push_back(head_msg(n, hx('a', n), hx('a', n - 1)));
     auto toml = host_toml(shard, spill, node.url(), 30000);
     replace_once(toml, "prefer_primary_after_s = 600", "prefer_primary_after_s = 1");
     auto cfg = evml::core::Config::parse(toml, "switchback.toml", infura_ws_env(node.url(), ws.url()));
@@ -1183,7 +1225,8 @@ TEST_CASE("host: failing over and then switching back to the primary raises Prov
     env.set(cfg.ops.alert_webhook_token_env, "host-test-token");
     RunningHost h(std::move(cfg));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     const auto find_reason = [&](const std::string& reason) -> std::optional<boost::json::object> {
@@ -1262,8 +1305,10 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
 
     RunningHost h(std::move(cfg));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return (h.live() && feed.out.empty()) || h.threw.load(); }, 30s));
-    evml::test::run_until(mock_ioc, [] { return false; }, 100ms);
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return (h.live() && feed.out.empty()) || h.threw.load(); }, 30s));
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 100ms);
     REQUIRE_FALSE(h.threw.load());
 
     const auto m = ops_get(h.ops_port.load(), "/metrics");
@@ -1332,8 +1377,9 @@ TEST_CASE("host: /metrics exposes every §5.4 and sink/sweeper metric and update
     CHECK(h.exit_code.load() == 0);
 }
 
-TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled, and 503 when saturated or gate is stuck",
-          "[integration][host]") {
+TEST_CASE(
+    "host: /readyz returns 200 for leader-live, standby and lease-disabled, and 503 when saturated or gate is stuck",
+    "[integration][host]") {
     evml::core::log::init("info");
     const std::uint64_t c0 = first_start_block(evml::test::load_base_config());
 
@@ -1354,7 +1400,8 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
 
         RunningHost h(std::move(cfg));
         h.start();
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
         REQUIRE_FALSE(h.threw.load());
 
         const auto hz = ops_get(h.ops_port.load(), "/healthz");
@@ -1377,12 +1424,14 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
 
         // Let 3.2 s pass without G_s advancing -> D6 gate age expires -> 503.
         const auto until = std::chrono::steady_clock::now() + 3200ms;
-        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= until; }, 4s);
+        evml::test::run_until(
+            mock_ioc, [&] { return std::chrono::steady_clock::now() >= until; }, 4s);
         CHECK(ops_get(h.ops_port.load(), "/readyz").status == 503);
 
         // Advance G_s -> gate age resets -> 200 again.
         ns.safe = c0 + 305;
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return ops_get(h.ops_port.load(), "/readyz").status == 200; }, 5s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return ops_get(h.ops_port.load(), "/readyz").status == 200; }, 5s));
 
         h.finish();
         CHECK(h.exit_code.load() == 0);
@@ -1401,8 +1450,8 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
 
         net::io_context mock_ioc;
         evml::test::MockHttpServer node(mock_ioc, healthy_node(c0 + 300, c0 + 250));
-        auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true, 30000, 500), "ready_standby.toml",
-                                             provider_env(node.url(), "standby-host"));
+        auto cfg = evml::core::Config::parse(host_toml(shard, spill, node.url(), 30000, true, 30000, 500),
+                                             "ready_standby.toml", provider_env(node.url(), "standby-host"));
         RunningHost h(std::move(cfg));
         h.start();
         REQUIRE(evml::test::run_until(
@@ -1449,7 +1498,8 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
 
         RunningHost h(std::move(cfg));
         h.start();
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
         REQUIRE_FALSE(h.threw.load());
         CHECK(ops_get(h.ops_port.load(), "/readyz").status == 200);
 
@@ -1459,7 +1509,8 @@ TEST_CASE("host: /readyz returns 200 for leader-live, standby and lease-disabled
         for (std::uint64_t i = 1; i <= 5; ++i) {
             ns.safe = c0 + 300 + i * 10;
             const auto step_end = std::chrono::steady_clock::now() + 300ms;
-            evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= step_end; }, 1s);
+            evml::test::run_until(
+                mock_ioc, [&] { return std::chrono::steady_clock::now() >= step_end; }, 1s);
         }
         REQUIRE(evml::test::run_until(
             mock_ioc,
@@ -1502,8 +1553,10 @@ TEST_CASE("tools: --check-redis prints address_family and startup check results,
     CHECK(evml::app::check_redis(bad_cfg) == evml::app::kExitFailure);
 }
 
-TEST_CASE("tools: --backfill-contract emits finalized below C_f and safe/released in C_f..C_s, updates manifest, is idempotent, and enforces D8 lease fencing",
-          "[integration][tools]") {
+TEST_CASE(
+    "tools: --backfill-contract emits finalized below C_f and safe/released in C_f..C_s, updates manifest, is "
+    "idempotent, and enforces D8 lease fencing",
+    "[integration][tools]") {
     evml::core::log::init("info");
     const std::string shard = "host_backfill_" + random_tag();
     const fs::path spill = fs::temp_directory_path() / ("evml-host-backfill-" + random_tag());
@@ -1522,7 +1575,8 @@ TEST_CASE("tools: --backfill-contract emits finalized below C_f and safe/release
         auto cfg1 = evml::core::Config::parse(base_toml, "bf_init.toml", provider_env(node.url(), "hostA"));
         RunningHost h(std::move(cfg1));
         h.start();
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
         REQUIRE_FALSE(h.threw.load());
         h.finish();
         CHECK(h.exit_code.load() == 0);
@@ -1533,10 +1587,12 @@ TEST_CASE("tools: --backfill-contract emits finalized below C_f and safe/release
     std::string expanded_toml = base_toml + R"toml(
 [[contracts]]
 name        = "backfill_pool"
-address     = ")toml" + extra_addr + R"toml("
+address     = ")toml" + extra_addr +
+                                R"toml("
 finality    = "safe"
 stream      = "events"
-start_block = )toml" + std::to_string(c0 + 100) + R"toml(
+start_block = )toml" + std::to_string(c0 + 100) +
+                                R"toml(
 events = [
   "Swap(address,address,int256,int256,uint160,uint128,int24)",
 ]
@@ -1552,7 +1608,8 @@ events = [
     {
         RunningHost h(cfg2);
         h.start();
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.exit_code.load() != -1 || h.threw.load(); }, 15s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return h.exit_code.load() != -1 || h.threw.load(); }, 15s));
         h.finish();
         CHECK(h.exit_code.load() == evml::app::kExitUsage);
     }
@@ -1577,7 +1634,8 @@ events = [
     {
         std::atomic<int> bf_rc{-1};
         std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 600ms); });
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 5s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return bf_rc.load() != -1; }, 5s));
         t.join();
         CHECK(bf_rc.load() == evml::app::kExitFailure);
         CHECK(admin.xlen(keys.stream(evml::core::StreamKind::Events)) == 0);
@@ -1589,7 +1647,8 @@ events = [
     {
         std::atomic<int> bf_rc{-1};
         std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 10s); });
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
         t.join();
         REQUIRE(bf_rc.load() == evml::app::kExitOk);
     }
@@ -1617,7 +1676,8 @@ events = [
     {
         std::atomic<int> bf_rc{-1};
         std::thread t([&] { bf_rc = evml::app::backfill_contract(cfg2, "backfill_pool", 10s); });
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return bf_rc.load() != -1; }, 30s));
         t.join();
         REQUIRE(bf_rc.load() == evml::app::kExitOk);
     }
@@ -1627,7 +1687,8 @@ events = [
     {
         RunningHost h(cfg2);
         h.start();
-        REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
         REQUIRE_FALSE(h.threw.load());
         h.finish();
         CHECK(h.exit_code.load() == 0);
@@ -1636,8 +1697,10 @@ events = [
 
 // ---- 5-I: Chaos (toxiproxy on provider and Redis links) & Lease-Takeover Stream Integrity ----
 
-TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) on provider and Redis links recovers with an exact stream",
-          "[integration][chaos]") {
+TEST_CASE(
+    "host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) on provider and Redis links recovers with an "
+    "exact stream",
+    "[integration][chaos]") {
     evml::core::log::init("info");
     const std::string shard = "host_chaos_" + random_tag();
     const fs::path spill = fs::temp_directory_path() / ("evml-host-chaos-" + random_tag());
@@ -1676,12 +1739,14 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
 
     RunningHost h(std::move(cfg));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     const auto wait_for = [&](std::chrono::milliseconds d) {
         const auto end = std::chrono::steady_clock::now() + d;
-        evml::test::run_until(mock_ioc, [&] { return std::chrono::steady_clock::now() >= end; }, d + 1s);
+        evml::test::run_until(
+            mock_ioc, [&] { return std::chrono::steady_clock::now() >= end; }, d + 1s);
     };
 
     // 1. latency = 5000 ms (exceeds 800 ms HTTP RPC timeout) on both provider and Redis links.
@@ -1692,7 +1757,8 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
     wait_for(1200ms);
     px_http.remove_toxic("lat");
     px_redis.remove_toxic("lat");
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 315 || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.status().c_s >= c0 + 315 || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // 2. reset_peer (TCP RST) on both provider and Redis links.
@@ -1703,7 +1769,8 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
     wait_for(600ms);
     px_http.remove_toxic("rst");
     px_redis.remove_toxic("rst");
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 325 || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.status().c_s >= c0 + 325 || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // 3. timeout (blackhole / hang) on both provider and Redis links.
@@ -1714,7 +1781,8 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
     wait_for(1200ms);
     px_http.remove_toxic("tmo");
     px_redis.remove_toxic("tmo");
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.status().c_s >= c0 + 335 || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.status().c_s >= c0 + 335 || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // 4. bandwidth = 0 KB/s on both provider and Redis links.
@@ -1736,8 +1804,8 @@ TEST_CASE("host: toxiproxy chaos (latency 5s, reset_peer, timeout, bandwidth 0) 
         [&] {
             std::unordered_map<std::string, std::string> ckpt;
             admin.hgetall(keys.ckpt(), std::inserter(ckpt, ckpt.begin()));
-            return ckpt.count("safe") && std::stoull(ckpt.at("safe")) >= c0 + 360 &&
-                   ckpt.count("finalized") && std::stoull(ckpt.at("finalized")) >= c0 + 355;
+            return ckpt.count("safe") && std::stoull(ckpt.at("safe")) >= c0 + 360 && ckpt.count("finalized") &&
+                   std::stoull(ckpt.at("finalized")) >= c0 + 355;
         },
         30s));
 
@@ -1810,11 +1878,13 @@ TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free s
     RunningHost b(std::move(cfg_b));
 
     a.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return a.live() || a.threw.load(); }, 30s));
     REQUIRE_FALSE(a.threw.load());
 
     b.start();
-    evml::test::run_until(mock_ioc, [&] { return b.live() || b.threw.load(); }, 1000ms);
+    evml::test::run_until(
+        mock_ioc, [&] { return b.live() || b.threw.load(); }, 1000ms);
     CHECK_FALSE(b.live());
 
     // Host A sweeps the first 2 logs (c0 + 310, c0 + 320).
@@ -1839,14 +1909,16 @@ TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free s
     ns.finalized = c0 + 345;
 
     REQUIRE(evml::test::run_until(
-        mock_ioc, [&] { return (b.live() && b.status().c_s >= c0 + 350 && b.status().c_f >= c0 + 345) || b.threw.load(); }, 30s));
+        mock_ioc,
+        [&] { return (b.live() && b.status().c_s >= c0 + 350 && b.status().c_f >= c0 + 345) || b.threw.load(); }, 30s));
     REQUIRE_FALSE(b.threw.load());
     CHECK(b.leader_events.load() == 1);
 
     // Reconnect Host A to Redis: its stale epoch token is fenced, its spilled/queued records are discarded, and it
     // demotes cleanly to standby without writing duplicates.
     px_a.enable();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return a.demoted_events.load() >= 1 || a.threw.load(); }, 15s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return a.demoted_events.load() >= 1 || a.threw.load(); }, 15s));
     REQUIRE_FALSE(a.threw.load());
 
     // Wait for Host B to evaluate and post the Leader Changed alert once.
@@ -1860,7 +1932,8 @@ TEST_CASE("host: lease takeover under load produces a gap-free, duplicate-free s
         }
         return std::nullopt;
     };
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return find_leader_changed().has_value() || b.threw.load(); }, 20s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return find_leader_changed().has_value() || b.threw.load(); }, 20s));
     const auto lc = find_leader_changed();
     REQUIRE(lc.has_value());
     CHECK(lc->at("details").as_object().at("old_host").as_string() == "hostA");
@@ -1928,17 +2001,21 @@ TEST_CASE("host: WS failover preserves the head ring so a forked head from the b
         if (k == "EVML_HOST_ID") return "test-host";
         return "";
     };
-    RunningHost h(evml::core::Config::parse(host_toml(shard, spill, http.url(), 30000), "ws_failover_fork.toml", env_lookup));
+    RunningHost h(
+        evml::core::Config::parse(host_toml(shard, spill, http.url(), 30000), "ws_failover_fork.toml", env_lookup));
     h.start();
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return h.live() || h.threw.load(); }, 30s));
     REQUIRE_FALSE(h.threw.load());
 
     // Seed the ring on quicknode (ws_primary) with canonical branch 'a' across c0 + 297 .. c0 + 305.
     for (auto n = c0 + 297; n <= c0 + 305; ++n) {
         primary_feed.out.push_back(head_msg(n, hx('a', n), hx('a', n - 1)));
     }
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return primary_feed.out.empty(); }, 10s));
-    evml::test::run_until(mock_ioc, [] { return false; }, 700ms);
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return primary_feed.out.empty(); }, 10s));
+    evml::test::run_until(
+        mock_ioc, [] { return false; }, 700ms);
     const int before = ns.getlogs_calls;
 
     // Prepare branch 'b' forking off 'a' at c0 + 298 (below C_s = c0 + 300) for blocks c0 + 299 .. c0 + 305,
@@ -1950,16 +2027,18 @@ TEST_CASE("host: WS failover preserves the head ring so a forked head from the b
 
     // Drop quicknode WS so the pool fails over to infura (ws_backup), which immediately delivers head c0 + 306 on 'b'.
     drop_primary = true;
-    const bool reverified =
-        evml::test::run_until(mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 30s);
+    const bool reverified = evml::test::run_until(
+        mock_ioc, [&] { return ns.getlogs_calls > before || h.threw.load(); }, 30s);
     REQUIRE_FALSE(h.threw.load());
     REQUIRE(reverified);
 
     std::vector<std::uint64_t> expect;
-    for (auto n = c0 + 305; n >= c0 + 299; --n) expect.push_back(n);
+    for (auto n = c0 + 305; n >= c0 + 299; --n)
+        expect.push_back(n);
     CHECK(ns.block_requests == expect);
 
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return !h.status().reverify_pending && h.live(); }, 15s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return !h.status().reverify_pending && h.live(); }, 15s));
     h.finish();
     CHECK(h.exit_code.load() == 0);
 }
@@ -2000,12 +2079,14 @@ TEST_CASE("host: a safe reorg rewinding C_s and re-sweeping previously reconcile
     CHECK(r.host.ws_extra.load() == 0);
 
     // Trigger a safe reorg at n_fork = c0 + 305 (replacing log_fork_a with log_fork_b) while log_kept at c0 + 310
-    // remains in getLogs. reverify_released() rewinds C_s to c0 + 304 and the next safe_step re-sweeps [c0 + 305, c0 + 319].
+    // remains in getLogs. reverify_released() rewinds C_s to c0 + 304 and the next safe_step re-sweeps [c0 + 305, c0 +
+    // 319].
     r.ns.blocks[n_fork] = head_json(n_fork, h_fork_b, hx('a', n_fork - 1));
     r.ns.logs.clear();
     r.ns.logs.emplace_back(n_fork, log_fork_b);
     r.ns.logs.emplace_back(n_kept, log_kept);
-    r.ns.safe = r.c0 + 319;  // safe regression triggers on_safe_reorg_signal -> reverify_released -> rewind_safe(c0 + 304)
+    r.ns.safe =
+        r.c0 + 319;  // safe regression triggers on_safe_reorg_signal -> reverify_released -> rewind_safe(c0 + 304)
 
     REQUIRE(r.until([&] { return r.host.status().safe_reorgs >= 1 && r.host.status().c_s >= r.c0 + 319; }, 30s));
     REQUIRE_FALSE(r.host.threw.load());
@@ -2017,8 +2098,10 @@ TEST_CASE("host: a safe reorg rewinding C_s and re-sweeping previously reconcile
     CHECK(r.host.exit_code.load() == 0);
 }
 
-TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with finality=latest while non-fast contracts and safe sweeps stay isolated",
-          "[integration][host]") {
+TEST_CASE(
+    "host: fast_stream WS logs emit immediately to evml:{shard}:fast with finality=latest while non-fast contracts and "
+    "safe sweeps stay isolated",
+    "[integration][host]") {
     using Catch::Matchers::ContainsSubstring;
     evml::core::log::init("info");
     HeadRig r;
@@ -2034,16 +2117,19 @@ TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with 
     const std::string h_tip = hx('a', n_tip);
     const std::string h_unseen = hx('a', n_unseen);
 
-    // 1. Seed head n_tip (timestamp = 1000 + n_tip) into ring, then push a Swap WS log on contract 0 (fast_stream = true).
+    // 1. Seed head n_tip (timestamp = 1000 + n_tip) into ring, then push a Swap WS log on contract 0 (fast_stream =
+    // true).
     r.feed.out.push_back(head_msg(n_tip, h_tip, hx('a', n_tip - 1)));
     const std::string log_tip = cfg_log_json(r.host.cfg, n_tip, h_tip, 0);
     r.feed.out.push_back(logs_msg(log_tip));
 
-    // 2. Push a Swap WS log at n_unseen (before its newHeads header arrives -> block_timestamp = "0", zero HTTP block calls).
+    // 2. Push a Swap WS log at n_unseen (before its newHeads header arrives -> block_timestamp = "0", zero HTTP block
+    // calls).
     const std::string log_unseen = cfg_log_json(r.host.cfg, n_unseen, h_unseen, 1);
     r.feed.out.push_back(logs_msg(log_unseen));
 
-    // 3. Push a WS log for contract 2 (aerodrome_cl_factory, fast_stream = false) and a removed=true WS log for contract 0.
+    // 3. Push a WS log for contract 2 (aerodrome_cl_factory, fast_stream = false) and a removed=true WS log for
+    // contract 0.
     const auto& c_factory = r.host.cfg.contracts.at(2);
     REQUIRE_FALSE(c_factory.fast_stream);
     const std::string log_factory = R"({"address":")" + c_factory.address.to_hex() + R"(","topics":[")" +
@@ -2106,7 +2192,8 @@ TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with 
     CHECK_THAT(m.body, ContainsSubstring("evml_fast_emitted_total 2"));
     CHECK_THAT(m.body, ContainsSubstring("evml_fast_dropped_total 0"));
 
-    // 5. Freeze the pipeline via a finalized hash conflict and verify subsequent WS logs do not emit to evml:{shard}:fast.
+    // 5. Freeze the pipeline via a finalized hash conflict and verify subsequent WS logs do not emit to
+    // evml:{shard}:fast.
     r.ns.finalized_hash_char = 'c';
     REQUIRE(r.until([&] { return r.host.status().frozen || r.host.threw.load(); }, 15s));
     REQUIRE_FALSE(r.host.threw.load());
@@ -2120,4 +2207,3 @@ TEST_CASE("host: fast_stream WS logs emit immediately to evml:{shard}:fast with 
     r.host.finish();
     CHECK(r.host.exit_code.load() == 0);
 }
-

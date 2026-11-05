@@ -1,11 +1,11 @@
+#include "sink/keys.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include "sink/keys.hpp"
-
+using Catch::Matchers::ContainsSubstring;
 using evml::core::StreamKind;
 using evml::sink::Keys;
-using Catch::Matchers::ContainsSubstring;
 
 TEST_CASE("keys: shard-scoped Redis keys share the {shard} hash tag including fast stream", "[unit][config][keys]") {
     const Keys k("base_eurc_usdc");
@@ -27,4 +27,3 @@ TEST_CASE("keys: shard-scoped Redis keys share the {shard} hash tag including fa
     CHECK_THROWS_WITH(Keys(""), ContainsSubstring("non-empty"));
     CHECK_THROWS_WITH(Keys("bad{shard}"), ContainsSubstring("no braces"));
 }
-

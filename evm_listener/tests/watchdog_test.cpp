@@ -1,16 +1,15 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "ops/watchdog.hpp"
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
-#include "ops/watchdog.hpp"
-
-using evml::ops::Watchdog;
 using Catch::Matchers::ContainsSubstring;
+using evml::ops::Watchdog;
 
 namespace {
 
@@ -20,10 +19,7 @@ struct Harness {
     std::string last_message;
     Watchdog wd;
 
-    explicit Harness(std::uint64_t stall_ms = 30'000)
-        : wd(make_options(stall_ms)) {
-        wd.arm();
-    }
+    explicit Harness(std::uint64_t stall_ms = 30'000) : wd(make_options(stall_ms)) { wd.arm(); }
 
     Watchdog::Options make_options(std::uint64_t stall_ms) {
         Watchdog::Options o;
@@ -196,7 +192,8 @@ TEST_CASE("watchdog: real thread aborts a process whose io thread never reports"
     Watchdog wd(o);
     wd.start();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!aborted && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while (!aborted && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     wd.stop();
     CHECK(aborted.load());
 }

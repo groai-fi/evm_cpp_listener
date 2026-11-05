@@ -1,8 +1,8 @@
-#include <catch2/catch_test_macros.hpp>
+#include "app/pool_log_source.hpp"
 
 #include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include "app/pool_log_source.hpp"
 #include "core/hex.hpp"
 #include "mock_http_server.hpp"
 #include "test_util.hpp"
@@ -19,8 +19,12 @@ constexpr const char* kTopic = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64
 constexpr const char* kDeadWs = "ws://127.0.0.1:9/";
 constexpr std::uint64_t kBlock = 1000;
 
-std::string hash_str(char c) { return "0x" + std::string(64, c); }
-core::Hash32 hash_of(char c) { return core::Hash32::from_hex(hash_str(c)); }
+std::string hash_str(char c) {
+    return "0x" + std::string(64, c);
+}
+core::Hash32 hash_of(char c) {
+    return core::Hash32::from_hex(hash_str(c));
+}
 
 core::LogFilter filter() {
     core::LogFilter f;
@@ -48,7 +52,7 @@ std::string block_json(std::uint64_t n, char hash_char, std::uint64_t ts) {
 struct Node {
     int logs_calls{0};
     int block_calls{0};
-    int status{200};                    // != 200 fails every request
+    int status{200};  // != 200 fails every request
     std::string logs_result{"[]"};
     char block_hash{'a'};
     std::optional<std::uint64_t> block_number_override;  // answers a different block than asked
@@ -61,9 +65,10 @@ MockHttpServer::Handler serve(Node& n) {
         const auto method = std::string(v.at("method").as_string());
         const auto id = static_cast<std::uint64_t>(v.at("id").as_int64());
         if (n.status != 200) {
-            const char* body = n.status == 413
-                                   ? R"({"jsonrpc":"2.0","id":1,"error":{"code":-32615,"message":"eth_getLogs is limited to a 5 range"}})"
-                                   : "boom";
+            const char* body =
+                n.status == 413
+                    ? R"({"jsonrpc":"2.0","id":1,"error":{"code":-32615,"message":"eth_getLogs is limited to a 5 range"}})"
+                    : "boom";
             return MockReply{.status = n.status, .body = body};
         }
         if (method == "eth_getLogs") {
@@ -74,7 +79,8 @@ MockHttpServer::Handler serve(Node& n) {
             ++n.block_calls;
             if (n.null_block) return MockReply{.body = rpc_ok(id, "null")};
             const auto asked = std::stoull(std::string(v.at("params").as_array().at(0).as_string()), nullptr, 16);
-            return MockReply{.body = rpc_ok(id, block_json(n.block_number_override.value_or(asked), n.block_hash, 1234))};
+            return MockReply{.body =
+                                 rpc_ok(id, block_json(n.block_number_override.value_or(asked), n.block_hash, 1234))};
         }
         return MockReply{.status = 500, .body = "unexpected method " + method};
     };
@@ -83,7 +89,8 @@ MockHttpServer::Handler serve(Node& n) {
 provider::PoolConfig cfg_for(std::vector<provider::ProviderEndpoint> eps) {
     provider::PoolConfig c;
     std::vector<std::string> order;
-    for (const auto& e : eps) order.push_back(e.name);
+    for (const auto& e : eps)
+        order.push_back(e.name);
     c.providers = std::move(eps);
     c.ws_order = {order.front()};
     c.getlogs_order = order;
@@ -109,11 +116,13 @@ struct Fixture {
     MockHttpServer s2{ioc, serve(n2)};
     MockHttpServer s3{ioc, serve(n3)};
     std::shared_ptr<provider::ProviderPool> pool = provider::ProviderPool::create(
-        ioc.get_executor(),
-        cfg_for({{"P1", kDeadWs, s1.url()}, {"P2", kDeadWs, s2.url()}, {"P3", kDeadWs, s3.url()}}), {});
+        ioc.get_executor(), cfg_for({{"P1", kDeadWs, s1.url()}, {"P2", kDeadWs, s2.url()}, {"P3", kDeadWs, s3.url()}}),
+        {});
 };
 
-pipeline::BlockRange range() { return {kBlock - 4, kBlock}; }
+pipeline::BlockRange range() {
+    return {kBlock - 4, kBlock};
+}
 
 }  // namespace
 
@@ -188,7 +197,8 @@ TEST_CASE("pool log source: report_bad steers the next get_logs away, once", "[i
 TEST_CASE("pool log source: three bad reports take a provider Down", "[integration][pool_log_source]") {
     Fixture f;
     app::PoolLogSource src(f.pool, nullptr);
-    for (int i = 0; i < 3; ++i) src.report_bad("P1", "bad page");
+    for (int i = 0; i < 3; ++i)
+        src.report_bad("P1", "bad page");
     CHECK(f.pool->state("P1") == provider::State::Down);
     CHECK(src.current_provider() == std::optional<std::string>("P2"));
 }
@@ -233,7 +243,8 @@ TEST_CASE("pool log source: block() answers from the ring without any RPC", "[in
     CHECK(f.n1.block_calls + f.n2.block_calls + f.n3.block_calls == 0);
 }
 
-TEST_CASE("pool log source: a ring entry without a timestamp is cross-checked by an RPC", "[integration][pool_log_source]") {
+TEST_CASE("pool log source: a ring entry without a timestamp is cross-checked by an RPC",
+          "[integration][pool_log_source]") {
     Fixture f;
     chain::ReorgDetector ring(16);
     ring.on_head(chain::BlockRef{kBlock, hash_of('a'), hash_of('b'), 0});
@@ -260,8 +271,8 @@ TEST_CASE("pool log source: block() hash disagreeing with the ring is reported a
 TEST_CASE("pool log source: block() skips providers without the block or with the wrong one",
           "[integration][pool_log_source]") {
     Fixture f;
-    f.n1.null_block = true;                      // does not have it yet: not reported
-    f.n2.block_number_override = kBlock + 1;     // answers another block: reported
+    f.n1.null_block = true;                   // does not have it yet: not reported
+    f.n2.block_number_override = kBlock + 1;  // answers another block: reported
     app::PoolLogSource src(f.pool, nullptr);
 
     const auto b = run_sync(f.ioc, src.block(kBlock));

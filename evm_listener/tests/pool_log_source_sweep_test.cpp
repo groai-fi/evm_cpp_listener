@@ -1,6 +1,5 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <map>
 
 #include "app/pool_log_source.hpp"
@@ -27,10 +26,11 @@ struct Counter {
 };
 
 // One log of `contract` in `block` (block hash `hash_char`).
-std::string log_json(const evml::core::ContractCfg& contract, std::uint64_t block, char hash_char, std::uint64_t index) {
-    return std::string(R"({"address":")") + contract.address.to_hex() + R"(","topics":[")" + contract.topics.at(0).to_hex() +
-           R"("],"data":"0x","blockNumber":")" + evml::core::to_hex_u64(block) + R"(","blockHash":"0x)" +
-           std::string(64, hash_char) + R"(","transactionHash":"0x)" + std::string(64, 'c') +
+std::string log_json(const evml::core::ContractCfg& contract, std::uint64_t block, char hash_char,
+                     std::uint64_t index) {
+    return std::string(R"({"address":")") + contract.address.to_hex() + R"(","topics":[")" +
+           contract.topics.at(0).to_hex() + R"("],"data":"0x","blockNumber":")" + evml::core::to_hex_u64(block) +
+           R"(","blockHash":"0x)" + std::string(64, hash_char) + R"(","transactionHash":"0x)" + std::string(64, 'c') +
            R"(","transactionIndex":"0x0","logIndex":")" + evml::core::to_hex_u64(index) + R"(","removed":false})";
 }
 
@@ -52,10 +52,10 @@ evml::test::MockHttpServer::Handler serve(Counter& n, const std::string& logs_re
         if (method == "eth_getBlockByNumber") {
             ++n.blocks;
             const auto asked = std::stoull(std::string(v.at("params").as_array().at(0).as_string()), nullptr, 16);
-            return evml::test::MockReply{
-                .body = rpc_ok(id, R"({"number":")" + evml::core::to_hex_u64(asked) + R"(","hash":"0x)" +
-                                       std::string(64, chain.at(asked)) + R"(","parentHash":"0x)" + std::string(64, 'b') +
-                                       R"(","timestamp":"0x64"})")};
+            return evml::test::MockReply{.body = rpc_ok(id, R"({"number":")" + evml::core::to_hex_u64(asked) +
+                                                                R"(","hash":"0x)" + std::string(64, chain.at(asked)) +
+                                                                R"(","parentHash":"0x)" + std::string(64, 'b') +
+                                                                R"(","timestamp":"0x64"})")};
         }
         return evml::test::MockReply{.status = 500, .body = "unexpected method " + method};
     };
@@ -96,17 +96,17 @@ TEST_CASE("pool log source under the sweeper: one block() RPC per distinct block
 
     evml::app::PoolLogSource source(pool, nullptr);
     evml::test::MemorySink sink;
-    evml::pipeline::Sweeper sweeper(cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, source, sink,
-                                    [] { return std::uint64_t{1000}; });
+    evml::pipeline::Sweeper sweeper(cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, source,
+                                    sink, [] { return std::uint64_t{1000}; });
     sweeper.set_cursors(100, 100);
 
     const auto res = evml::test::run_sync(ioc, sweeper.safe_step(110));
     REQUIRE(res.status == evml::pipeline::StepStatus::Advanced);
     CHECK(sink.emitted.size() == 3);
     CHECK(c1.logs == 1);
-    CHECK(c1.blocks == 0);                // the logs provider is never asked for block hashes
-    CHECK(c2.blocks + c3.blocks == 2);    // blocks 103 and 105: one call each, not one per log
-    CHECK(c3.blocks == 0);                // the first independent provider answered both
+    CHECK(c1.blocks == 0);              // the logs provider is never asked for block hashes
+    CHECK(c2.blocks + c3.blocks == 2);  // blocks 103 and 105: one call each, not one per log
+    CHECK(c3.blocks == 0);              // the first independent provider answered both
     CHECK(sweeper.c_s() == 110);
 }
 
@@ -145,12 +145,12 @@ TEST_CASE("pool log source under the sweeper: G2 hash mismatch on attempt 0 clea
 
         evml::app::PoolLogSource source(pool, nullptr);
         evml::test::MemorySink sink;
-        evml::pipeline::Sweeper sweeper(cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"}, source,
-                                        sink, [] { return std::uint64_t{1000}; });
+        evml::pipeline::Sweeper sweeper(cfg, evml::pipeline::EventContext{"base_eurc_usdc", "test-host", "test"},
+                                        source, sink, [] { return std::uint64_t{1000}; });
         sweeper.set_cursors(100, 100);
 
-        // Attempt 0: P1 returns log (hash 'a'), P2 returns block 105 with poisoned hash 'f' -> G2 report_bad clears cache.
-        // Attempt 1: steered to P2 for get_logs (hash 'a'), P1 answers block 105 with hash 'a' -> succeeds!
+        // Attempt 0: P1 returns log (hash 'a'), P2 returns block 105 with poisoned hash 'f' -> G2 report_bad clears
+        // cache. Attempt 1: steered to P2 for get_logs (hash 'a'), P1 answers block 105 with hash 'a' -> succeeds!
         const auto res = evml::test::run_sync(ioc, sweeper.safe_step(110));
         REQUIRE(res.status == evml::pipeline::StepStatus::Advanced);
         CHECK(sink.emitted.size() == 1);
@@ -177,7 +177,8 @@ TEST_CASE("pool log source: address-split sub-queries across multiple providers 
     net::io_context ioc;
     Counter c1, c2, c3;
     bool p1_fail_next = false;
-    // P1 answers the first single-address get_logs sub-query and then fails on the second so PoolLogSource fails over to P2.
+    // P1 answers the first single-address get_logs sub-query and then fails on the second so PoolLogSource fails over
+    // to P2.
     evml::test::MockHttpServer s1(ioc, [&](const evml::test::MockRequest& r) {
         const auto v = json::parse(r.body).as_object();
         const auto method = std::string(v.at("method").as_string());

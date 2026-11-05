@@ -1,5 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
+#include "pipeline/pending_buffer.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -7,7 +8,6 @@
 #include "app/ws_reconciler.hpp"
 #include "base_config.hpp"
 #include "core/log.hpp"
-#include "pipeline/pending_buffer.hpp"
 
 using namespace evml::pipeline;
 using evml::test::hash_of;
@@ -68,7 +68,8 @@ TEST_CASE("pending: reconcile counts misses and extras, then drops the compared 
     p.stage(mk(10, 1, 1), "A");  // WS only
     p.stage(mk(20, 2, 0), "A");  // outside the swept range: stays
 
-    const std::vector<evml::rpc::Log> sweep{mk(10, 1, 0), mk(10, 1, 2), mk(11, 3, 0)};  // (10,1,2) and (11,3,0): WS missed
+    const std::vector<evml::rpc::Log> sweep{mk(10, 1, 0), mk(10, 1, 2),
+                                            mk(11, 3, 0)};  // (10,1,2) and (11,3,0): WS missed
     const auto r = p.reconcile(10, 15, sweep, all);
     CHECK(r.ws_missed == 2);
     CHECK(r.ws_extra == 1);
@@ -78,7 +79,7 @@ TEST_CASE("pending: reconcile counts misses and extras, then drops the compared 
 
 TEST_CASE("pending: a WS log under another blockHash is extra and the sweep log is missed", "[unit][pending]") {
     PendingBuffer p(100);
-    p.stage(mk(10, 1, 0), "A");  // WS saw the orphaned block
+    p.stage(mk(10, 1, 0), "A");                               // WS saw the orphaned block
     const auto r = p.reconcile(10, 10, {mk(10, 2, 0)}, all);  // canonical block has another hash
     CHECK(r.ws_extra == 1);
     CHECK(r.ws_missed == 1);
@@ -127,7 +128,8 @@ TEST_CASE("pending: the cap evicts the oldest buckets first", "[unit][pending]")
 
 TEST_CASE("pending: eviction keeps size consistent when the newest bucket exceeds the cap", "[unit][pending]") {
     PendingBuffer p(2);
-    for (std::uint64_t i = 0; i < 5; ++i) p.stage(mk(7, 1, i), "A");
+    for (std::uint64_t i = 0; i < 5; ++i)
+        p.stage(mk(7, 1, i), "A");
     CHECK(p.size() <= 2);
     CHECK(p.evicted_total() + p.size() == 5);
 }
@@ -205,7 +207,8 @@ TEST_CASE("pending: memory ceiling at 10,000 logs stays well under 50 MB", "[uni
     CHECK(p.evicted_total() == 10);
 }
 
-TEST_CASE("ws reconciler: disconnect during catch-up waits for first live head before cross-checking", "[unit][pipeline]") {
+TEST_CASE("ws reconciler: disconnect during catch-up waits for first live head before cross-checking",
+          "[unit][pipeline]") {
     evml::core::log::init("info");
     const auto cfg = evml::test::load_base_config();
     evml::app::WsReconciler rec(cfg, 100);

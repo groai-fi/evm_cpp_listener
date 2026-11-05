@@ -1,7 +1,6 @@
 #include "mock_ws_server.hpp"
 
 #include <atomic>
-
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
@@ -15,7 +14,9 @@ using tcp = net::ip::tcp;
 
 struct MockWsServer::State {
     State(net::io_context& ioc, Script s, MockWsOptions o)
-        : script(std::move(s)), opts(std::move(o)), acceptor(ioc, tcp::endpoint(net::ip::make_address("127.0.0.1"), 0)) {}
+        : script(std::move(s)),
+          opts(std::move(o)),
+          acceptor(ioc, tcp::endpoint(net::ip::make_address("127.0.0.1"), 0)) {}
     Script script;
     MockWsOptions opts;
     tcp::acceptor acceptor;
@@ -50,7 +51,9 @@ void MockWsConn::drop() {
     ws_.next_layer().close(ec);
 }
 
-net::awaitable<void> MockWsConn::go_silent() { co_await sleep(std::chrono::hours(24)); }
+net::awaitable<void> MockWsConn::go_silent() {
+    co_await sleep(std::chrono::hours(24));
+}
 
 net::awaitable<void> MockWsConn::sleep(std::chrono::milliseconds d) {
     net::steady_timer t(co_await net::this_coro::executor, d);
@@ -67,7 +70,8 @@ net::awaitable<void> session(std::shared_ptr<MockWsServer::State> st, tcp::socke
 
         if (st->opts.reject_status != 0) {
             http::response<http::string_body> res{static_cast<http::status>(st->opts.reject_status), req.version()};
-            for (const auto& [k, v] : st->opts.reject_headers) res.set(k, v);
+            for (const auto& [k, v] : st->opts.reject_headers)
+                res.set(k, v);
             res.set(http::field::content_type, "text/plain");
             res.body() = st->opts.reject_body;
             res.keep_alive(false);
@@ -109,7 +113,11 @@ MockWsServer::MockWsServer(net::io_context& ioc, Script script, MockWsOptions op
 std::string MockWsServer::url() const {
     return "ws://127.0.0.1:" + std::to_string(st_->acceptor.local_endpoint().port()) + "/";
 }
-int MockWsServer::connections() const { return st_->conns; }
-int MockWsServer::upgrades() const { return st_->upgrades; }
+int MockWsServer::connections() const {
+    return st_->conns;
+}
+int MockWsServer::upgrades() const {
+    return st_->upgrades;
+}
 
 }  // namespace evml::test

@@ -1,18 +1,16 @@
 // Toolchain smoke test: proves every Conan dependency links and behaves as expected.
-#include <catch2/catch_test_macros.hpp>
-
-#include <ethash/keccak.hpp>
 #include <openssl/opensslv.h>
 #include <prometheus/counter.h>
 #include <prometheus/registry.h>
 #include <simdjson.h>
 #include <spdlog/spdlog.h>
 #include <sw/redis++/redis++.h>
-#include <toml++/toml.hpp>
 
 #include <boost/json.hpp>
-
+#include <catch2/catch_test_macros.hpp>
+#include <ethash/keccak.hpp>
 #include <string>
+#include <toml++/toml.hpp>
 
 #include "core/version.hpp"
 

@@ -7,9 +7,10 @@
 // Every test works in its own random shard id, so the keys of concurrent tests never overlap. Tests tagged
 // [redis_serial] change server-wide state (maxmemory, SCRIPT FLUSH) and are run alone by ctest (RUN_SERIAL).
 
+#include <sw/redis++/redis++.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -21,25 +22,24 @@
 #include <unordered_map>
 #include <vector>
 
-#include <sw/redis++/redis++.h>
-
 #include "pipeline/sink.hpp"
 #include "sink/lua_scripts.hpp"
 #include "sink/redis_startup.hpp"
 #include "sink/script_runner.hpp"
 
 using namespace evml::sink;
+using Catch::Matchers::ContainsSubstring;
 using evml::pipeline::CheckpointKind;
 using evml::pipeline::Emission;
 using evml::pipeline::EventType;
 using evml::pipeline::Field;
-using Catch::Matchers::ContainsSubstring;
 
 namespace {
 
 std::string redis_url() {
     const char* v = std::getenv("REDIS_URL");
-    if (!v || !*v) FAIL("REDIS_URL is not set: the Redis integration tests must run in the dev container (never skipped)");
+    if (!v || !*v)
+        FAIL("REDIS_URL is not set: the Redis integration tests must run in the dev container (never skipped)");
     const char* allow = std::getenv("EVML_TEST_ALLOW_DESTRUCTIVE");
     if (!evml::sink::is_allowed_test_redis_host(v, allow ? allow : "")) {
         FAIL("REDIS_URL does not target an allowed local test Redis host and EVML_TEST_ALLOW_DESTRUCTIVE is not 1");
@@ -99,7 +99,10 @@ Emission mk(const std::string& id, EventType type, std::optional<std::uint64_t> 
     e.type = type;
     e.event_id = id;
     e.dedup_key = "dedup:" + id;
-    e.fields = {{"v", "1"}, {"type", evml::pipeline::to_string(type)}, {"event_id", id}, {"block_number", std::to_string(block)}};
+    e.fields = {{"v", "1"},
+                {"type", evml::pipeline::to_string(type)},
+                {"event_id", id},
+                {"block_number", std::to_string(block)}};
     e.released_block = released;
     return e;
 }
@@ -232,7 +235,8 @@ TEST_CASE("redis scripts: tracked emits, final_trim and released_range after a r
     const Emission e100 = mk("e100", EventType::Log, 100, 100);
     const Emission e105 = mk("e105", EventType::Log, 105, 105);
     const Emission e110 = mk("e110", EventType::Log, 110, 110);
-    for (const auto* e : {&e100, &e105, &e110}) CHECK(r.run(emit_call(r.keys, *e, params())) != "DUP");
+    for (const auto* e : {&e100, &e105, &e110})
+        CHECK(r.run(emit_call(r.keys, *e, params())) != "DUP");
 
     CHECK(r.xlen(r.keys.events()) == 3);
     CHECK(r.zcard(r.keys.released()) == 3);
@@ -263,7 +267,8 @@ TEST_CASE("redis scripts: tracked emits, final_trim and released_range after a r
 }
 
 // 17. BELOW_FINALIZED.
-TEST_CASE("redis scripts: a tracked emit at or below ckpt.finalized is rejected and writes nothing", "[integration][redis]") {
+TEST_CASE("redis scripts: a tracked emit at or below ckpt.finalized is rejected and writes nothing",
+          "[integration][redis]") {
     Rig r;
     CHECK(r.run(ckpt_init_call(r.keys, kNoFence, 100, {})) == "OK");
 
@@ -323,7 +328,8 @@ TEST_CASE("redis scripts: lease renew resumes after a blip and is fenced after a
     r.redis.command<long long>("DEL", r.keys.leader());
     const auto b_reply = r.runner.run(lease_acquire_call(r.keys, "hostB", "n2", 15000));
     REQUIRE(b_reply.has_value());
-    CHECK(*b_reply == "2|hostB|n2\n1|hostA|n1");  // the epoch number grows and the previous token is returned atomically
+    CHECK(*b_reply ==
+          "2|hostB|n2\n1|hostA|n1");  // the epoch number grows and the previous token is returned atomically
     const std::string b = "2|hostB|n2";
     CHECK(r.run(lease_renew_call(r.keys, a, 15000)) == "FENCED");
     CHECK(r.run(emit_call(r.keys, mk("a", EventType::Log), params(a))) == "FENCED");
@@ -349,7 +355,8 @@ TEST_CASE("redis scripts: entries older than minid are trimmed, the newest never
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));  // the cutoff must be later than every entry above
     const auto now_ms = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
     Emission last = mk("last", EventType::Log);
     last.fields.emplace_back("seq", std::to_string(kTotal - 1));
     CHECK(r.run(emit_call(r.keys, last, params(kNoFence, now_ms))) != "DUP");
@@ -365,7 +372,8 @@ TEST_CASE("redis scripts: entries older than minid are trimmed, the newest never
     REQUIRE(newest.size() == 1);
     REQUIRE(newest[0].second.has_value());
     bool found = false;
-    for (const auto& [k, v] : *newest[0].second) found = found || (k == "event_id" && v == "last");
+    for (const auto& [k, v] : *newest[0].second)
+        found = found || (k == "event_id" && v == "last");
     CHECK(found);
 
     std::vector<Item> oldest;
@@ -433,7 +441,8 @@ TEST_CASE("redis scripts: field and manifest codecs reject malformed input", "[u
     CHECK_THROWS_WITH(unpack_released(R"({"fields":[]})"), ContainsSubstring("needs a string `stream`"));
     CHECK_THROWS_WITH(unpack_released(R"({"stream":"events"})"), ContainsSubstring("needs a string `stream`"));
     CHECK_THROWS_WITH(unpack_released(R"({"stream":"nope","fields":[]})"), ContainsSubstring("unknown stream 'nope'"));
-    CHECK_THROWS_WITH(unpack_released(R"({"stream":"events","fields":[["a"]]})"), ContainsSubstring("[name, value] string pair"));
+    CHECK_THROWS_WITH(unpack_released(R"({"stream":"events","fields":[["a"]]})"),
+                      ContainsSubstring("[name, value] string pair"));
     CHECK(unpack_manifest(pack_manifest({"x", "y"})) == std::vector<std::string>{"x", "y"});
     CHECK_THROWS_WITH(unpack_manifest("[1]"), ContainsSubstring("not a string"));
     CHECK_THROWS_WITH(unpack_manifest("nope"), ContainsSubstring("invalid JSON"));
@@ -464,8 +473,9 @@ TEST_CASE("redis scripts: every embedded script starts with the #!lua shebang", 
     }
 }
 
-TEST_CASE("redis scripts: emit_fast writes to evml:{shard}:fast with zero dedup/released keys and respects leader fencing",
-          "[integration][redis][lua]") {
+TEST_CASE(
+    "redis scripts: emit_fast writes to evml:{shard}:fast with zero dedup/released keys and respects leader fencing",
+    "[integration][redis][lua]") {
     Rig r;
     const std::vector<Field> fields = {
         {"v", "1"}, {"type", "log"}, {"finality", "latest"}, {"event_id", "8453:0xabc:0"}, {"block_number", "105"}};

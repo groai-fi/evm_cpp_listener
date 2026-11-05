@@ -1,6 +1,7 @@
+#include "pipeline/aimd_pager.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
-#include "pipeline/aimd_pager.hpp"
 #include "pipeline/last_type_map.hpp"
 
 using namespace evml::pipeline;
@@ -11,7 +12,8 @@ TEST_CASE("next_range pages after the cursor up to the gate and stops at the gat
     CHECK(next_range(100, 105, 500) == BlockRange{101, 105});
     CHECK(next_range(100, 1000, 500) == BlockRange{101, 600});
     CHECK(next_range(0, 3, 5) == BlockRange{1, 3});
-    CHECK(next_range(UINT64_MAX - 10, UINT64_MAX, UINT32_MAX) == BlockRange{UINT64_MAX - 9, UINT64_MAX});  // no overflow
+    CHECK(next_range(UINT64_MAX - 10, UINT64_MAX, UINT32_MAX) ==
+          BlockRange{UINT64_MAX - 9, UINT64_MAX});  // no overflow
     CHECK_THROWS_AS(next_range(0, 10, 0), std::invalid_argument);
 }
 
@@ -58,22 +60,27 @@ TEST_CASE("pager: grows back by doubling after 5 consecutive successes and never
     AimdPager p(500, 10);
     p.on_range_too_large(std::nullopt);  // 250
     p.on_range_too_large(std::nullopt);  // 125
-    for (int i = 0; i < 4; ++i) p.on_success();
+    for (int i = 0; i < 4; ++i)
+        p.on_success();
     CHECK(p.range() == 125);  // 4 successes: not yet
     p.on_success();
     CHECK(p.range() == 250);
-    for (int i = 0; i < 5; ++i) p.on_success();
+    for (int i = 0; i < 5; ++i)
+        p.on_success();
     CHECK(p.range() == 500);
-    for (int i = 0; i < 50; ++i) p.on_success();
+    for (int i = 0; i < 50; ++i)
+        p.on_success();
     CHECK(p.range() == 500);  // capped at the provider max
 }
 
 TEST_CASE("pager: a failure resets the success streak", "[unit][pager]") {
     AimdPager p(500, 10);
     p.on_range_too_large(std::nullopt);  // 250
-    for (int i = 0; i < 4; ++i) p.on_success();
+    for (int i = 0; i < 4; ++i)
+        p.on_success();
     p.on_range_too_large(std::nullopt);  // 125, streak reset
-    for (int i = 0; i < 4; ++i) p.on_success();
+    for (int i = 0; i < 4; ++i)
+        p.on_success();
     CHECK(p.range() == 125);  // 4 since the reset: still not grown
     p.on_success();
     CHECK(p.range() == 250);
@@ -116,4 +123,3 @@ TEST_CASE("last-type map: admits only when the type changes (I6) and evicts the 
     CHECK(m.last("d").has_value());
     CHECK(m.admit("b", EventType::Log));  // evicted, so unknown: admitted (Redis is the authority beyond this window)
 }
-

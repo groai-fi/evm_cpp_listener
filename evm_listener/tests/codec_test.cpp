@@ -1,17 +1,16 @@
+#include "rpc/codec.hpp"
+
+#include <boost/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <fstream>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
 
-#include <boost/json.hpp>
-
 #include "core/config.hpp"
 #include "core/error.hpp"
-#include "rpc/codec.hpp"
 
 using namespace evml;
 using namespace evml::rpc;
@@ -187,23 +186,36 @@ TEST_CASE("try_parse_error_body: both observed shapes, and non-errors", "[unit][
 TEST_CASE("strict decoding: a missing or malformed field is a DecodeError naming it", "[unit][codec]") {
     Decoder d;
     const std::string log = fixture("ws_log");
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"removed\": false", "\"removedX\": false")), ContainsSubstring("field \"removed\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"removed\": false", "\"removed\": \"no\"")), ContainsSubstring("field \"removed\": expected boolean"));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"blockNumber\": \"0x31cafc8\"", "\"blockNumber\": \"0xzz\"")), ContainsSubstring("field \"blockNumber\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"blockNumber\": \"0x31cafc8\"", "\"blockNumber\": \"31cafc8\"")), ContainsSubstring("field \"blockNumber\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"logIndex\": \"0x107\"", "\"logIndex\": \"0x10000000000000000\"")), ContainsSubstring("overflows"));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"transactionIndex\": \"0x38\"", "\"transactionIndexX\": \"0x38\"")), ContainsSubstring("field \"transactionIndex\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "0xe846373c1a92b167b4e9cd5d8e4d6b1db9e90ec7", "0xe846373c")), ContainsSubstring("field \"address\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"data\": \"0xffff", "\"data\": \"0xfff")), ContainsSubstring("field \"data\""));  // odd length
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"data\": \"0xffff", "\"data\": \"0xzzff")), ContainsSubstring("field \"data\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"topics\": [", "\"topics\": [\"0x00\", ")), ContainsSubstring("field \"topics\""));
-    CHECK_THROWS_WITH(d.decode(mutate(log, "\"topics\": [", std::string("\"topics\": [") + "\"0x" + std::string(64, '1') + "\",\"0x" +
-                                                               std::string(64, '2') + "\",")),
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"removed\": false", "\"removedX\": false")),
+                      ContainsSubstring("field \"removed\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"removed\": false", "\"removed\": \"no\"")),
+                      ContainsSubstring("field \"removed\": expected boolean"));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"blockNumber\": \"0x31cafc8\"", "\"blockNumber\": \"0xzz\"")),
+                      ContainsSubstring("field \"blockNumber\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"blockNumber\": \"0x31cafc8\"", "\"blockNumber\": \"31cafc8\"")),
+                      ContainsSubstring("field \"blockNumber\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"logIndex\": \"0x107\"", "\"logIndex\": \"0x10000000000000000\"")),
+                      ContainsSubstring("overflows"));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"transactionIndex\": \"0x38\"", "\"transactionIndexX\": \"0x38\"")),
+                      ContainsSubstring("field \"transactionIndex\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "0xe846373c1a92b167b4e9cd5d8e4d6b1db9e90ec7", "0xe846373c")),
+                      ContainsSubstring("field \"address\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"data\": \"0xffff", "\"data\": \"0xfff")),
+                      ContainsSubstring("field \"data\""));  // odd length
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"data\": \"0xffff", "\"data\": \"0xzzff")),
+                      ContainsSubstring("field \"data\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"topics\": [", "\"topics\": [\"0x00\", ")),
+                      ContainsSubstring("field \"topics\""));
+    CHECK_THROWS_WITH(d.decode(mutate(log, "\"topics\": [",
+                                      std::string("\"topics\": [") + "\"0x" + std::string(64, '1') + "\",\"0x" +
+                                          std::string(64, '2') + "\",")),
                       ContainsSubstring("more than 4 topics"));
 
     const std::string head = fixture("ws_new_head");
-    CHECK_THROWS_WITH(d.decode(mutate(head, "\"parentHash\"", "\"parentHashX\"")), ContainsSubstring("field \"parentHash\""));
-    CHECK_THROWS_WITH(d.decode(mutate(head, "\"timestamp\": \"0x6ac3d3e1\"", "\"timestamp\": 1")), ContainsSubstring("field \"timestamp\": expected string"));
+    CHECK_THROWS_WITH(d.decode(mutate(head, "\"parentHash\"", "\"parentHashX\"")),
+                      ContainsSubstring("field \"parentHash\""));
+    CHECK_THROWS_WITH(d.decode(mutate(head, "\"timestamp\": \"0x6ac3d3e1\"", "\"timestamp\": 1")),
+                      ContainsSubstring("field \"timestamp\": expected string"));
 }
 
 TEST_CASE("structural decode errors", "[unit][codec]") {
@@ -213,10 +225,12 @@ TEST_CASE("structural decode errors", "[unit][codec]") {
     CHECK_THROWS_AS(d.decode("{"), core::DecodeError);
     CHECK_THROWS_AS(d.decode(""), core::DecodeError);
     CHECK_THROWS_WITH(d.decode("{}"), ContainsSubstring("neither \"id\" nor \"method\""));
-    CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","method":"eth_other","params":{}})"), ContainsSubstring("unexpected notification method"));
+    CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","method":"eth_other","params":{}})"),
+                      ContainsSubstring("unexpected notification method"));
     CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","id":"abc","result":"0x1"})"), ContainsSubstring("field \"id\""));
     CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","id":1})"), ContainsSubstring("field \"result\""));
-    CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","id":1,"error":{"message":"x"}})"), ContainsSubstring("field \"code\""));
+    CHECK_THROWS_WITH(d.decode(R"({"jsonrpc":"2.0","id":1,"error":{"message":"x"}})"),
+                      ContainsSubstring("field \"code\""));
     CHECK_THROWS_AS(d.parse_quantity("\"nothex\""), core::DecodeError);
     CHECK_THROWS_AS(d.parse_logs("{}"), core::DecodeError);
     CHECK_THROWS_AS(d.parse_block("[]"), core::DecodeError);
@@ -255,7 +269,9 @@ TEST_CASE("request builders produce valid JSON-RPC with monotonic ids", "[unit][
     CHECK(blk.at("params").as_array().at(0).as_string() == "safe");
     CHECK(blk.at("params").as_array().at(1).as_bool() == false);
 
-    const auto code = bj::parse(build_get_code(6, Address20::from_hex("0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7"), "0x10")).as_object();
+    const auto code =
+        bj::parse(build_get_code(6, Address20::from_hex("0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7"), "0x10"))
+            .as_object();
     CHECK(code.at("method").as_string() == "eth_getCode");
     CHECK(code.at("params").as_array().at(0).as_string() == kPool50);  // lowercase
     CHECK(code.at("params").as_array().at(1).as_string() == "0x10");
@@ -287,15 +303,12 @@ TEST_CASE("build_get_logs shapes the filter and validates arguments", "[unit][co
 TEST_CASE("codec monkey: random truncations byte flips and type mutations never crash or UB",
           "[unit][codec][property]") {
     const std::vector<std::string> fixtures{
-        fixture("ws_new_head"),
-        fixture("ws_log"),
-        fixture("resp_block_latest"),
-        fixture("resp_get_logs"),
-        fixture("err_alchemy_429"),
+        fixture("ws_new_head"),   fixture("ws_log"),          fixture("resp_block_latest"),
+        fixture("resp_get_logs"), fixture("err_alchemy_429"),
     };
     const std::vector<char> corrupt_bytes{'\0', '\xff', '{', '}', '[', ']', '"', ':', '0', 'x', 'Z', '\n'};
-    const std::vector<std::string> target_tokens{"\"0x", "\"result\"", "\"params\"", "\"topics\"",
-                                                 "\"number\"", "\"hash\"", "\"blockNumber\""};
+    const std::vector<std::string> target_tokens{"\"0x",       "\"result\"", "\"params\"",     "\"topics\"",
+                                                 "\"number\"", "\"hash\"",   "\"blockNumber\""};
     const std::vector<std::string> replacements{"null", "12345", "[]", "{}", "\"0x123g\"", "\"\""};
 
     Decoder d;

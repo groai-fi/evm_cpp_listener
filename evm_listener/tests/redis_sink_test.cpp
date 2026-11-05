@@ -5,10 +5,15 @@
 // Most tests do not start the sink thread: they drive pump() directly with an injected clock, which makes every
 // interleaving deterministic. A few start the thread to exercise the real producer/consumer hand-off.
 
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "sink/redis_sink.hpp"
 
 #include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -19,16 +24,11 @@
 #include <thread>
 #include <vector>
 
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/use_future.hpp>
-
 #include "core/log.hpp"
 #include "sink/lease.hpp"
-#include "sink/redis_sink.hpp"
 
 using namespace evml::sink;
+using Catch::Matchers::ContainsSubstring;
 using evml::core::StreamKind;
 using evml::pipeline::Checkpoint;
 using evml::pipeline::CheckpointKind;
@@ -36,7 +36,6 @@ using evml::pipeline::Emission;
 using evml::pipeline::EventType;
 using evml::pipeline::Field;
 using evml::pipeline::ReleasedEntry;
-using Catch::Matchers::ContainsSubstring;
 using std::chrono::milliseconds;
 namespace net = boost::asio;
 
@@ -50,18 +49,20 @@ struct FakeServer {
     Keys keys;
     std::optional<std::string> leader;  // reset() = the lease key expired
     std::string epoch;
-    bool scripts_valid{true};           // false = SCRIPT FLUSH happened: every script call answers NOSCRIPT
+    bool scripts_valid{true};  // false = SCRIPT FLUSH happened: every script call answers NOSCRIPT
     std::map<StreamKind, std::vector<std::vector<Field>>> streams;
     std::vector<std::vector<Field>> fast_stream;
-    std::map<std::string, std::string> dedup;                                // dedup key -> last type
+    std::map<std::string, std::string> dedup;                               // dedup key -> last type
     std::map<std::string, std::pair<std::uint64_t, std::string>> released;  // member -> (score, before image)
     std::optional<std::uint64_t> safe, finalized;
     std::optional<std::string> contracts;
-    std::vector<std::string> applied;  // every applied write, in order: "emit:<id>:<type>", "ckpt:safe:5", "trim:5", ...
+    std::vector<std::string>
+        applied;  // every applied write, in order: "emit:<id>:<type>", "ckpt:safe:5", "trim:5", ...
     std::uint64_t next_id{0};
     std::map<std::string, std::pair<std::string, std::uint32_t>> kv;  // SET key value EX ttl: key -> (value, ttl_s)
     std::uint64_t kv_writes{0};
-    std::map<std::string, GroupFacts> group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
+    std::map<std::string, GroupFacts>
+        group_facts;  // stream key + "|" + group -> what the probe finds; absent = no stream
     std::uint64_t group_reads{0};
     TenancyFacts tenancy_facts;
     std::uint64_t tenancy_reads{0};
@@ -88,7 +89,8 @@ struct FakeServer {
                 if (a[2] == "revert" && !last) return ok("DUP");
                 if (!a[3].empty() && finalized && std::stoull(a[3]) <= *finalized) return ok("BELOW_FINALIZED");
                 std::vector<Field> fields;
-                for (std::size_t i = 7; i + 1 < a.size(); i += 2) fields.emplace_back(a[i], a[i + 1]);
+                for (std::size_t i = 7; i + 1 < a.size(); i += 2)
+                    fields.emplace_back(a[i], a[i + 1]);
                 const StreamKind stream = c.keys[1] == keys.events() ? StreamKind::Events : StreamKind::Registry;
                 streams[stream].push_back(std::move(fields));
                 if (!a[3].empty()) released[a[4]] = {std::stoull(a[3]), a[5]};
@@ -142,7 +144,8 @@ struct FakeServer {
                     if (leader) return CallOutcome{ScriptOk{std::nullopt}};
                     const std::string prev = epoch;
                     const auto bar = epoch.find('|');
-                    const std::uint64_t n = 1 + (epoch.empty() || bar == std::string::npos ? 0 : std::stoull(epoch.substr(0, bar)));
+                    const std::uint64_t n =
+                        1 + (epoch.empty() || bar == std::string::npos ? 0 : std::stoull(epoch.substr(0, bar)));
                     const std::string token = std::to_string(n) + "|" + a[1] + "|" + a[2];
                     epoch = token;
                     leader = token;
@@ -189,7 +192,8 @@ struct FakeServer {
     }
     std::size_t total_entries() const {
         std::size_t n = 0;
-        for (const auto& [s, v] : streams) n += v.size();
+        for (const auto& [s, v] : streams)
+            n += v.size();
         return n;
     }
     // Types of the entries written for `id`, in stream order.
@@ -212,9 +216,9 @@ struct FakeServer {
 
 struct Fault {
     enum class Kind : std::uint8_t { None, ThrowBefore, ThrowAfter, FailAt } kind{Kind::None};
-    std::size_t at{0};                 // position in the pipeline
+    std::size_t at{0};  // position in the pipeline
     FailKind fail{FailKind::Transient};
-    bool rest_also{false};             // FailAt: every later call fails too (what a flushed script cache does)
+    bool rest_also{false};  // FailAt: every later call fails too (what a flushed script cache does)
 };
 
 // One connection to the FakeServer. `faults` holds one entry per pipeline call (consumed in order).
@@ -232,7 +236,8 @@ public:
 
     std::vector<CallOutcome> pipeline(const std::vector<ScriptCall>& calls) override {
         std::vector<Script> kinds;
-        for (const auto& c : calls) kinds.push_back(c.script);
+        for (const auto& c : calls)
+            kinds.push_back(c.script);
         pipelines.push_back(std::move(kinds));
 
         if (down) throw ConnError("fake: connection down");
@@ -247,12 +252,14 @@ public:
         for (std::size_t i = 0; i < calls.size(); ++i) {
             if (f.kind == Fault::Kind::ThrowAfter && i == f.at) throw ConnError("fake: dropped mid-pipeline");
             if (f.kind == Fault::Kind::FailAt && (i == f.at || (f.rest_also && i > f.at))) {
-                out.push_back(ScriptFail{f.fail, "fake failure"});  // not applied; later calls may still be (non-prefix)
+                out.push_back(
+                    ScriptFail{f.fail, "fake failure"});  // not applied; later calls may still be (non-prefix)
                 continue;
             }
             out.push_back(server.apply(calls[i]));
         }
-        if (f.kind == Fault::Kind::ThrowAfter && f.at >= calls.size()) throw ConnError("fake: reply lost after all landed");
+        if (f.kind == Fault::Kind::ThrowAfter && f.at >= calls.size())
+            throw ConnError("fake: reply lost after all landed");
         return out;
     }
 
@@ -341,7 +348,8 @@ struct Rig {
     explicit Rig(const RigCfg& cfg = {}) {
         evml::core::log::init("info");  // the sink logs through core::log, which throws until init() was called
         std::random_device rd;
-        dir = std::filesystem::temp_directory_path() / ("evml-sink-test-" + std::to_string(rd()) + std::to_string(rd()));
+        dir =
+            std::filesystem::temp_directory_path() / ("evml-sink-test-" + std::to_string(rd()) + std::to_string(rd()));
 
         if (cfg.lease) {
             const auto got = *std::get<ScriptOk>(server.apply(lease_acquire_call(keys, "hostA", "n1", 15000))).value;
@@ -407,14 +415,18 @@ struct Rig {
     }
 };
 
-Emission mk(const std::string& id, EventType type = EventType::Log, std::optional<std::uint64_t> released = std::nullopt,
-            std::uint64_t block = 105, StreamKind stream = StreamKind::Events) {
+Emission mk(const std::string& id, EventType type = EventType::Log,
+            std::optional<std::uint64_t> released = std::nullopt, std::uint64_t block = 105,
+            StreamKind stream = StreamKind::Events) {
     Emission e;
     e.stream = stream;
     e.type = type;
     e.event_id = id;
     e.dedup_key = "dedup:" + id;
-    e.fields = {{"v", "1"}, {"type", evml::pipeline::to_string(type)}, {"event_id", id}, {"block_number", std::to_string(block)}};
+    e.fields = {{"v", "1"},
+                {"type", evml::pipeline::to_string(type)},
+                {"event_id", id},
+                {"block_number", std::to_string(block)}};
     e.released_block = released;
     return e;
 }
@@ -436,7 +448,9 @@ evml::pipeline::Event mk_fast(const std::string& id, std::uint64_t block = 105) 
     return ev;
 }
 
-std::string id_of(int i) { return "e" + std::to_string(i); }
+std::string id_of(int i) {
+    return "e" + std::to_string(i);
+}
 
 // Runs `aw` on a private io_context while pumping the sink from this thread (no sink thread): deterministic.
 template <class T>
@@ -488,7 +502,8 @@ void check_ckpt_not_ahead(const FakeServer& s, int events, const std::string& ck
 
 TEST_CASE("redis sink: consecutive emits share a pipeline; every other write is a barrier sent alone", "[unit][sink]") {
     Rig r;
-    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 3; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 10);
     r.sink->emit(mk(id_of(3)));
     r.sink->final_trim(5);
@@ -507,7 +522,8 @@ TEST_CASE("redis sink: a batch never exceeds max_batch emits", "[unit][sink]") {
     RigCfg cfg;
     cfg.max_batch = 4;
     Rig r(cfg);
-    for (int i = 0; i < 10; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 10; ++i)
+        r.sink->emit(mk(id_of(i)));
     REQUIRE(r.settle());
     REQUIRE(r.data->pipelines.size() == 3);
     CHECK(r.data->pipelines[0].size() == 4);
@@ -550,13 +566,15 @@ void run_p1_scenario(const std::string& label, std::deque<Fault> data_faults, st
     INFO("fault scenario: " << label);
     Rig r;
     r.data->faults = std::move(data_faults);
-    for (int i = 0; i < kEvents; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < kEvents; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 99);
 
     REQUIRE(r.settle([&] { check_ckpt_not_ahead(r.server, kEvents, "ckpt:safe:99"); }));
 
     // Every event landed exactly once (a re-sent one collapses to DUP), and the checkpoint follows them.
-    for (int i = 0; i < kEvents; ++i) CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
+    for (int i = 0; i < kEvents; ++i)
+        CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
     CHECK(r.server.safe == 99);
     CHECK(r.sink->mode() == SinkMode::Connected);
     CHECK(r.sink->status().pending_writes == 0);
@@ -572,7 +590,8 @@ TEST_CASE("redis sink P1: an error or timeout at every position of the emit batc
     for (std::size_t k = 0; k <= kEvents; ++k)  // k = how many landed before the reply was lost
         run_p1_scenario("reply lost after " + std::to_string(k) + " landed", {{Fault::Kind::ThrowAfter, k}}, k);
     for (std::size_t i = 0; i < kEvents; ++i)  // OOM-style refusal of one call; the calls after it still ran
-        run_p1_scenario("transient refusal at " + std::to_string(i), {{Fault::Kind::FailAt, i, FailKind::Transient, false}});
+        run_p1_scenario("transient refusal at " + std::to_string(i),
+                        {{Fault::Kind::FailAt, i, FailKind::Transient, false}});
     for (std::size_t i = 0; i < kEvents; ++i)  // flushed script cache: this call and every later one answer NOSCRIPT
         run_p1_scenario("NOSCRIPT from " + std::to_string(i), {{Fault::Kind::FailAt, i, FailKind::NoScript, true}});
 }
@@ -588,7 +607,8 @@ TEST_CASE("redis sink P1: faults on the checkpoint barrier itself", "[unit][sink
 TEST_CASE("redis sink P1: a flushed script cache is reloaded and the batch continues", "[unit][sink]") {
     Rig r;
     r.server.scripts_valid = false;  // SCRIPT FLUSH between batches
-    for (int i = 0; i < kEvents; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < kEvents; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 99);
     REQUIRE(r.settle([&] { check_ckpt_not_ahead(r.server, kEvents, "ckpt:safe:99"); }));
     CHECK(r.data->loads == 1);
@@ -601,7 +621,8 @@ TEST_CASE("redis sink P1: scripts that keep disappearing degrade the sink instea
     r.server.scripts_valid = false;
     r.data->load_fixes_cache = false;  // every reload "succeeds" but the cache stays empty
     r.sink->emit(mk("a"));
-    for (int i = 0; i < 6 && r.sink->mode() == SinkMode::Connected; ++i) r.sink->pump();
+    for (int i = 0; i < 6 && r.sink->mode() == SinkMode::Connected; ++i)
+        r.sink->pump();
     CHECK(r.sink->mode() == SinkMode::Degraded);
     CHECK(r.server.total_entries() == 0);
 
@@ -613,7 +634,8 @@ TEST_CASE("redis sink P1: scripts that keep disappearing degrade the sink instea
 TEST_CASE("redis sink I6: a re-sent log/revert sequence still alternates and ends on its last type", "[unit][sink]") {
     Rig r;
     r.data->faults = {{Fault::Kind::ThrowAfter, 2}};  // the first two landed, the reply was lost
-    for (const auto type : {EventType::Log, EventType::Revert, EventType::Log, EventType::Revert}) r.sink->emit(mk("a", type));
+    for (const auto type : {EventType::Log, EventType::Revert, EventType::Log, EventType::Revert})
+        r.sink->emit(mk("a", type));
     REQUIRE(r.settle());
 
     // At worst the pair is repeated (consumers are idempotent on event_id), never two equal types in a row.
@@ -621,7 +643,8 @@ TEST_CASE("redis sink I6: a re-sent log/revert sequence still alternates and end
     REQUIRE(types.size() >= 4);
     CHECK(types.front() == "log");
     CHECK(types.back() == "revert");
-    for (std::size_t i = 1; i < types.size(); ++i) CHECK(types[i] != types[i - 1]);
+    for (std::size_t i = 1; i < types.size(); ++i)
+        CHECK(types[i] != types[i - 1]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -631,7 +654,8 @@ TEST_CASE("redis sink I6: a re-sent log/revert sequence still alternates and end
 TEST_CASE("redis sink: during an outage items spill in order and replay in order after the reconnect", "[unit][sink]") {
     Rig r;
     r.data->down = true;
-    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 3; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 50);
     r.sink->pump();
     CHECK(r.sink->mode() == SinkMode::Degraded);
@@ -639,7 +663,8 @@ TEST_CASE("redis sink: during an outage items spill in order and replay in order
     CHECK(r.server.applied.empty());
 
     // New items during the outage queue behind the older ones, never around them.
-    for (int i = 3; i < 6; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 3; i < 6; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 60);
     r.sink->pump();
     CHECK(r.sink->status().spill_records >= 4);
@@ -659,7 +684,8 @@ TEST_CASE("redis sink: items arriving while replaying go behind the spill", "[un
     cfg.max_batch = 2;
     Rig r(cfg);
     r.data->down = true;
-    for (int i = 0; i < 6; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 6; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->pump();
     REQUIRE(r.sink->mode() == SinkMode::Degraded);
 
@@ -672,7 +698,8 @@ TEST_CASE("redis sink: items arriving while replaying go behind the spill", "[un
     const auto& a = r.server.applied;
     REQUIRE(a.size() == 7);
     CHECK(a.back() == "emit:late:log");
-    for (int i = 0; i < 6; ++i) CHECK(a[static_cast<std::size_t>(i)] == "emit:" + id_of(i) + ":log");
+    for (int i = 0; i < 6; ++i)
+        CHECK(a[static_cast<std::size_t>(i)] == "emit:" + id_of(i) + ":log");
 }
 
 TEST_CASE("redis sink: every kind of item survives the spill round trip", "[unit][sink]") {
@@ -694,16 +721,17 @@ TEST_CASE("redis sink: every kind of item survives the spill round trip", "[unit
 
     r.data->down = false;
     REQUIRE(r.settle());
-    CHECK(r.server.applied == std::vector<std::string>{"ckpt:init:100", "ckpt:contracts", "emit:tracked:log", "emit:plain:log",
-                                                       "ckpt:safe:110", "trim:105", "ckpt:finalized:105",
-                                                       "emit:tracked:revert"});
+    CHECK(r.server.applied == std::vector<std::string>{"ckpt:init:100", "ckpt:contracts", "emit:tracked:log",
+                                                       "emit:plain:log", "ckpt:safe:110", "trim:105",
+                                                       "ckpt:finalized:105", "emit:tracked:revert"});
     CHECK(r.server.contracts == pack_manifest({"c1"}));
     CHECK(r.server.count_entries(StreamKind::Registry, "tracked") == 2);  // log + revert, in the registry stream
     CHECK(r.server.count_entries(StreamKind::Events, "plain") == 1);
     CHECK(r.server.released.empty());
 }
 
-TEST_CASE("redis sink: the spill cap saturates the sink, and draining clears it; items are never refused", "[unit][sink]") {
+TEST_CASE("redis sink: the spill cap saturates the sink, and draining clears it; items are never refused",
+          "[unit][sink]") {
     RigCfg cfg;
     cfg.spill_max_bytes = 4000;
     Rig r(cfg);
@@ -749,7 +777,7 @@ TEST_CASE("redis sink: the queue soft cap saturates until the sink thread drains
 // Reads (rev 6, A)
 // ---------------------------------------------------------------------------------------------------------------
 
-TEST_CASE("redis sink A: a read sees every write enqueued before it", "[unit][sink]") {
+TEST_CASE("redis sink A: a read sees every write enqueued before it", "[unit][sink][redis_sink]") {
     Rig r;
     r.server.safe = 0;
     r.server.finalized = 0;
@@ -771,7 +799,8 @@ TEST_CASE("redis sink A: a read sees every write enqueued before it", "[unit][si
     CHECK(r.server.safe == 120);  // the checkpoint enqueued before the read was applied before it, too
 }
 
-TEST_CASE("redis sink A: load_checkpoint returns the stored checkpoint, or an empty one on a fresh store", "[unit][sink]") {
+TEST_CASE("redis sink A: load_checkpoint returns the stored checkpoint, or an empty one on a fresh store",
+          "[unit][sink][redis_sink]") {
     Rig r;
     const auto fresh = await_with_pump(*r.sink, r.sink->load_checkpoint());
     REQUIRE(fresh->has_value());
@@ -788,7 +817,8 @@ TEST_CASE("redis sink A: load_checkpoint returns the stored checkpoint, or an em
     CHECK((*ck)->contracts == std::vector<std::string>{"x", "y"});
 }
 
-TEST_CASE("redis sink A: reads resolve to nullopt while the sink is degraded or replaying", "[unit][sink]") {
+TEST_CASE("redis sink A: reads resolve to nullopt while the sink is degraded or replaying",
+          "[unit][sink][redis_sink]") {
     Rig r;
     r.data->down = true;
     r.sink->emit(mk("a"));
@@ -802,18 +832,15 @@ TEST_CASE("redis sink A: reads resolve to nullopt while the sink is degraded or 
     CHECK_FALSE(ck->has_value());
 }
 
-TEST_CASE("redis sink A: a read already queued when Redis dies resolves to nullopt, never to a partial answer", "[unit][sink]") {
+TEST_CASE("redis sink A: a read already queued when Redis dies resolves to nullopt, never to a partial answer",
+          "[unit][sink][redis_sink]") {
     net::io_context io;  // declared before the rig: the sink's stop() abandons reads on this context's channel service
     Rig r;
     r.sink->emit(mk("a", EventType::Log, 100, 100));
 
     std::optional<std::optional<std::vector<ReleasedEntry>>> result;
     net::co_spawn(
-        io,
-        [&]() -> net::awaitable<void> {
-            result = co_await r.sink->released_range(0, 1000);
-        },
-        net::detached);
+        io, [&]() -> net::awaitable<void> { result = co_await r.sink->released_range(0, 1000); }, net::detached);
     io.poll();  // the coroutine queued the read behind the emit and is waiting
 
     r.data->down = true;  // Redis dies before the sink thread gets to the batch
@@ -826,7 +853,8 @@ TEST_CASE("redis sink A: a read already queued when Redis dies resolves to nullo
     CHECK(r.sink->mode() == SinkMode::Degraded);
 }
 
-TEST_CASE("redis sink A: a read that fails on the wire degrades the sink and resolves to nullopt", "[unit][sink]") {
+TEST_CASE("redis sink A: a read that fails on the wire degrades the sink and resolves to nullopt",
+          "[unit][sink][redis_sink]") {
     Rig r;
     FakeConn* data = r.data;
     // Make only the read fail: the connection answers pipelines but not reads.
@@ -863,22 +891,26 @@ TEST_CASE("redis sink A: a read that fails on the wire degrades the sink and res
 TEST_CASE("redis sink P3: a write fenced by an expired lease renews, resumes and continues", "[unit][sink]") {
     Rig r;
     r.server.leader.reset();  // the lease key expired, but nobody took over: epoch still names us
-    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 3; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 9);
     REQUIRE(r.settle());
 
     CHECK(r.server.leader == r.token);  // renew answered RESUMED and restored the key
     CHECK(r.server.safe == 9);
-    for (int i = 0; i < 3; ++i) CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
+    for (int i = 0; i < 3; ++i)
+        CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
     CHECK(r.sink->mode() == SinkMode::Connected);
     CHECK(r.sink->status().discarded_total == 0);
 }
 
-TEST_CASE("redis sink P3: a write fenced by another term discards the queue and spill and goes Fenced", "[unit][sink]") {
+TEST_CASE("redis sink P3: a write fenced by another term discards the queue and spill and goes Fenced",
+          "[unit][sink]") {
     Rig r;
     r.server.leader = "2|hostB|n2";  // another host acquired the lease
     r.server.epoch = "2|hostB|n2";
-    for (int i = 0; i < 4; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 4; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 9);
     r.sink->pump();
 
@@ -896,10 +928,12 @@ TEST_CASE("redis sink P3: a write fenced by another term discards the queue and 
     CHECK(r.server.applied.empty());
 }
 
-TEST_CASE("redis sink P3: an old-term spill is never replayed after the lease was taken over during an outage", "[unit][sink]") {
+TEST_CASE("redis sink P3: an old-term spill is never replayed after the lease was taken over during an outage",
+          "[unit][sink]") {
     Rig r;
     r.data->down = true;
-    for (int i = 0; i < 6; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 6; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->pump();
     REQUIRE(r.sink->mode() == SinkMode::Degraded);
 
@@ -917,7 +951,8 @@ TEST_CASE("redis sink P3: an old-term spill is never replayed after the lease wa
 TEST_CASE("redis sink P3: an outage the lease survives replays the spill (RESUMED)", "[unit][sink]") {
     Rig r;
     r.data->down = true;
-    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 3; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.sink->pump();
     REQUIRE(r.sink->mode() == SinkMode::Degraded);
 
@@ -926,11 +961,13 @@ TEST_CASE("redis sink P3: an outage the lease survives replays the spill (RESUME
     REQUIRE(r.settle());
     CHECK(r.sink->mode() == SinkMode::Connected);
     CHECK(r.server.leader == r.token);
-    for (int i = 0; i < 3; ++i) CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
+    for (int i = 0; i < 3; ++i)
+        CHECK(r.server.count_entries(StreamKind::Events, id_of(i)) == 1);
 }
 
-TEST_CASE("redis sink P3: the lease is renewed on schedule on its own connection, and a takeover is noticed without writes",
-          "[unit][sink]") {
+TEST_CASE(
+    "redis sink P3: the lease is renewed on schedule on its own connection, and a takeover is noticed without writes",
+    "[unit][sink]") {
     Rig r;
     r.sink->pump();
     CHECK(r.lease->pipelines.empty());  // not due yet
@@ -967,7 +1004,8 @@ TEST_CASE("redis sink P3: a failed renewal is counted, not fatal, and retried on
     CHECK(r.sink->mode() == SinkMode::Connected);
 }
 
-TEST_CASE("redis sink Q1: with the lease disabled the token is 0, nothing is renewed, and a spill always replays", "[unit][sink]") {
+TEST_CASE("redis sink Q1: with the lease disabled the token is 0, nothing is renewed, and a spill always replays",
+          "[unit][sink]") {
     RigCfg cfg;
     cfg.lease = false;
     Rig r(cfg);
@@ -1039,7 +1077,9 @@ TEST_CASE("redis sink: the sink thread drains what producers enqueue and serves 
     r.server.safe = 0;
     r.server.finalized = 0;
     r.sink->start();
-    for (int i = 0; i < 1000; ++i) r.sink->emit(mk(id_of(i), EventType::Log, 100 + static_cast<std::uint64_t>(i), 100 + static_cast<std::uint64_t>(i)));
+    for (int i = 0; i < 1000; ++i)
+        r.sink->emit(
+            mk(id_of(i), EventType::Log, 100 + static_cast<std::uint64_t>(i), 100 + static_cast<std::uint64_t>(i)));
     r.sink->checkpoint(CheckpointKind::Safe, 5000);
     REQUIRE(r.sink->wait_idle(milliseconds(5000)));
     CHECK(r.server.total_entries() == 1000);
@@ -1073,11 +1113,7 @@ TEST_CASE("redis sink: stop() resolves a queued read to nullopt instead of leavi
     net::io_context io;
     std::optional<std::optional<Checkpoint>> result;
     net::co_spawn(
-        io,
-        [&]() -> net::awaitable<void> {
-            result = co_await r.sink->load_checkpoint();
-        },
-        net::detached);
+        io, [&]() -> net::awaitable<void> { result = co_await r.sink->load_checkpoint(); }, net::detached);
     io.poll();  // queued, never pumped
     CHECK_FALSE(result.has_value());
     r.sink->stop();
@@ -1121,13 +1157,15 @@ TEST_CASE("redis sink: options are validated", "[unit][sink]") {
         o.lease_ttl_ms = 15000;
         o.renew_ms = 5000;
         mutate(o);
-        return RedisSink(std::move(o), r.keys, std::make_unique<FakeConn>(r.server), std::make_unique<FakeConn>(r.server));
+        return RedisSink(std::move(o), r.keys, std::make_unique<FakeConn>(r.server),
+                         std::make_unique<FakeConn>(r.server));
     };
     CHECK_NOTHROW(make([](RedisSinkOptions&) {}));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.queue_capacity = 0; }), ContainsSubstring("queue_capacity"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.max_batch = 0; }), ContainsSubstring("max_batch"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.retention_ms = 0; }), ContainsSubstring("retention_ms"));
-    CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.fast_retention_ms = 0; }), ContainsSubstring("fast_retention_ms"));
+    CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.fast_retention_ms = 0; }),
+                      ContainsSubstring("fast_retention_ms"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.dedup_ttl_s = 0; }), ContainsSubstring("dedup_ttl_s"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.token.clear(); }), ContainsSubstring("token"));
     CHECK_THROWS_WITH(make([](RedisSinkOptions& o) { o.renew_ms = o.lease_ttl_ms; }), ContainsSubstring("renew_ms"));
@@ -1150,7 +1188,8 @@ TEST_CASE("redis sink: options are validated", "[unit][sink]") {
     }));
 }
 
-TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token that contradicts [lease] enabled", "[unit][sink]") {
+TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token that contradicts [lease] enabled",
+          "[unit][sink]") {
     evml::core::SinkCfg sink;
     sink.retention_ms = 172800000;
     sink.fast_retention_ms = 1800000;
@@ -1174,9 +1213,11 @@ TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token
     CHECK(o.lease_ttl_ms == 15000);
     CHECK(o.renew_ms == 5000);
 
-    CHECK_THROWS_WITH(RedisSinkOptions::from_config(sink, lease, kNoFence), ContainsSubstring("enabled but the token disables fencing"));
+    CHECK_THROWS_WITH(RedisSinkOptions::from_config(sink, lease, kNoFence),
+                      ContainsSubstring("enabled but the token disables fencing"));
     lease.enabled = false;
-    CHECK_THROWS_WITH(RedisSinkOptions::from_config(sink, lease, "1|a|n"), ContainsSubstring("disabled but a lease token"));
+    CHECK_THROWS_WITH(RedisSinkOptions::from_config(sink, lease, "1|a|n"),
+                      ContainsSubstring("disabled but a lease token"));
     CHECK(RedisSinkOptions::from_config(sink, lease, kNoFence).token == kNoFence);
 }
 
@@ -1184,7 +1225,8 @@ TEST_CASE("redis sink: from_config copies [sink] and [lease] and refuses a token
 // Heartbeat (plan 4.7), drain and lease lifecycle (plan 4.8)
 // ---------------------------------------------------------------------------------------------------------------
 
-TEST_CASE("redis sink heartbeat: written on the lease connection at the interval, not before it is due", "[unit][sink]") {
+TEST_CASE("redis sink heartbeat: written on the lease connection at the interval, not before it is due",
+          "[unit][sink]") {
     Rig r(RigCfg{.heartbeat_ms = 1000});
     r.sink->set_heartbeat("{\"state\":\"ok\"}");
 
@@ -1208,7 +1250,8 @@ TEST_CASE("redis sink heartbeat: written on the lease connection at the interval
     CHECK(r.server.kv[r.keys.hb("hostA")].first == "{\"state\":\"newer\"}");
 }
 
-TEST_CASE("redis sink heartbeat: nothing is written without a payload, with interval 0, or while Degraded", "[unit][sink]") {
+TEST_CASE("redis sink heartbeat: nothing is written without a payload, with interval 0, or while Degraded",
+          "[unit][sink]") {
     SECTION("no payload yet") {
         Rig r(RigCfg{.heartbeat_ms = 1000});
         r.sink->pump();
@@ -1250,7 +1293,8 @@ TEST_CASE("redis sink heartbeat: a failed write is counted, not fatal", "[unit][
     CHECK(r.sink->status().heartbeat_failures_total == 1);
 }
 
-TEST_CASE("redis sink heartbeat: an error that is not a connection error is counted, logged and never fails the sink", "[unit][sink]") {
+TEST_CASE("redis sink heartbeat: an error that is not a connection error is counted, logged and never fails the sink",
+          "[unit][sink]") {
     Rig r(RigCfg{.heartbeat_ms = 1000});
     r.sink->set_heartbeat("x");
     r.lease->aux_throws = true;
@@ -1282,7 +1326,8 @@ TEST_CASE("redis sink emit: MINID is the listener wall clock minus retention, an
 
 TEST_CASE("redis sink drain: flushed writes then the lease is released for the standby", "[unit][sink]") {
     Rig r;
-    for (int i = 0; i < 3; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 3; ++i)
+        r.sink->emit(mk(id_of(i)));
     REQUIRE(r.settle());
     REQUIRE(r.server.leader == r.token);
 
@@ -1342,29 +1387,30 @@ TEST_CASE("redis sink options: a heartbeat needs a host id", "[unit][sink]") {
                       ContainsSubstring("host_id"));
 }
 
-TEST_CASE("lease: try_acquire answers a LeaseGrant (with atomic old_host detection), or nullopt while another host leads",
-          "[unit][sink]") {
+TEST_CASE(
+    "lease: acquire_lease answers a LeaseGrant (with atomic old_host detection), or nullopt while another host leads",
+    "[unit][sink][lease]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
     FakeConn conn{server};
 
-    const auto g1 = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    const auto g1 = acquire_lease(conn, keys, "hostA", "n1", 15000);
     REQUIRE(g1.has_value());
     CHECK(g1->token == "1|hostA|n1");
     CHECK(g1->epoch_n == 1);
     CHECK_FALSE(g1->old_host.has_value());  // first lease ever on this shard
 
-    CHECK_FALSE(try_acquire_lease(conn, keys, "hostB", "n2", 15000).has_value());
+    CHECK_FALSE(acquire_lease(conn, keys, "hostB", "n2", 15000).has_value());
     server.leader.reset();  // hostA's key expired
-    const auto g2 = try_acquire_lease(conn, keys, "hostB", "n2", 15000);
+    const auto g2 = acquire_lease(conn, keys, "hostB", "n2", 15000);
     REQUIRE(g2.has_value());
     CHECK(g2->token == "2|hostB|n2");
     CHECK(g2->epoch_n == 2);
     CHECK(g2->old_host == "hostA");
 
     server.leader.reset();  // hostB's key expired and hostB re-acquires: same host is not a leader change
-    const auto g3 = try_acquire_lease(conn, keys, "hostB", "n3", 15000);
+    const auto g3 = acquire_lease(conn, keys, "hostB", "n3", 15000);
     REQUIRE(g3.has_value());
     CHECK(g3->token == "3|hostB|n3");
     CHECK(g3->epoch_n == 3);
@@ -1372,36 +1418,36 @@ TEST_CASE("lease: try_acquire answers a LeaseGrant (with atomic old_host detecti
 
     server.leader.reset();
     server.epoch = "not-a-valid-token";
-    const auto g4 = try_acquire_lease(conn, keys, "hostA", "n4", 15000);
+    const auto g4 = acquire_lease(conn, keys, "hostA", "n4", 15000);
     REQUIRE(g4.has_value());
     CHECK(g4->token == "1|hostA|n4");
     CHECK(g4->epoch_n == 1);
     CHECK_FALSE(g4->old_host.has_value());  // malformed previous epoch warns and skips Leader Changed
 }
 
-TEST_CASE("lease: a flushed script cache is reloaded once; a down connection throws", "[unit][sink]") {
+TEST_CASE("lease: a flushed script cache is reloaded once; a down connection throws", "[unit][sink][lease]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
     FakeConn conn{server};
 
     server.scripts_valid = false;
-    const auto g = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    const auto g = acquire_lease(conn, keys, "hostA", "n1", 15000);
     REQUIRE(g.has_value());
     CHECK(g->token == "1|hostA|n1");
     CHECK(conn.loads == 1);
 
     conn.down = true;
-    CHECK_THROWS_AS(try_acquire_lease(conn, keys, "hostB", "n2", 15000), ConnError);
+    CHECK_THROWS_AS(acquire_lease(conn, keys, "hostB", "n2", 15000), ConnError);
     CHECK_THROWS_AS(release_lease(conn, keys, "1|hostA|n1"), ConnError);
 }
 
-TEST_CASE("lease: release answers true once, then false (it is no longer ours)", "[unit][sink]") {
+TEST_CASE("lease: release answers true once, then false (it is no longer ours)", "[unit][sink][lease]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
     FakeConn conn{server};
-    const auto grant = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
+    const auto grant = acquire_lease(conn, keys, "hostA", "n1", 15000);
     REQUIRE(grant.has_value());
 
     CHECK(release_lease(conn, keys, grant->token));
@@ -1409,7 +1455,8 @@ TEST_CASE("lease: release answers true once, then false (it is no longer ours)",
     CHECK_FALSE(release_lease(conn, keys, grant->token));
 }
 
-TEST_CASE("lease: the standby asks again until the leader lets go, and reports the latest leader before takeover", "[unit][sink]") {
+TEST_CASE("lease: the standby asks again until the leader lets go, and reports the latest leader before takeover",
+          "[unit][sink][lease]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
@@ -1443,7 +1490,8 @@ TEST_CASE("lease: the standby asks again until the leader lets go, and reports t
     CHECK(sleeps == 3);
 }
 
-TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreachable Redis is retried", "[unit][sink]") {
+TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreachable Redis is retried",
+          "[unit][sink][lease]") {
     evml::core::log::init("info");
     Keys keys{"shard"};
     FakeServer server{keys};
@@ -1459,7 +1507,7 @@ TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreac
     o.ttl_ms = 15000;
     o.probe_min = milliseconds(0);
     o.probe_max = milliseconds(0);
-    o.on_waiting = [&](const std::string& err, milliseconds waited) {
+    o.on_waiting = [&](std::string_view err, milliseconds waited) {
         CHECK_FALSE(err.empty());
         CHECK(waited >= milliseconds(0));
         ++waiting_calls;
@@ -1481,7 +1529,7 @@ TEST_CASE("lease: the standby gives up (nullopt) only when stop fires; an unreac
     CHECK_THROWS_AS(acquire_lease_blocking(conn, keys, bad), std::invalid_argument);
 }
 
-TEST_CASE("lease: disabled mode hands out the no-fence token", "[unit][sink]") {
+TEST_CASE("lease: disabled mode hands out the no-fence token", "[unit][sink][lease]") {
     evml::core::log::init("info");
     CHECK(lease_disabled_token() == kNoFence);
 }
@@ -1562,7 +1610,7 @@ TEST_CASE("redis sink lag probe: disabled with no groups, without a lease, and w
     }
 }
 
-TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot stays", "[unit][sink]") {
+TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot stays", "[unit][sink][redis_sink]") {
     Rig r(RigCfg{.groups = {kBot}});
     r.server.group_facts[r.keys.events() + "|bot"] = lag_facts("1700000000200-0", 1700000100000);
     r.sink->pump();
@@ -1580,7 +1628,8 @@ TEST_CASE("redis sink lag probe: a failed probe is counted and the last snapshot
     CHECK(snap[0].probed_at_ms == 1700000000000);  // unchanged: the host can see how old the snapshot is
 }
 
-TEST_CASE("redis sink lag probe: an error that is not a connection error is counted and never fails the sink", "[unit][sink]") {
+TEST_CASE("redis sink lag probe: an error that is not a connection error is counted and never fails the sink",
+          "[unit][sink][redis_sink]") {
     Rig r(RigCfg{.groups = {kBot}});
     r.lease->aux_throws = true;
     r.sink->pump();
@@ -1593,8 +1642,8 @@ TEST_CASE("redis sink lag probe: an error that is not a connection error is coun
     CHECK(r.server.count_entries(StreamKind::Events, id_of(0)) == 1);
 }
 
-
-TEST_CASE("redis sink options: consumer groups need a positive probe interval; from_config copies them", "[unit][sink]") {
+TEST_CASE("redis sink options: consumer groups need a positive probe interval; from_config copies them",
+          "[unit][sink]") {
     Keys keys{"shard"};
     FakeServer server{keys};
     RedisSinkOptions o;
@@ -1616,7 +1665,8 @@ TEST_CASE("redis sink options: consumer groups need a positive probe interval; f
     CHECK(copied.consumer_groups[0].group == "bot");
 }
 
-TEST_CASE("redis sink: oldest_record_age_s is the age of the oldest unacked write and falls to 0 when all are acked", "[unit][sink]") {
+TEST_CASE("redis sink: oldest_record_age_s is the age of the oldest unacked write and falls to 0 when all are acked",
+          "[unit][sink]") {
     Rig r;
     CHECK(r.sink->status().oldest_record_age_s == 0);  // nothing pending
 
@@ -1639,7 +1689,8 @@ TEST_CASE("redis sink: oldest_record_age_s is the age of the oldest unacked writ
     CHECK(r.sink->status().oldest_record_age_s == 0);
 }
 
-TEST_CASE("redis sink: a partly acked batch moves oldest_record_age_s to the first item still pending", "[unit][sink]") {
+TEST_CASE("redis sink: a partly acked batch moves oldest_record_age_s to the first item still pending",
+          "[unit][sink]") {
     RigCfg cfg;
     cfg.max_batch = 1;  // one emit per batch: each ack removes exactly one stamp
     Rig r(cfg);
@@ -1658,7 +1709,8 @@ TEST_CASE("redis sink: Fenced discards every stamp, and writes dropped afterward
     Rig r;
     r.server.leader = "2|hostB|n2";  // another host acquired the lease
     r.server.epoch = "2|hostB|n2";
-    for (int i = 0; i < 4; ++i) r.sink->emit(mk(id_of(i)));
+    for (int i = 0; i < 4; ++i)
+        r.sink->emit(mk(id_of(i)));
     r.advance(std::chrono::seconds(15));
     CHECK(r.sink->status().oldest_record_age_s == 15);
     r.sink->pump();
@@ -1670,11 +1722,13 @@ TEST_CASE("redis sink: Fenced discards every stamp, and writes dropped afterward
     CHECK(r.sink->status().oldest_record_age_s == 0);
 }
 
-TEST_CASE("redis sink: a Failed sink keeps the stamp of the older held write when the newer queued one is discarded", "[unit][sink]") {
+TEST_CASE("redis sink: a Failed sink keeps the stamp of the older held write when the newer queued one is discarded",
+          "[unit][sink]") {
     Rig r;
-    r.sink->checkpoint(CheckpointKind::Finalized, 50);  // stamped at t0; finalized with no safe cursor: ckpt.lua refuses (I2)
+    r.sink->checkpoint(CheckpointKind::Finalized,
+                       50);  // stamped at t0; finalized with no safe cursor: ckpt.lua refuses (I2)
     r.advance(std::chrono::seconds(20));
-    r.sink->emit(mk("after"));                          // stamped at t0 + 20 s, stays queued behind the barrier
+    r.sink->emit(mk("after"));  // stamped at t0 + 20 s, stays queued behind the barrier
     r.advance(std::chrono::seconds(10));
     CHECK(r.sink->status().oldest_record_age_s == 30);
 
@@ -1690,7 +1744,8 @@ TEST_CASE("redis sink: a Failed sink keeps the stamp of the older held write whe
     CHECK(r.sink->status().oldest_record_age_s == 35);  // still the held write's age, not the discarded one's (15 s)
 }
 
-TEST_CASE("redis sink: Fenced with pending writes in the held batch, spill and queue leaves no stamp behind", "[unit][sink]") {
+TEST_CASE("redis sink: Fenced with pending writes in the held batch, spill and queue leaves no stamp behind",
+          "[unit][sink]") {
     RigCfg cfg;
     cfg.max_batch = 1;
     Rig r(cfg);
@@ -1713,7 +1768,8 @@ TEST_CASE("redis sink: Fenced with pending writes in the held batch, spill and q
     CHECK(r.sink->status().oldest_record_age_s == 0);
 }
 
-TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and anything else is refused", "[unit][sink]") {
+TEST_CASE("lease token: the epoch n and the host are read from n|host|nonce, and anything else is refused",
+          "[unit][sink]") {
     CHECK(lease_token_epoch("6|hostA|abc123") == 6);
     CHECK(lease_token_host("6|hostA|abc123") == "hostA");
     CHECK(lease_token_host("12|rack|3|node|abc") == "rack|3|node");  // a host id may contain '|'
@@ -1785,7 +1841,8 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
                         } else {
                             auto it = reverted_safe.begin();
                             std::advance(it, static_cast<std::ptrdiff_t>(rng() % reverted_safe.size()));
-                            r.sink->emit(mk(it->first, EventType::Revert, std::nullopt, it->second, StreamKind::Events));
+                            r.sink->emit(
+                                mk(it->first, EventType::Revert, std::nullopt, it->second, StreamKind::Events));
                         }
                         ++dup_attempts;
                     } else if (roll < 75) {
@@ -1810,12 +1867,16 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
                     r.sink->checkpoint(CheckpointKind::Finalized, final_ckpt);
                     r.sink->final_trim(final_ckpt);
                     for (auto it = active_safe.begin(); it != active_safe.end();) {
-                        if (it->second <= final_ckpt) it = active_safe.erase(it);
-                        else ++it;
+                        if (it->second <= final_ckpt)
+                            it = active_safe.erase(it);
+                        else
+                            ++it;
                     }
                     for (auto it = reverted_safe.begin(); it != reverted_safe.end();) {
-                        if (it->second <= final_ckpt) it = reverted_safe.erase(it);
-                        else ++it;
+                        if (it->second <= final_ckpt)
+                            it = reverted_safe.erase(it);
+                        else
+                            ++it;
                     }
                 }
             } else {
@@ -1831,7 +1892,8 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
                     if (rel.has_value()) {
                         ++barrier_reads_succeeded;
                         std::map<std::string, std::uint64_t> got;
-                        for (const auto& entry : *rel) got[entry.event_id] = entry.block_number;
+                        for (const auto& entry : *rel)
+                            got[entry.event_id] = entry.block_number;
                         CHECK(got == active_safe);
                     }
                 }
@@ -1854,7 +1916,8 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
 
             r.advance(milliseconds(100 + (rng() % 901)));
             const std::size_t pumps = 1 + (rng() % 3);
-            for (std::size_t p = 0; p < pumps; ++p) r.sink->pump();
+            for (std::size_t p = 0; p < pumps; ++p)
+                r.sink->pump();
 
             REQUIRE(r.sink->mode() != SinkMode::Failed);
             REQUIRE(r.sink->mode() != SinkMode::Fenced);
@@ -1880,7 +1943,8 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
             const auto types = r.server.types_of(StreamKind::Events, id);
             REQUIRE_FALSE(types.empty());
             CHECK(types.front() == "log");
-            for (std::size_t i = 1; i < types.size(); ++i) CHECK(types[i] != types[i - 1]);
+            for (std::size_t i = 1; i < types.size(); ++i)
+                CHECK(types[i] != types[i - 1]);
             CHECK(types.back() == evml::pipeline::to_string(want_type));
         }
         for (const auto& [id, want_type] : expected_registry) {
@@ -1905,7 +1969,8 @@ TEST_CASE("redis sink monkey: randomized outages partial acks script flushes and
         const auto final_rel_read = *await_with_pump(*r.sink, r.sink->released_range(0, safe_ckpt + 10));
         REQUIRE(final_rel_read.has_value());
         std::map<std::string, std::uint64_t> rel_map;
-        for (const auto& e : *final_rel_read) rel_map[e.event_id] = e.block_number;
+        for (const auto& e : *final_rel_read)
+            rel_map[e.event_id] = e.block_number;
         CHECK(rel_map == active_safe);
     }
 
@@ -1976,7 +2041,8 @@ TEST_CASE("redis sink: emit_fast drops on entry when not Connected or when satur
 
         r.data->down = false;
         r.data->faults.push_back(Fault{Fault::Kind::ThrowBefore});  // keep c1 in held_ so mode enters Replaying
-        r.sink->pump();  // try_reconnect -> Replaying, then send_held throws -> back to Degraded; let's reconnect cleanly
+        r.sink
+            ->pump();  // try_reconnect -> Replaying, then send_held throws -> back to Degraded; let's reconnect cleanly
         r.data->faults.clear();
         r.sink->pump();  // try_reconnect -> Replaying (held_ has c1, spill_ has c2)
 
@@ -2042,8 +2108,7 @@ TEST_CASE("redis sink: FastEmitItem in held_ or queue_ is discarded on outage or
     }
 }
 
-TEST_CASE("redis sink: FastEmitItem in suffix after failed prefix item is retired single-shot",
-          "[unit][sink]") {
+TEST_CASE("redis sink: FastEmitItem in suffix after failed prefix item is retired single-shot", "[unit][sink]") {
     SECTION("mixed pipeline [EmitItem, FastEmitItem] where prefix gets NoScript or Transient and suffix succeeds") {
         {
             Rig r;
@@ -2107,7 +2172,7 @@ TEST_CASE("redis sink: FastEmitItem in suffix after failed prefix item is retire
 }
 
 TEST_CASE("redis sink: runtime 300 s tenancy check increments tenancy_violations_total without fencing or degrading",
-          "[unit][sink]") {
+          "[unit][sink][redis_sink]") {
     Rig r;
     CHECK(r.sink->status().tenancy_violations_total == 0);
     CHECK(r.server.tenancy_reads == 0);
@@ -2119,7 +2184,8 @@ TEST_CASE("redis sink: runtime 300 s tenancy check increments tenancy_violations
     CHECK(r.sink->status().tenancy_violations_total == 0);
     CHECK(r.sink->mode() == SinkMode::Connected);
 
-    // Inject foreign key prefix "mds" and advance another 300 s -> increments tenancy_violations_total, mode stays Connected
+    // Inject foreign key prefix "mds" and advance another 300 s -> increments tenancy_violations_total, mode stays
+    // Connected
     r.server.tenancy_facts.foreign_key_prefixes = {"mds"};
     r.elapsed += milliseconds(300000);
     CHECK(r.sink->pump());
@@ -2128,7 +2194,8 @@ TEST_CASE("redis sink: runtime 300 s tenancy check increments tenancy_violations
     CHECK(r.sink->mode() == SinkMode::Connected);
 }
 
-TEST_CASE("lease: try_acquire_lease_result and try_release_lease return ConnError on malformed replies", "[unit][sink]") {
+TEST_CASE("lease: try_acquire_lease and try_release_lease return ConnError on malformed replies",
+          "[unit][sink][lease]") {
     struct ReplyConn : RedisConn {
         CallOutcome reply{ScriptOk{"GARBAGE"}};
         void load_scripts() override {}
@@ -2144,13 +2211,13 @@ TEST_CASE("lease: try_acquire_lease_result and try_release_lease return ConnErro
 
     // Malformed acquire reply (missing newline) -> ConnError
     conn.reply = ScriptOk{"no-newline-token"};
-    const auto acq_bad = try_acquire_lease_result(conn, keys, "hostA", "n1", 15000);
+    const auto acq_bad = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
     REQUIRE(acq_bad.has_error());
     CHECK_THAT(acq_bad.error().what(), ContainsSubstring("lease acquire: unexpected reply missing newline"));
 
     // Valid acquire reply -> LeaseGrant
     conn.reply = ScriptOk{"2|hostA|n1\n1|hostB|n0"};
-    const auto acq_ok = try_acquire_lease_result(conn, keys, "hostA", "n1", 15000);
+    const auto acq_ok = try_acquire_lease(conn, keys, "hostA", "n1", 15000);
     REQUIRE(acq_ok.has_value());
     REQUIRE(acq_ok->has_value());
     CHECK((*acq_ok)->token == "2|hostA|n1");

@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "provider/provider_book.hpp"
+
+#include <catch2/catch_test_macros.hpp>
 
 using namespace evml::provider;
 using evml::rpc::FailKind;
@@ -8,7 +8,9 @@ using namespace std::chrono_literals;
 
 namespace {
 const TimePoint T0{};  // fake clock origin
-TimePoint at(std::chrono::seconds s) { return T0 + s; }
+TimePoint at(std::chrono::seconds s) {
+    return T0 + s;
+}
 
 ProviderBook book() {
     // WS: quicknode (preferred) -> infura.  getLogs: infura -> alchemy -> ankr -> public -> quicknode.
@@ -16,7 +18,8 @@ ProviderBook book() {
 }
 
 void fail_n(ProviderBook& b, const char* name, int n, TimePoint now, FailKind k = FailKind::Retry) {
-    for (int i = 0; i < n; ++i) b.on_failure(name, k, std::nullopt, now);
+    for (int i = 0; i < n; ++i)
+        b.on_failure(name, k, std::nullopt, now);
 }
 }  // namespace
 
@@ -96,7 +99,7 @@ TEST_CASE("book: AuthFatal -> Disabled for 10 min; ConfigFatal is permanent (sce
     REQUIRE(f.has_value());
     CHECK(f->to == State::Fatal);
     CHECK_FALSE(b.probe_due("public", at(100000s)));
-    CHECK_FALSE(b.on_success("public", at(1s)).has_value());           // cannot be revived
+    CHECK_FALSE(b.on_success("public", at(1s)).has_value());  // cannot be revived
     CHECK_FALSE(b.on_probe_result("public", true, at(1s)).has_value());
     CHECK_FALSE(b.usable("public", at(100000s)));
 }
@@ -120,7 +123,8 @@ TEST_CASE("book: RateLimited keeps the provider Up but unusable until Retry-Afte
 
 TEST_CASE("book: RangeTooLarge is not a provider failure") {
     auto b = book();
-    for (int i = 0; i < 10; ++i) CHECK_FALSE(b.on_failure("public", FailKind::RangeTooLarge, std::nullopt, at(0s)).has_value());
+    for (int i = 0; i < 10; ++i)
+        CHECK_FALSE(b.on_failure("public", FailKind::RangeTooLarge, std::nullopt, at(0s)).has_value());
     CHECK(b.state("public").state == State::Up);
     CHECK(b.state("public").consecutive_failures == 0);
 }

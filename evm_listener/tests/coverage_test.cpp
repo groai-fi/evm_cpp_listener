@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
+#include "pipeline/coverage.hpp"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 
 #include "base_config.hpp"
-#include "pipeline/coverage.hpp"
 
 using namespace evml::pipeline;
 using namespace evml::test;
@@ -43,7 +43,7 @@ TEST_CASE("coverage: a new contract whose history lies below C_s is reported by 
 
 TEST_CASE("coverage: a new contract that starts above C_s, or at the gate, needs nothing", "[unit][coverage]") {
     const auto cfg = load_base_config();
-    CHECK(uncovered_contracts(cfg, manifest_without(cfg, 1), 52059999).empty());  // C_s below its start
+    CHECK(uncovered_contracts(cfg, manifest_without(cfg, 1), 52059999).empty());     // C_s below its start
     CHECK(uncovered_contracts(cfg, manifest_without(cfg, 3), kAfterStart).empty());  // registry contract at the gate
     CHECK(uncovered_contracts(cfg, manifest_without(cfg, 4), kAfterStart).empty());
 }
@@ -101,6 +101,7 @@ TEST_CASE("coverage: the first-run cursor is the block before the earliest start
 
 TEST_CASE("coverage: contracts at the gate start at the gate when nothing else is earlier", "[unit][coverage]") {
     auto cfg = load_base_config();
-    for (auto& c : cfg.contracts) c.start_block = std::nullopt;
+    for (auto& c : cfg.contracts)
+        c.start_block = std::nullopt;
     CHECK(initial_cursor(cfg, 60000000) == 60000000);
 }

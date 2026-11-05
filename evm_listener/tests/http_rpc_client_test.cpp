@@ -1,11 +1,11 @@
-#include <catch2/catch_test_macros.hpp>
+#include "rpc/http_rpc_client.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 
 #include "mock_http_server.hpp"
 #include "rpc/blocking_http.hpp"
-#include "rpc/http_rpc_client.hpp"
 #include "test_util.hpp"
 
 using namespace evml::rpc;
@@ -85,7 +85,8 @@ TEST_CASE("http client: QuickNode 413/-32615 body classifies as RangeTooLarge(5)
 TEST_CASE("http client: 429 with Retry-After carries the hint", "[integration]") {
     net::io_context ioc;
     MockHttpServer srv(ioc, [](const MockRequest&) {
-        return MockReply{.status = 429, .body = R"({"code":429,"message":"too many requests"})", .headers = {{"Retry-After", "3"}}};
+        return MockReply{
+            .status = 429, .body = R"({"code":429,"message":"too many requests"})", .headers = {{"Retry-After", "3"}}};
     });
     HttpRpcClient c(ioc.get_executor(), cfg(srv));
 
@@ -114,7 +115,8 @@ TEST_CASE("http client: Connection: close is honoured (reconnects per request)",
     MockHttpServer srv(ioc, [](const MockRequest&) { return MockReply{.body = kOk, .connection_close = true}; });
     HttpRpcClient c(ioc.get_executor(), cfg(srv));
 
-    for (int i = 0; i < 3; ++i) CHECK(run_sync(ioc, c.call(kReq)).status == 200);
+    for (int i = 0; i < 3; ++i)
+        CHECK(run_sync(ioc, c.call(kReq)).status == 200);
     CHECK(srv.connections() == 3);
 }
 
@@ -130,7 +132,8 @@ TEST_CASE("http client: connection killed while idle is replaced and the request
     CHECK(srv.connections() == 2);
 }
 
-TEST_CASE("http client: unresponsive server -> timeout within the deadline, never retried, then recovers", "[integration]") {
+TEST_CASE("http client: unresponsive server -> timeout within the deadline, never retried, then recovers",
+          "[integration]") {
     net::io_context ioc;
     bool hang = true;
     MockHttpServer srv(ioc, [&](const MockRequest&) { return MockReply{.body = kOk, .hang = hang}; });
@@ -182,8 +185,10 @@ TEST_CASE("http client: connection refused is a TransportError", "[integration]"
 
 TEST_CASE("http client: invalid URL schemes are rejected at construction", "[integration]") {
     net::io_context ioc;
-    CHECK_THROWS_AS(HttpRpcClient(ioc.get_executor(), HttpRpcClientConfig{"x", "ftp://h/", kUa, 1000ms}), TransportError);
-    CHECK_THROWS_AS(HttpRpcClient(ioc.get_executor(), HttpRpcClientConfig{"x", "wss://h/", kUa, 1000ms}), TransportError);
+    CHECK_THROWS_AS(HttpRpcClient(ioc.get_executor(), HttpRpcClientConfig{"x", "ftp://h/", kUa, 1000ms}),
+                    TransportError);
+    CHECK_THROWS_AS(HttpRpcClient(ioc.get_executor(), HttpRpcClientConfig{"x", "wss://h/", kUa, 1000ms}),
+                    TransportError);
 }
 
 TEST_CASE("parse_url: host header and kinds") {

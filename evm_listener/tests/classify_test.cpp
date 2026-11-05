@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
+#include "rpc/classify.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
 
-#include "rpc/classify.hpp"
 #include "rpc/codec.hpp"
 
 using namespace evml::rpc;

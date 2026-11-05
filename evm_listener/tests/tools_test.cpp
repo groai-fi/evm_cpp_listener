@@ -1,5 +1,10 @@
 #include "app/tools.hpp"
 
+#include <sw/redis++/redis++.h>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/json.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -9,11 +14,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/asio/io_context.hpp>
-#include <boost/json.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include <sw/redis++/redis++.h>
 
 #include "base_config.hpp"
 #include "core/env.hpp"
@@ -93,9 +93,9 @@ std::string log_to_json(const evml::rpc::Log& l) {
     topics += "]";
     return R"({"address":")" + l.address.to_hex() + R"(","topics":)" + topics + R"(,"data":")" + l.data +
            R"(","blockNumber":")" + evml::core::to_hex_u64(l.block_number) + R"(","blockHash":")" +
-           l.block_hash.to_hex() + R"(","transactionHash":")" + l.tx_hash.to_hex() +
-           R"(","transactionIndex":")" + evml::core::to_hex_u64(l.tx_index) + R"(","logIndex":")" +
-           evml::core::to_hex_u64(l.log_index) + R"(","removed":false})";
+           l.block_hash.to_hex() + R"(","transactionHash":")" + l.tx_hash.to_hex() + R"(","transactionIndex":")" +
+           evml::core::to_hex_u64(l.tx_index) + R"(","logIndex":")" + evml::core::to_hex_u64(l.log_index) +
+           R"(","removed":false})";
 }
 
 void xadd_event(sw::redis::Redis& r, const evml::sink::Keys& keys, const evml::pipeline::Event& ev) {
@@ -125,9 +125,9 @@ TEST_CASE("tools: --audit-stream exits 0 on a clean stream and picks an independ
     const evml::sink::Keys keys{shard};
 
     const auto base_cfg = evml::test::load_base_config();
-    const auto& safe_pool = base_cfg.contracts.at(0);     // eurc_usdc_cl1_pool (safe, events)
-    const auto& final_gauge = base_cfg.contracts.at(2);   // eurc_usdc_cl50_gauge (finalized, events)
-    const auto& reg_factory = base_cfg.contracts.at(3);   // aero_cl_factory (finalized, registry)
+    const auto& safe_pool = base_cfg.contracts.at(0);    // eurc_usdc_cl1_pool (safe, events)
+    const auto& final_gauge = base_cfg.contracts.at(2);  // eurc_usdc_cl50_gauge (finalized, events)
+    const auto& reg_factory = base_cfg.contracts.at(3);  // aero_cl_factory (finalized, registry)
 
     // Canonical logs in [52060000, 52060100]:
     //  - log_a at 52060010 (safe_pool)
@@ -167,19 +167,36 @@ TEST_CASE("tools: --audit-stream exits 0 on a clean stream and picks an independ
     admin.hset(keys.ckpt(), std::make_pair("finalized", "52060100"));
 
     // Populate Redis streams with dominant first_source = "infura".
-    xadd_event(admin, keys, evml::pipeline::make_event(log_a, cfg, ectx, evml::pipeline::EventType::Log, 1000, "infura", 1000, 1000));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_retracted, cfg, ectx, evml::pipeline::EventType::Log, 1005, "infura", 1005, 1005));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_retracted, cfg, ectx, evml::pipeline::EventType::Revert, 1005, "infura", 1005, 1006));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1010));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Revert, 1010, "infura", 1010, 1011));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1012));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_c, cfg, ectx, evml::pipeline::EventType::Log, 1020, "infura", 1020, 1020));
-    xadd_event(admin, keys, evml::pipeline::make_event(log_d, cfg, ectx, evml::pipeline::EventType::Log, 1030, "infura", 1030, 1030));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_a, cfg, ectx, evml::pipeline::EventType::Log, 1000, "infura", 1000, 1000));
+    xadd_event(admin, keys,
+               evml::pipeline::make_event(log_retracted, cfg, ectx, evml::pipeline::EventType::Log, 1005, "infura",
+                                          1005, 1005));
+    xadd_event(admin, keys,
+               evml::pipeline::make_event(log_retracted, cfg, ectx, evml::pipeline::EventType::Revert, 1005, "infura",
+                                          1005, 1006));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1010));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Revert, 1010, "infura", 1010, 1011));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_b, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1012));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_c, cfg, ectx, evml::pipeline::EventType::Log, 1020, "infura", 1020, 1020));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_d, cfg, ectx, evml::pipeline::EventType::Log, 1030, "infura", 1030, 1030));
 
     evml::app::AuditReport rep;
     std::atomic<int> rc{-1};
     std::thread t([&] { rc = evml::app::audit_stream(cfg, 52060000, 52060100, &rep); });
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return rc.load() != -1; }, 10s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return rc.load() != -1; }, 10s));
     t.join();
 
     CHECK(rc.load() == evml::app::kExitOk);
@@ -196,8 +213,9 @@ TEST_CASE("tools: --audit-stream exits 0 on a clean stream and picks an independ
     CHECK(ankr_getlogs == 1);
 }
 
-TEST_CASE("tools: --audit-stream detects missing, phantom, dup_live, field_mismatch, and order_violation defects and exits 1",
-          "[integration][tools]") {
+TEST_CASE(
+    "tools: --audit-stream detects missing, phantom, dup_live, field_mismatch, and order_violation defects and exits 1",
+    "[integration][tools]") {
     const std::string shard = "audit_defects_" + random_tag();
     ShardCleanup cleanup{shard};
     auto admin = make_admin();
@@ -236,22 +254,29 @@ TEST_CASE("tools: --audit-stream detects missing, phantom, dup_live, field_misma
     admin.hset(keys.ckpt(), std::make_pair("finalized", "52060100"));
 
     // 1. Phantom entry (in Redis, not canonical).
-    xadd_event(admin, keys, evml::pipeline::make_event(log_phantom, cfg, ectx, evml::pipeline::EventType::Log, 1000, "infura", 1000, 1000));
+    xadd_event(
+        admin, keys,
+        evml::pipeline::make_event(log_phantom, cfg, ectx, evml::pipeline::EventType::Log, 1000, "infura", 1000, 1000));
     // 2. Duplicate live entry (log -> log without revert).
-    const auto ev_dup = evml::pipeline::make_event(log_dup, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1010);
+    const auto ev_dup =
+        evml::pipeline::make_event(log_dup, cfg, ectx, evml::pipeline::EventType::Log, 1010, "infura", 1010, 1010);
     xadd_event(admin, keys, ev_dup);
     xadd_event(admin, keys, ev_dup);
     // 3. Field mismatch (corrupted data payload in Redis).
-    auto ev_mismatch = evml::pipeline::make_event(log_mismatch, cfg, ectx, evml::pipeline::EventType::Log, 1020, "infura", 1020, 1020);
+    auto ev_mismatch =
+        evml::pipeline::make_event(log_mismatch, cfg, ectx, evml::pipeline::EventType::Log, 1020, "infura", 1020, 1020);
     ev_mismatch.data = "0xbbbb";
     xadd_event(admin, keys, ev_mismatch);
     // 4. Out-of-order normal-path safe log (block 52060025 appended after block 52060040).
-    xadd_event(admin, keys, evml::pipeline::make_event(log_late_order, cfg, ectx, evml::pipeline::EventType::Log, 1015, "infura", 1015, 1025));
+    xadd_event(admin, keys,
+               evml::pipeline::make_event(log_late_order, cfg, ectx, evml::pipeline::EventType::Log, 1015, "infura",
+                                          1015, 1025));
 
     evml::app::AuditReport rep;
     std::atomic<int> rc{-1};
     std::thread t([&] { rc = evml::app::audit_stream(cfg, 52060000, 52060100, &rep); });
-    REQUIRE(evml::test::run_until(mock_ioc, [&] { return rc.load() != -1; }, 10s));
+    REQUIRE(evml::test::run_until(
+        mock_ioc, [&] { return rc.load() != -1; }, 10s));
     t.join();
 
     CHECK(rc.load() == evml::app::kExitFailure);
@@ -281,4 +306,98 @@ TEST_CASE("tools: --audit-stream exits 2 when from_block > to_block or to_block 
     admin.hset(keys.ckpt(), std::make_pair("safe", "52060200"));
     admin.hset(keys.ckpt(), std::make_pair("finalized", "52060100"));
     CHECK(evml::app::audit_stream(cfg, 52060000, 52060101) == evml::app::kExitUsage);
+}
+
+TEST_CASE("tools: probe_transport tears down cleanly without reference cycles", "[tools]") {
+    auto cfg = evml::test::load_base_config();
+    cfg.ws_chain = {evml::core::Provider{"infura", "ws://127.0.0.1:9", "", 500}};
+    cfg.redundancy.ws_order = {"infura"};
+    cfg.getlogs_chain = {evml::core::Provider{"infura", "", "http://127.0.0.1:9", 500}};
+    cfg.redundancy.getlogs_order = {"infura"};
+
+    CHECK(evml::app::probe_transport(cfg, 0) == evml::app::kExitFailure);
+}
+
+TEST_CASE("tools: check_config_online and find_deploy_block handle Result-based RPC calls and errors", "[tools]") {
+    net::io_context mock_ioc;
+    bool fail_rpc = false;
+    evml::test::MockHttpServer srv(mock_ioc, [&](const evml::test::MockRequest& r) {
+        const auto v = json::parse(r.body).as_object();
+        const auto id = static_cast<std::uint64_t>(v.at("id").as_int64());
+        const std::string method(v.at("method").as_string());
+        if (fail_rpc) {
+            return evml::test::MockReply{
+                .status = 503,
+                .body = R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
+                        R"(,"error":{"code":-32000,"message":"temporarily unavailable"}})",
+            };
+        }
+        if (method == "eth_chainId") {
+            return evml::test::MockReply{.body = rpc_ok(id, R"("0x2105")")};
+        }
+        if (method == "eth_blockNumber") {
+            return evml::test::MockReply{.body = rpc_ok(id, R"("0x31a5ba0")")};
+        }
+        if (method == "eth_getCode") {
+            const auto params = v.at("params").as_array();
+            const std::string blk_hex(params.at(1).as_string());
+            std::uint64_t blk = 0;
+            if (blk_hex == "latest") {
+                blk = 0x31a5ba0;
+            } else {
+                blk = std::stoull(blk_hex.substr(2), nullptr, 16);
+            }
+            // Contract deployed at block 100.
+            return evml::test::MockReply{.body = rpc_ok(id, blk >= 100 ? R"("0x60806040")" : R"("0x")")};
+        }
+        return evml::test::MockReply{.status = 400, .body = "unexpected method"};
+    });
+
+    auto cfg = evml::test::load_base_config();
+    cfg.ws_chain = {evml::core::Provider{"infura", "ws://127.0.0.1:9", srv.url(), 500}};
+    cfg.redundancy.ws_order = {"infura"};
+    cfg.getlogs_chain = {evml::core::Provider{"infura", "", srv.url(), 500}};
+    cfg.redundancy.getlogs_order = {"infura"};
+
+    {
+        std::atomic<int> rc{-1};
+        std::thread t([&] { rc = evml::app::check_config_online(cfg); });
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return rc.load() != -1; }, 5s));
+        t.join();
+        CHECK(rc.load() == evml::app::kExitOk);
+    }
+
+    {
+        std::atomic<std::uint64_t> deployed{0};
+        std::thread t([&] { deployed = evml::app::find_deploy_block(cfg, cfg.contracts.at(0).address); });
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return deployed.load() != 0; }, 5s));
+        t.join();
+        CHECK(deployed.load() == 100);
+    }
+
+    fail_rpc = true;
+    {
+        std::atomic<int> rc{-1};
+        std::thread t([&] { rc = evml::app::check_config_online(cfg); });
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return rc.load() != -1; }, 5s));
+        t.join();
+        CHECK(rc.load() == evml::app::kExitFailure);
+    }
+    {
+        std::atomic<bool> threw{false};
+        std::thread t([&] {
+            try {
+                (void)evml::app::find_deploy_block(cfg, cfg.contracts.at(0).address);
+            } catch (const std::runtime_error&) {
+                threw = true;
+            }
+        });
+        REQUIRE(evml::test::run_until(
+            mock_ioc, [&] { return threw.load(); }, 5s));
+        t.join();
+        CHECK(threw.load());
+    }
 }

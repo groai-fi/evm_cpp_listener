@@ -1,18 +1,17 @@
+#include "sink/spill.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
 #include <filesystem>
 #include <fstream>
 #include <random>
 #include <string>
 #include <vector>
 
-#include "sink/spill.hpp"
-
+using Catch::Matchers::ContainsSubstring;
 using evml::sink::Spill;
 using evml::sink::SpillError;
 using evml::sink::SpillRecord;
-using Catch::Matchers::ContainsSubstring;
 namespace fs = std::filesystem;
 
 namespace {
@@ -100,7 +99,8 @@ TEST_CASE("spill: segments roll at the size limit and are deleted once consumed"
     TempDir t;
     Spill s(t.path, 1 << 20, /*segment_bytes=*/64);
     const std::string payload(20, 'p');  // 29 bytes on disk: two per 64-byte segment
-    for (int i = 0; i < 6; ++i) s.append(1, payload + std::to_string(i));
+    for (int i = 0; i < 6; ++i)
+        s.append(1, payload + std::to_string(i));
     CHECK(segment_files(t.path) == 3);
 
     for (int i = 0; i < 6; ++i) {
@@ -203,7 +203,8 @@ TEST_CASE("spill: reaching max_bytes is saturated, draining clears it, and appen
 TEST_CASE("spill: discard_all reports the dropped records, removes the files and stays usable", "[unit][spill]") {
     TempDir t;
     Spill s(t.path, 1 << 20, /*segment_bytes=*/64);
-    for (int i = 0; i < 5; ++i) s.append(1, std::string(20, 'x'));
+    for (int i = 0; i < 5; ++i)
+        s.append(1, std::string(20, 'x'));
     CHECK(segment_files(t.path) >= 2);
 
     CHECK(s.discard_all() == 5);

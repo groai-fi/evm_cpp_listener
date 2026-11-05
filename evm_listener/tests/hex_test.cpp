@@ -1,10 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "core/hex.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <unordered_set>
 
 #include "core/error.hpp"
-#include "core/hex.hpp"
 
 using namespace evml::core;
 
@@ -43,10 +43,10 @@ TEST_CASE("Address20 / Hash32 parse strictly and round-trip lowercase", "[unit][
     const auto h = Hash32::from_hex("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
     CHECK(h.to_hex() == "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
-    CHECK_THROWS_AS(Address20::from_hex("c5e51044eb7318950b1afb044fccfb25782c48c1"), DecodeError);   // no 0x
-    CHECK_THROWS_AS(Address20::from_hex("0xc5e51044eb7318950b1afb044fccfb25782c48"), DecodeError);   // short
+    CHECK_THROWS_AS(Address20::from_hex("c5e51044eb7318950b1afb044fccfb25782c48c1"), DecodeError);      // no 0x
+    CHECK_THROWS_AS(Address20::from_hex("0xc5e51044eb7318950b1afb044fccfb25782c48"), DecodeError);      // short
     CHECK_THROWS_AS(Address20::from_hex("0xc5e51044eb7318950b1afb044fccfb25782c48c1ff"), DecodeError);  // long
-    CHECK_THROWS_AS(Address20::from_hex("0xg5e51044eb7318950b1afb044fccfb25782c48c1"), DecodeError);  // bad digit
+    CHECK_THROWS_AS(Address20::from_hex("0xg5e51044eb7318950b1afb044fccfb25782c48c1"), DecodeError);    // bad digit
     CHECK_THROWS_AS(Hash32::from_hex("0x00"), DecodeError);
 }
 

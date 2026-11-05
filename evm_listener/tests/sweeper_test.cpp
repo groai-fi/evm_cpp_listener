@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
+#include "pipeline/sweeper.hpp"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <memory>
 
-#include "pipeline/sweeper.hpp"
 #include "sweep_fakes.hpp"
 
 using namespace evml::pipeline;
@@ -12,9 +12,9 @@ using evml::core::Finality;
 
 namespace {
 
-constexpr std::size_t kSafeA = 0;   // cl1 pool    (safe)
-constexpr std::size_t kSafeB = 1;   // cl50 pool   (safe)
-constexpr std::size_t kGauge = 2;   // cl50 gauge  (finalized)
+constexpr std::size_t kSafeA = 0;  // cl1 pool    (safe)
+constexpr std::size_t kSafeB = 1;  // cl50 pool   (safe)
+constexpr std::size_t kGauge = 2;  // cl50 gauge  (finalized)
 
 struct Rig {
     evml::core::Config cfg;
@@ -23,8 +23,9 @@ struct Rig {
     std::unique_ptr<Sweeper> sw;
 
     explicit Rig(evml::core::Config c = load_base_config(), SweeperOptions opt = {}) : cfg(std::move(c)) {
-        sw = std::make_unique<Sweeper>(cfg, EventContext{"base_eurc_usdc", "test-host", "test"}, src, sink,
-                                       [] { return std::uint64_t{1000}; }, opt);
+        sw = std::make_unique<Sweeper>(
+            cfg, EventContext{"base_eurc_usdc", "test-host", "test"}, src, sink, [] { return std::uint64_t{1000}; },
+            opt);
         sw->set_cursors(100, 100);
     }
     void add(const evml::rpc::Log& l, std::uint8_t canonical_hash) {
@@ -174,7 +175,8 @@ TEST_CASE("sweep: a provider that keeps answering badly stalls the sweep after m
     out.ok = true;
     out.provider = "infura";
     out.logs = {mklog(r.cfg, kSafeA, 999, 1, 0)};
-    for (int i = 0; i < 3; ++i) r.src.overrides.push_back(out);
+    for (int i = 0; i < 3; ++i)
+        r.src.overrides.push_back(out);
 
     const auto res = run(r.sw->safe_step(110));
     CHECK(res.status == StepStatus::Stalled);
@@ -475,7 +477,8 @@ TEST_CASE("reverify: a window that is still canonical changes nothing", "[unit][
     CHECK(r.sw->stats().matched == 1);
 }
 
-TEST_CASE("reverify: a reorg below the safe tag is reverted and replaced at once, C_s rewinds, C_f stays", "[unit][reverify]") {
+TEST_CASE("reverify: a reorg below the safe tag is reverted and replaced at once, C_s rewinds, C_f stays",
+          "[unit][reverify]") {
     Rig r;
     r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
     REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
@@ -503,7 +506,8 @@ TEST_CASE("reverify: a reorg below the safe tag is reverted and replaced at once
     CHECK(r.sw->stats().reverified_new == 1);
 }
 
-TEST_CASE("reverify: a block that flips A to B and back to A keeps alternating log and revert (I6)", "[unit][reverify]") {
+TEST_CASE("reverify: a block that flips A to B and back to A keeps alternating log and revert (I6)",
+          "[unit][reverify]") {
     Rig r;
     r.add(mklog(r.cfg, kSafeA, 105, 1, 0), 1);
     REQUIRE(run(r.sw->safe_step(110)).status == StepStatus::Advanced);
@@ -540,7 +544,8 @@ TEST_CASE("reverify: a page that fails midway keeps the fork point for the next 
     r.src.limit = 100;  // pages of 100 blocks
     r.add(mklog(r.cfg, kSafeA, 150, 1, 0), 1);
     r.add(mklog(r.cfg, kSafeA, 250, 3, 0), 3);
-    for (int i = 0; i < 3; ++i) REQUIRE(run(r.sw->safe_step(400)).status == StepStatus::Advanced);
+    for (int i = 0; i < 3; ++i)
+        REQUIRE(run(r.sw->safe_step(400)).status == StepStatus::Advanced);
     REQUIRE(r.sw->c_s() == 400);
     REQUIRE(r.sink.released.size() == 2);
 
@@ -622,7 +627,8 @@ TEST_CASE("sweep: a sink that is not readable pauses the final step without fetc
     r.src.calls.clear();
 
     r.sink.readable_flag = false;
-    for (int i = 0; i < 3; ++i) CHECK(run(r.sw->final_step(108)).status == StepStatus::Paused);
+    for (int i = 0; i < 3; ++i)
+        CHECK(run(r.sw->final_step(108)).status == StepStatus::Paused);
     CHECK(r.src.calls.empty());  // no getLogs while the released set could not be read anyway
     CHECK(r.sw->c_f() == 100);
 
@@ -663,7 +669,8 @@ TEST_CASE("sweep: on_page fires once per advanced page with the in-scope logs on
     SweeperOptions opt;
     opt.on_page = [&pages](Finality kind, const BlockRange& range, const std::vector<evml::rpc::Log>& logs) {
         Page p{kind, range, {}};
-        for (const auto& l : logs) p.blocks.push_back(l.block_number);
+        for (const auto& l : logs)
+            p.blocks.push_back(l.block_number);
         pages.push_back(std::move(p));
     };
     Rig r(load_base_config(), opt);

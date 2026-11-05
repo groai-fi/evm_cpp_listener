@@ -1,26 +1,25 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include "ops/http_client.hpp"
 
 #include <algorithm>
+#include <boost/asio.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cctype>
 #include <chrono>
 #include <future>
 #include <stdexcept>
 #include <string>
 
-#include <boost/asio.hpp>
-
 #include "mock_http_server.hpp"
-#include "ops/http_client.hpp"
 #include "rpc/blocking_http.hpp"
 
+using Catch::Matchers::ContainsSubstring;
 using evml::ops::HttpClient;
 using evml::ops::HttpClientOptions;
 using evml::ops::HttpResponse;
 using evml::test::MockHttpServer;
 using evml::test::MockReply;
 using evml::test::MockRequest;
-using Catch::Matchers::ContainsSubstring;
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -63,7 +62,8 @@ std::string header_of(const MockRequest& r, const std::string& name) {
 
 }  // namespace
 
-TEST_CASE("http client: post_json sends method, JSON content type, custom header, user agent and body", "[ops_client][integration]") {
+TEST_CASE("http client: post_json sends method, JSON content type, custom header, user agent and body",
+          "[ops_client][integration]") {
     net::io_context ioc;
     MockRequest seen;
     MockHttpServer srv(ioc, [&](const MockRequest& r) {
@@ -104,7 +104,9 @@ TEST_CASE("http client: get sends no body and keeps the query string", "[ops_cli
 TEST_CASE("http client: a non-2xx answer is returned to the caller, not thrown", "[ops_client][integration]") {
     net::io_context ioc;
     int n = 0;
-    MockHttpServer srv(ioc, [&](const MockRequest&) { return ++n == 1 ? MockReply{500, "boom"} : MockReply{429, "slow down"}; });
+    MockHttpServer srv(ioc, [&](const MockRequest&) {
+        return ++n == 1 ? MockReply{500, "boom"} : MockReply{429, "slow down"};
+    });
     HttpClient client(ioc.get_executor());
     const auto a = run(ioc, client.post_json(srv.url(), "{}"));
     CHECK(a.status == 500);
@@ -122,7 +124,8 @@ TEST_CASE("http client: each request uses its own connection", "[ops_client][int
     CHECK(srv.connections() == 2);
 }
 
-TEST_CASE("http client: a server that never answers times out and the error hides the URL token", "[ops_client][integration]") {
+TEST_CASE("http client: a server that never answers times out and the error hides the URL token",
+          "[ops_client][integration]") {
     net::io_context ioc;
     MockHttpServer srv(ioc, [](const MockRequest&) {
         MockReply r;
@@ -149,7 +152,8 @@ TEST_CASE("http client: connection refused is a TransportError without the URL t
     CHECK(err.find(kSecret) == std::string::npos);
 }
 
-TEST_CASE("http client: https against a plain-HTTP port fails the TLS handshake without leaking the URL token", "[ops_client][integration]") {
+TEST_CASE("http client: https against a plain-HTTP port fails the TLS handshake without leaking the URL token",
+          "[ops_client][integration]") {
     net::io_context ioc;
     MockHttpServer srv(ioc, [](const MockRequest&) { return MockReply{200, "x"}; });
     const std::string plain = srv.url();  // http://127.0.0.1:<port>/
@@ -162,8 +166,9 @@ TEST_CASE("http client: https against a plain-HTTP port fails the TLS handshake 
 TEST_CASE("http client: bad URLs are TransportErrors with the secret redacted", "[ops_client]") {
     net::io_context ioc;
     HttpClient client(ioc.get_executor());
-    for (const std::string& url : {std::string("ftp://example.com/") + kSecret, std::string("http://user:") + kSecret + "@example.com/",
-                                  std::string("example.com/") + kSecret}) {
+    for (const std::string& url :
+         {std::string("ftp://example.com/") + kSecret, std::string("http://user:") + kSecret + "@example.com/",
+          std::string("example.com/") + kSecret}) {
         const std::string err = error_of(ioc, client.get(url));
         CHECK_FALSE(err.empty());
         CHECK(err.find(kSecret) == std::string::npos);
@@ -211,6 +216,7 @@ TEST_CASE("http client: headers that could break the request are rejected and ne
 
 TEST_CASE("http client: bad options are rejected", "[ops_client]") {
     net::io_context ioc;
-    CHECK_THROWS_AS(HttpClient(ioc.get_executor(), HttpClientOptions{.timeout = std::chrono::milliseconds(0)}), std::invalid_argument);
+    CHECK_THROWS_AS(HttpClient(ioc.get_executor(), HttpClientOptions{.timeout = std::chrono::milliseconds(0)}),
+                    std::invalid_argument);
     CHECK_THROWS_AS(HttpClient(ioc.get_executor(), HttpClientOptions{.max_response_bytes = 0}), std::invalid_argument);
 }

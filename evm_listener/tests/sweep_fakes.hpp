@@ -1,6 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 #include <cstdint>
 #include <deque>
 #include <future>
@@ -10,10 +13,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/use_future.hpp>
 
 #include "base_config.hpp"
 #include "pipeline/log_source.hpp"
@@ -42,7 +41,7 @@ inline std::string field(const pipeline::Emission& m, const std::string& key) {
 class MemorySink : public pipeline::Sink {
 public:
     bool saturated_flag{false};
-    bool unreadable{false};  // reads return nullopt, like a degraded or replaying sink (rev 6, A/C)
+    bool unreadable{false};    // reads return nullopt, like a degraded or replaying sink (rev 6, A/C)
     bool readable_flag{true};  // what readable() reports; false makes the sweeps skip their fetch (rev 6, 4d)
     std::vector<pipeline::Emission> emitted;
     std::vector<std::pair<pipeline::CheckpointKind, std::uint64_t>> checkpoints;
@@ -57,7 +56,8 @@ public:
 
     void emit(pipeline::Emission e) override {
         if (e.released_block) released[e.event_id] = pipeline::to_released_entry(e);
-        if (e.type == pipeline::EventType::Revert) released.erase(e.event_id);  // emit.lua: reverted = no longer released
+        if (e.type == pipeline::EventType::Revert)
+            released.erase(e.event_id);  // emit.lua: reverted = no longer released
         emitted.push_back(std::move(e));
     }
     void checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) override {
@@ -95,8 +95,8 @@ public:
     }
 
     std::size_t count(pipeline::EventType t) const {
-        return static_cast<std::size_t>(std::count_if(emitted.begin(), emitted.end(),
-                                                      [t](const pipeline::Emission& m) { return m.type == t; }));
+        return static_cast<std::size_t>(
+            std::count_if(emitted.begin(), emitted.end(), [t](const pipeline::Emission& m) { return m.type == t; }));
     }
 };
 
@@ -107,10 +107,10 @@ public:
     std::string provider{"infura"};
     std::vector<rpc::Log> logs;
     std::map<std::uint64_t, pipeline::BlockInfo> blocks;
-    std::optional<std::uint64_t> limit;     // blocks per request above which RangeTooLarge is returned
-    bool reject_multi_address{false};       // RangeTooLarge for any request naming more than one address
-    bool reject_all{false};                 // RangeTooLarge always (even for a single address)
-    bool corrupt_next_log_hash{false};      // G2 fault injection: flip one byte of the first log's block_hash
+    std::optional<std::uint64_t> limit;         // blocks per request above which RangeTooLarge is returned
+    bool reject_multi_address{false};           // RangeTooLarge for any request naming more than one address
+    bool reject_all{false};                     // RangeTooLarge always (even for a single address)
+    bool corrupt_next_log_hash{false};          // G2 fault injection: flip one byte of the first log's block_hash
     std::deque<pipeline::LogResult> overrides;  // consumed first, one per get_logs call
     std::set<std::uint64_t> unreadable_blocks;
     bool no_provider{false};

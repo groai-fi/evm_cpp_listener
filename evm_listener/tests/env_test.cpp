@@ -1,14 +1,14 @@
-#include <catch2/catch_test_macros.hpp>
+#include "core/env.hpp"
 
 #include <unistd.h>
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
-#include "core/env.hpp"
 #include "core/error.hpp"
 
 using namespace evml::core;
@@ -22,12 +22,13 @@ struct TempTree {
     std::vector<std::string> vars;
 
     TempTree() {
-        root = fs::temp_directory_path() / ("evml_env_test_" + std::to_string(::getpid()) + "_" +
-                                           std::to_string(counter()++));
+        root = fs::temp_directory_path() /
+               ("evml_env_test_" + std::to_string(::getpid()) + "_" + std::to_string(counter()++));
         fs::create_directories(root / "a" / "b");
     }
     ~TempTree() {
-        for (const auto& v : vars) unsetenv(v.c_str());
+        for (const auto& v : vars)
+            unsetenv(v.c_str());
         std::error_code ec;
         fs::remove_all(root, ec);
     }
@@ -113,14 +114,15 @@ TEST_CASE("redact masks path/query/userinfo but keeps scheme and host", "[unit][
     CHECK(env::redact("wss://base-mainnet.g.alchemy.com/v2/SECRETKEY") == "wss://base-mainnet.g.alchemy.com/****");
     CHECK(env::redact("https://base-mainnet.infura.io/v3/PROJECTID") == "https://base-mainnet.infura.io/****");
     CHECK(env::redact("https://rpc.ankr.com/base/KEY?x=1") == "https://rpc.ankr.com/****");
-    CHECK(env::redact("https://x.base-mainnet.quiknode.pro:8443/TOKEN/") == "https://x.base-mainnet.quiknode.pro:8443/****");
+    CHECK(env::redact("https://x.base-mainnet.quiknode.pro:8443/TOKEN/") ==
+          "https://x.base-mainnet.quiknode.pro:8443/****");
     CHECK(env::redact("https://user:pw@host.example/path") == "https://****@host.example/****");
     CHECK(env::redact("https://host.example?token=abc") == "https://host.example/****");
     CHECK(env::redact("https://mainnet.base.org") == "https://mainnet.base.org");  // nothing to hide
     CHECK(env::redact("not a url") == "<invalid-url>");
     CHECK(env::redact("https://") == "<invalid-url>");
-    for (const char* u : {"wss://h/v2/SECRETKEY", "https://h/v3/SECRETKEY", "https://h?k=SECRETKEY",
-                          "https://SECRETKEY@h/x"}) {
+    for (const char* u :
+         {"wss://h/v2/SECRETKEY", "https://h/v3/SECRETKEY", "https://h?k=SECRETKEY", "https://SECRETKEY@h/x"}) {
         CHECK(env::redact(u).find("SECRETKEY") == std::string::npos);
     }
 }

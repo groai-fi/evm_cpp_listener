@@ -1,11 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
+#include "ops/alerts.hpp"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <string>
 #include <vector>
-
-#include "ops/alerts.hpp"
 
 using namespace evml::ops;
 using namespace std::chrono_literals;
@@ -24,7 +23,8 @@ AlertThresholds thresholds() {
     return t;
 }
 
-// A healthy leader snapshot at kT0 + `at`: gates move forward with `at` so no stuck rule fires unless a test freezes them.
+// A healthy leader snapshot at kT0 + `at`: gates move forward with `at` so no stuck rule fires unless a test freezes
+// them.
 OpsSnapshot snap(std::chrono::seconds at, bool leader = true) {
     OpsSnapshot s;
     s.now = kT0 + at;
@@ -40,7 +40,8 @@ OpsSnapshot snap(std::chrono::seconds at, bool leader = true) {
 
 std::vector<std::string> titles(const std::vector<Alert>& a) {
     std::vector<std::string> t;
-    for (const auto& x : a) t.push_back(x.title);
+    for (const auto& x : a)
+        t.push_back(x.title);
     return t;
 }
 
@@ -67,7 +68,8 @@ AlertEvent event(AlertEvent::Kind k, std::string subject = "") {
 
 TEST_CASE("alerts: a healthy leader raises nothing", "[unit][alerts]") {
     AlertEngine e(thresholds());
-    for (int i = 0; i < 100; ++i) CHECK(e.evaluate(snap(std::chrono::seconds(i * 10))).empty());
+    for (int i = 0; i < 100; ++i)
+        CHECK(e.evaluate(snap(std::chrono::seconds(i * 10))).empty());
 }
 
 TEST_CASE("alerts: a condition fires once, re-notifies every 15 min and resolves once", "[unit][alerts]") {
@@ -89,8 +91,8 @@ TEST_CASE("alerts: a condition fires once, re-notifies every 15 min and resolves
     CHECK_FALSE(fired[0].resolved);
     CHECK(fired[0].details.at("G_s").as_uint64() == 1000);
     CHECK(fired[0].details.at("seconds_since_advance").to_number<int>() == 610);
-    CHECK(e.evaluate(frozen(620)).empty());   // the next tick: nothing
-    CHECK(e.evaluate(frozen(1500)).empty());  // 890 s after the fire
+    CHECK(e.evaluate(frozen(620)).empty());       // the next tick: nothing
+    CHECK(e.evaluate(frozen(1500)).empty());      // 890 s after the fire
     const auto again = e.evaluate(frozen(1510));  // 900 s after the fire
     REQUIRE(again.size() == 1);
     CHECK(again[0].title == "Safe Gate Stuck");
@@ -103,7 +105,8 @@ TEST_CASE("alerts: a condition fires once, re-notifies every 15 min and resolves
     CHECK(e.evaluate(snap(at(1530))).empty());
 }
 
-TEST_CASE("alerts: a standby raises only the host-local rows and drops leader state without a resolve", "[unit][alerts]") {
+TEST_CASE("alerts: a standby raises only the host-local rows and drops leader state without a resolve",
+          "[unit][alerts]") {
     AlertEngine e(thresholds());
     auto stuck = snap(0s);
     stuck.g_s = 1000;
@@ -114,11 +117,13 @@ TEST_CASE("alerts: a standby raises only the host-local rows and drops leader st
     REQUIRE(has(e.evaluate(later), "Safe Gate Stuck"));
 
     auto standby = snap(710s, false);
-    standby.sink_saturated = true;                 // leader-only: ignored
-    standby.redis_unreachable_s = 61;              // host-local
-    standby.events = {event(AlertEvent::Kind::SafeReorg), event(AlertEvent::Kind::SinkFenced), event(AlertEvent::Kind::LeaderChanged)};
+    standby.sink_saturated = true;     // leader-only: ignored
+    standby.redis_unreachable_s = 61;  // host-local
+    standby.events = {event(AlertEvent::Kind::SafeReorg), event(AlertEvent::Kind::SinkFenced),
+                      event(AlertEvent::Kind::LeaderChanged)};
     const auto out = e.evaluate(standby);
-    CHECK(titles(out) == std::vector<std::string>{"Redis Unreachable", "Sink Fenced", "Leader Changed"});  // no RESOLVED, no Safe Reorg
+    CHECK(titles(out) == std::vector<std::string>{"Redis Unreachable", "Sink Fenced",
+                                                  "Leader Changed"});  // no RESOLVED, no Safe Reorg
 
     // Back in the lead later: the old condition is gone and its tracker restarted, so nothing fires at once.
     auto lead = snap(720s);
@@ -163,7 +168,8 @@ TEST_CASE("alerts: WebSocket Stalled follows head_stall_ms of the config", "[uni
     CHECK(out[0].details.at("provider").as_string() == "quicknode");
 }
 
-TEST_CASE("alerts: provider rows: auth failure, quota exhausted (once per incident, critical with no healthy provider)", "[unit][alerts]") {
+TEST_CASE("alerts: provider rows: auth failure, quota exhausted (once per incident, critical with no healthy provider)",
+          "[unit][alerts]") {
     AlertEngine e(thresholds());
     auto s = snap(0s);
     ProviderFact a;
@@ -260,7 +266,8 @@ TEST_CASE("alerts: Checkpoint Lag is per class and needs 15 min", "[unit][alerts
     out = e.evaluate(s(910, 301, 2001));  // the final class starts its own 15 min
     CHECK(out.empty());
     out = e.evaluate(s(1810, 301, 2001));
-    CHECK(titles(out) == std::vector<std::string>{"Checkpoint Lag", "Checkpoint Lag"});  // final fires, safe re-notifies
+    CHECK(titles(out) ==
+          std::vector<std::string>{"Checkpoint Lag", "Checkpoint Lag"});  // final fires, safe re-notifies
 }
 
 TEST_CASE("alerts: sink rows: Degraded after 5 min of spill, Saturated at once", "[unit][alerts]") {
@@ -280,7 +287,8 @@ TEST_CASE("alerts: sink rows: Degraded after 5 min of spill, Saturated at once",
     REQUIRE(sat.size() == 1);
     CHECK(sat[0].title == "Sink Saturated");
     CHECK(sat[0].details.at("spill_max_bytes").as_uint64() == 1000);
-    CHECK(titles(e.evaluate(s(320, 0, false))) == std::vector<std::string>{"RESOLVED: Sink Degraded", "RESOLVED: Sink Saturated"});
+    CHECK(titles(e.evaluate(s(320, 0, false))) ==
+          std::vector<std::string>{"RESOLVED: Sink Degraded", "RESOLVED: Sink Saturated"});
 }
 
 TEST_CASE("alerts: a frozen finalized gate raises the critical gate alert", "[unit][alerts]") {
@@ -338,7 +346,8 @@ TEST_CASE("alerts: Pipeline Stalled: a cursor that missed 3 progress deadlines, 
     CHECK(has(out, "RESOLVED: Pipeline Stalled"));  // the cursor one cleared (the cursor caught up in `sweep`)
 }
 
-TEST_CASE("alerts: consumer rows: lagging, near trim, missing group, unknown snapshot, trimmed event", "[unit][alerts]") {
+TEST_CASE("alerts: consumer rows: lagging, near trim, missing group, unknown snapshot, trimmed event",
+          "[unit][alerts]") {
     AlertEngine e(thresholds());
     auto consumer = [&](AlertClock::time_point now, double undelivered, double pending) {
         ConsumerFact f;
@@ -413,7 +422,8 @@ TEST_CASE("alerts: consumer rows: lagging, near trim, missing group, unknown sna
     CHECK(out[0].details.at("max_deleted_id").as_string() == "9-9");
 }
 
-TEST_CASE("alerts: events fire once per occurrence; provider and group names are rate-limited per 15 min", "[unit][alerts]") {
+TEST_CASE("alerts: events fire once per occurrence; provider and group names are rate-limited per 15 min",
+          "[unit][alerts]") {
     AlertEngine e(thresholds());
     auto s = snap(0s);
     s.events = {event(AlertEvent::Kind::ProviderFailover)};
@@ -431,7 +441,8 @@ TEST_CASE("alerts: events fire once per occurrence; provider and group names are
     CHECK(titles(out) == std::vector<std::string>{"Safe Reorg", "Safe Reorg"});
     CHECK(out[0].severity == Severity::Critical);
 
-    // Provider Inconsistent: one per provider per 15 min, preserving suppressed new_inconsistent deltas across the cooldown.
+    // Provider Inconsistent: one per provider per 15 min, preserving suppressed new_inconsistent deltas across the
+    // cooldown.
     auto inc_event = [](const std::string& provider, std::uint64_t delta, std::uint64_t total) -> AlertEvent {
         auto ev = event(AlertEvent::Kind::ProviderInconsistent, provider);
         ev.details = {{"provider", provider}, {"new_inconsistent", delta}, {"total", total}};
@@ -451,13 +462,14 @@ TEST_CASE("alerts: events fire once per occurrence; provider and group names are
     s.events = {inc_event("infura", 1, 7)};
     out = e.evaluate(s);
     REQUIRE(out.size() == 1);
-    CHECK(out[0].details.at("new_inconsistent").as_uint64() == 6);  // 5 suppressed + 1 new = full delta since last emitted alert
+    CHECK(out[0].details.at("new_inconsistent").as_uint64() ==
+          6);  // 5 suppressed + 1 new = full delta since last emitted alert
     CHECK(out[0].details.at("total").as_uint64() == 7);
 
     // The remaining kinds and their severities.
     s = snap(940s);
-    s.events = {event(AlertEvent::Kind::SinkInvariant), event(AlertEvent::Kind::WsMissedLogs), event(AlertEvent::Kind::SinkFenced),
-                event(AlertEvent::Kind::LeaderChanged)};
+    s.events = {event(AlertEvent::Kind::SinkInvariant), event(AlertEvent::Kind::WsMissedLogs),
+                event(AlertEvent::Kind::SinkFenced), event(AlertEvent::Kind::LeaderChanged)};
     out = e.evaluate(s);
     REQUIRE(out.size() == 4);
     CHECK(out[0].severity == Severity::Critical);  // Sink Invariant
@@ -481,7 +493,8 @@ TEST_CASE("alerts: thresholds come from the config", "[unit][alerts]") {
     CHECK(t.consumer_lag_crit_s == 22);
 }
 
-TEST_CASE("alerts: RedisTenancyViolation is Critical and host-local (fires on standby as well as leader)", "[unit][alerts]") {
+TEST_CASE("alerts: RedisTenancyViolation is Critical and host-local (fires on standby as well as leader)",
+          "[unit][alerts]") {
     AlertEngine engine{AlertThresholds{}};
     OpsSnapshot s = snap(0s);
     s.leader = false;  // host-local: fires even when not leader
@@ -496,4 +509,3 @@ TEST_CASE("alerts: RedisTenancyViolation is Critical and host-local (fires on st
     CHECK(alerts[0].details.at("total").as_uint64() == 1);
     CHECK_FALSE(alerts[0].resolved);
 }
-
