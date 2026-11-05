@@ -74,6 +74,10 @@ jobs:
       - name: Lint Redis Lua scripts
         run: tools/lint_lua.sh
 
+      - name: Check C++ formatting (clang-format)
+        run: |
+          find evm_listener/src evm_listener/tests \( -name '*.hpp' -o -name '*.cpp' \) -print0 | xargs -0 clang-format --dry-run --Werror
+
       - name: Cache Conan 2 package store
         uses: actions/cache@v4
         with:
