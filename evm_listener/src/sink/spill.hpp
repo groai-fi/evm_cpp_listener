@@ -43,7 +43,8 @@ struct SpillRecord {
 // NOT thread-safe: owned and used by the sink thread only.
 /// @brief Ephemeral rolling disk WAL storing un-acked sink items during Redis outages.
 /// Invariants & Guarantees:
-/// - Process-Scoped: Existing segments in spill_dir are wiped at startup; crash recovery re-sweeps from Redis checkpoint.
+/// - Process-Scoped: Existing segments in spill_dir are wiped at startup; crash recovery re-sweeps from Redis
+/// checkpoint.
 /// - Integrity: Each record is guarded by a 32-bit CRC32C checksum; corrupted records fail fast via SpillError.
 /// - FIFO Ordering: Records are peeked and popped strictly in write sequence; consumed segment files are unlinked.
 /// - Concurrency: Single-threaded; manipulated solely by the RedisSink background pump thread.
@@ -52,7 +53,8 @@ public:
     static constexpr std::uint64_t kDefaultSegmentBytes = 64ull * 1024 * 1024;
 
     // Creates `dir` if needed and deletes any `seg-*.spill` files left by an earlier process. Other files in `dir` are
-    // never touched (a mis-set spill_dir must not delete unrelated data). Throws SpillError on an empty path or I/O error.
+    // never touched (a mis-set spill_dir must not delete unrelated data). Throws SpillError on an empty path or I/O
+    // error.
     /// @brief Initializes disk spill directory and purges stale segments from previous runs.
     Spill(std::filesystem::path dir, std::uint64_t max_bytes, std::uint64_t segment_bytes = kDefaultSegmentBytes);
     ~Spill();
@@ -88,8 +90,8 @@ public:
 private:
     struct Segment {
         std::uint64_t id{};
-        std::uint64_t size{};       // bytes written
-        std::uint64_t read_off{};   // bytes consumed
+        std::uint64_t size{};      // bytes written
+        std::uint64_t read_off{};  // bytes consumed
     };
 
     std::filesystem::path path_of(std::uint64_t id) const;
@@ -102,12 +104,12 @@ private:
 
     std::vector<Segment> segments_;  // oldest first; back() is the writer's segment
     std::uint64_t next_id_{0};
-    std::ofstream writer_;           // open iff segments_ is non-empty
-    std::ifstream reader_;           // open on segments_.front() while it has unread data
+    std::ofstream writer_;  // open iff segments_ is non-empty
+    std::ifstream reader_;  // open on segments_.front() while it has unread data
     std::uint64_t reader_id_{~0ull};
 
     std::optional<SpillRecord> peeked_;
-    std::uint64_t peeked_size_{0};   // on-disk size of the peeked record
+    std::uint64_t peeked_size_{0};  // on-disk size of the peeked record
 
     std::uint64_t records_{0};
     std::uint64_t bytes_{0};

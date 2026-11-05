@@ -7,14 +7,14 @@
 //
 // Credential protection: the webhook URL and the X-API-Key token are secrets. They are never logged, only the HTTP
 // status or the (already redacted) transport error text. Constructing without them throws (fail fast).
+#include <spdlog/logger.h>
+
 #include <atomic>
+#include <boost/asio/any_io_executor.hpp>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
-
-#include <boost/asio/any_io_executor.hpp>
-#include <spdlog/logger.h>
 
 #include "ops/alerts.hpp"
 

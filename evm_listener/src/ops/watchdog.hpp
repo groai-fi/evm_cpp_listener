@@ -1,7 +1,7 @@
 #pragma once
 // Process watchdog (plan 60 §5.1, slice 5-B1): one extra thread checks two heartbeats (io tick, sink loop). A heartbeat
-// stale for more than `stall_ms` while the watchdog itself ran on time aborts the process, so the orchestrator restarts it.
-// The check path takes no locks and allocates nothing, so it still works when the rest of the process is wedged.
+// stale for more than `stall_ms` while the watchdog itself ran on time aborts the process, so the orchestrator restarts
+// it. The check path takes no locks and allocates nothing, so it still works when the rest of the process is wedged.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -14,8 +14,8 @@ namespace evml::ops {
 
 class Watchdog {
 public:
-    using NowMs = std::function<std::uint64_t()>;                    // monotonic milliseconds (steady_clock epoch)
-    using AbortFn = std::function<void(std::string_view message)>;   // must not return in production
+    using NowMs = std::function<std::uint64_t()>;                   // monotonic milliseconds (steady_clock epoch)
+    using AbortFn = std::function<void(std::string_view message)>;  // must not return in production
 
     /// Raw numeric codes published by the io thread each tick; printed in the abort line as "last known state".
     /// The host defines the meaning of role / driver_state / sink_mode codes (this class only stores and prints them).
@@ -30,11 +30,12 @@ public:
     };
 
     struct Options {
-        std::uint64_t stall_ms = 0;                // [watchdog].process_stall_ms; required (0 throws): no hidden default
-        std::uint64_t check_interval_ms = 1'000;   // watchdog wake period
-        std::uint64_t pause_tolerance_ms = 5'000;  // wake overrun beyond this = host pause (D2): reset baselines, skip check
-        NowMs now;                                 // default: steady_clock
-        AbortFn on_abort;                          // default: write(1) the line, then std::abort() (exit 134)
+        std::uint64_t stall_ms = 0;               // [watchdog].process_stall_ms; required (0 throws): no hidden default
+        std::uint64_t check_interval_ms = 1'000;  // watchdog wake period
+        std::uint64_t pause_tolerance_ms =
+            5'000;         // wake overrun beyond this = host pause (D2): reset baselines, skip check
+        NowMs now;         // default: steady_clock
+        AbortFn on_abort;  // default: write(1) the line, then std::abort() (exit 134)
     };
 
     /// @throws std::invalid_argument if stall_ms or check_interval_ms is 0.
@@ -54,8 +55,8 @@ public:
     void beat_io();
     /// @brief Stores a sink beat from the calling thread (tests). Production: the sink writes through sink_beat_slot().
     void beat_sink();
-    /// @brief Storage the sink loop stores its steady-clock ms into (RedisSinkOptions::loop_beat). Owned by the watchdog,
-    /// so it outlives every per-leadership sink.
+    /// @brief Storage the sink loop stores its steady-clock ms into (RedisSinkOptions::loop_beat). Owned by the
+    /// watchdog, so it outlives every per-leadership sink.
     [[nodiscard]] std::atomic<std::uint64_t>* sink_beat_slot() noexcept { return &sink_beat_; }
     /// @brief Sink beat is checked only while registered (leader). Registering resets its baseline to now; unregister
     /// BEFORE destroying the sink.

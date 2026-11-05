@@ -1,13 +1,12 @@
 #pragma once
 
+#include <boost/asio/awaitable.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "pipeline/log_source.hpp"
@@ -23,12 +22,18 @@ enum class PipelineState : std::uint8_t { Init, Recovering, CatchingUp, Live, Dr
 
 [[nodiscard]] constexpr const char* to_string(PipelineState s) noexcept {
     switch (s) {
-        case PipelineState::Init: return "init";
-        case PipelineState::Recovering: return "recovering";
-        case PipelineState::CatchingUp: return "catching_up";
-        case PipelineState::Live: return "live";
-        case PipelineState::Draining: return "draining";
-        case PipelineState::Failed: return "failed";
+        case PipelineState::Init:
+            return "init";
+        case PipelineState::Recovering:
+            return "recovering";
+        case PipelineState::CatchingUp:
+            return "catching_up";
+        case PipelineState::Live:
+            return "live";
+        case PipelineState::Draining:
+            return "draining";
+        case PipelineState::Failed:
+            return "failed";
     }
     return "unknown";
 }
@@ -39,11 +44,11 @@ struct DriverOptions {
     std::uint32_t final_every{4};
     // Live iff both sweeps are within this many blocks of their gate (plan 3.2: "<= 1 page"; Infura's page is 500).
     std::uint64_t live_lag_blocks{500};
-    std::chrono::milliseconds pause_poll{200};   // wait while the sink is saturated
-    std::chrono::milliseconds idle_poll{1000};   // wait when there is no work or the pipeline is frozen
+    std::chrono::milliseconds pause_poll{200};  // wait while the sink is saturated
+    std::chrono::milliseconds idle_poll{1000};  // wait when there is no work or the pipeline is frozen
     std::chrono::milliseconds backoff_base{250};
     std::chrono::milliseconds backoff_cap{30000};
-    std::uint64_t seed{1};                       // jitter seed (production: random)
+    std::uint64_t seed{1};  // jitter seed (production: random)
 };
 
 struct TickResult {
@@ -59,13 +64,13 @@ struct DriverStatus {
     std::optional<std::uint64_t> g_s, g_f;
     bool frozen{false};
     std::string frozen_reason;
-    std::uint32_t safe_missed_deadlines{0};   // consecutive progress deadlines missed by the safe sweep
+    std::uint32_t safe_missed_deadlines{0};  // consecutive progress deadlines missed by the safe sweep
     std::uint32_t final_missed_deadlines{0};
-    bool stalled{false};                      // a sweep reported Stalled and has not progressed since
+    bool stalled{false};  // a sweep reported Stalled and has not progressed since
     std::string stall_detail;
     bool reverify_pending{false};
-    std::uint64_t safe_reorgs{0};             // completed reverifications that found a difference (SafeReorg)
-    std::uint64_t reverify_clean{0};          // completed reverifications that found no difference
+    std::uint64_t safe_reorgs{0};     // completed reverifications that found a difference (SafeReorg)
+    std::uint64_t reverify_clean{0};  // completed reverifications that found no difference
     std::optional<std::uint64_t> last_fork_point;
 };
 

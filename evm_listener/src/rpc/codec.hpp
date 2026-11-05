@@ -1,13 +1,13 @@
 #pragma once
 
+#include <simdjson.h>
+
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
-
-#include <simdjson.h>
 
 #include "core/config.hpp"
 #include "core/error.hpp"
@@ -35,29 +35,29 @@ struct Response {
 
 /// @brief Dissected block header summary from newHeads or getBlockByNumber.
 struct Head {
-    std::uint64_t number{};  // Block height
-    Hash32 hash;             // Canonical block hash
-    Hash32 parent_hash;      // Parent block hash (used by ReorgDetector)
-    std::uint64_t timestamp{};// Block timestamp in Unix seconds
+    std::uint64_t number{};     // Block height
+    Hash32 hash;                // Canonical block hash
+    Hash32 parent_hash;         // Parent block hash (used by ReorgDetector)
+    std::uint64_t timestamp{};  // Block timestamp in Unix seconds
 };
 
 /// @brief Dissected EVM log event corresponding to Solidity events.
 struct Log {
-    Address20 address;           // Emitting smart contract address
-    std::vector<Hash32> topics;  // Indexed event topics (0 to 4 topics)
-    std::string data;            // Non-indexed event payload hex ("0x" + even hex digits)
-    std::uint64_t block_number{};// Block height where event was mined
-    Hash32 block_hash;           // Block hash containing receipt
-    Hash32 tx_hash;              // Originating transaction hash
-    std::uint64_t tx_index{};    // Transaction index within the block
-    std::uint64_t log_index{};   // Global log index within the block
-    bool removed{};              // True if log was reverted/removed during chain reorg
+    Address20 address;             // Emitting smart contract address
+    std::vector<Hash32> topics;    // Indexed event topics (0 to 4 topics)
+    std::string data;              // Non-indexed event payload hex ("0x" + even hex digits)
+    std::uint64_t block_number{};  // Block height where event was mined
+    Hash32 block_hash;             // Block hash containing receipt
+    Hash32 tx_hash;                // Originating transaction hash
+    std::uint64_t tx_index{};      // Transaction index within the block
+    std::uint64_t log_index{};     // Global log index within the block
+    bool removed{};                // True if log was reverted/removed during chain reorg
 };
 
 /// @brief Asynchronous WebSocket push notification envelope.
 struct Notification {
-    std::string subscription;            // Subscription hex ID returned by eth_subscribe
-    std::variant<Head, Log> payload;     // Dissected event payload (Head or Log)
+    std::string subscription;         // Subscription hex ID returned by eth_subscribe
+    std::variant<Head, Log> payload;  // Dissected event payload (Head or Log)
 };
 
 /// @brief Inbound message union: either a direct request Response or an async Notification.
@@ -126,6 +126,7 @@ private:
 [[nodiscard]] std::string build_get_code(std::uint64_t id, const Address20& address, std::string_view block);
 /// @brief Builds "eth_getLogs" request spanning [from_block, to_block].
 /// @warning Throws std::invalid_argument if from_block > to_block or filter is empty.
-[[nodiscard]] std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block, const core::LogFilter& filter);
+[[nodiscard]] std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block,
+                                         const core::LogFilter& filter);
 
 }  // namespace evml::rpc

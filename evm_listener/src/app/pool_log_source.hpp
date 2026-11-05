@@ -20,7 +20,8 @@ namespace evml::app {
 
 /// @brief Production pipeline::LogSource over a ProviderPool (plan 60 §5.4a).
 /// Invariants:
-/// - get_logs retries the next getLogs provider, never one already tried in the same call. RangeTooLarge returns at once.
+/// - get_logs retries the next getLogs provider, never one already tried in the same call. RangeTooLarge returns at
+/// once.
 /// - After report_bad(p), the NEXT get_logs / current_provider() steer away from p (the sweeper re-asks after a bad
 ///   page). If p is the only usable provider it is asked again, so the sweeper's max_bad_attempts ends in Stalled.
 /// - block(n) is independent of the provider that returned the logs: it reads the head ring first (hit with a known

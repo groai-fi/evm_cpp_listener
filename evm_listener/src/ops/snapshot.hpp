@@ -50,8 +50,9 @@ struct SnapshotInputs {
     std::string getlogs_provider;                // current getLogs provider; empty = none
     std::optional<std::uint64_t> ws_safe;        // that provider's last read `safe`
     std::optional<std::uint64_t> getlogs_safe;
-    std::vector<provider::ProviderHealth> providers;                  // ProviderPool::health()
-    std::map<std::string, std::uint64_t> provider_inconsistent_total;  // ProviderPool::inconsistency_total() per provider
+    std::vector<provider::ProviderHealth> providers;  // ProviderPool::health()
+    std::map<std::string, std::uint64_t>
+        provider_inconsistent_total;  // ProviderPool::inconsistency_total() per provider
 };
 
 /// @brief The Provider Failover event (plan 60 §5.3.3, details `from`, `to`, `reason`). `from` is null when no WS
@@ -59,10 +60,12 @@ struct SnapshotInputs {
 [[nodiscard]] AlertEvent provider_failover_event(const std::optional<std::string>& from, std::string_view to,
                                                  std::string_view reason);
 
-/// @brief The Leader Changed event (plan 60 §5.3.3, details `old_host`, `new_host`): fired by the new leader on acquire.
+/// @brief The Leader Changed event (plan 60 §5.3.3, details `old_host`, `new_host`): fired by the new leader on
+/// acquire.
 [[nodiscard]] AlertEvent leader_changed_event(std::string_view old_host, std::string_view new_host);
 
-/// @brief The Sink Fenced event (plan 60 §5.3.3): the sink was fenced by another term and discarded its queue and spill.
+/// @brief The Sink Fenced event (plan 60 §5.3.3): the sink was fenced by another term and discarded its queue and
+/// spill.
 [[nodiscard]] AlertEvent sink_fenced_event(std::string_view why, std::uint64_t discarded_records);
 
 class SnapshotBuilder {

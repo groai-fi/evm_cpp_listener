@@ -25,10 +25,14 @@ enum class HeadKind : std::uint8_t {
 };
 [[nodiscard]] constexpr const char* to_string(HeadKind k) noexcept {
     switch (k) {
-        case HeadKind::Seeded: return "Seeded";
-        case HeadKind::Extended: return "Extended";
-        case HeadKind::Duplicate: return "Duplicate";
-        case HeadKind::NeedWalk: return "NeedWalk";
+        case HeadKind::Seeded:
+            return "Seeded";
+        case HeadKind::Extended:
+            return "Extended";
+        case HeadKind::Duplicate:
+            return "Duplicate";
+        case HeadKind::NeedWalk:
+            return "NeedWalk";
     }
     return "?";
 }
@@ -117,8 +121,8 @@ private:
 
     const ReorgDetector* det_;
     std::uint64_t version_;
-    BlockRef cursor_;                // oldest block of the new chain collected so far
-    std::vector<BlockRef> chain_;    // descending while walking, reversed once Done
+    BlockRef cursor_;              // oldest block of the new chain collected so far
+    std::vector<BlockRef> chain_;  // descending while walking, reversed once Done
     State state_{State::NeedBlock};
     std::uint64_t fork_point_{};
 };

@@ -1,8 +1,7 @@
 #include "sink/lua_scripts.hpp"
 
-#include <stdexcept>
-
 #include <boost/json.hpp>
+#include <stdexcept>
 
 #include "core/error.hpp"
 #include "sink/lua_sources.hpp"
@@ -11,11 +10,14 @@ namespace evml::sink {
 
 namespace {
 
-std::string num(std::uint64_t v) { return std::to_string(v); }
+std::string num(std::uint64_t v) {
+    return std::to_string(v);
+}
 
 boost::json::array fields_to_json(const std::vector<pipeline::Field>& fields) {
     boost::json::array arr;
-    for (const auto& [name, value] : fields) arr.push_back(boost::json::array{name, value});
+    for (const auto& [name, value] : fields)
+        arr.push_back(boost::json::array{name, value});
     return arr;
 }
 
@@ -45,11 +47,16 @@ core::Result<boost::json::value> parse_json(std::string_view json, const char* w
 
 const char* script_source(Script s) noexcept {
     switch (s) {
-        case Script::Emit: return kEmitLua;
-        case Script::Ckpt: return kCkptLua;
-        case Script::FinalTrim: return kFinalTrimLua;
-        case Script::Lease: return kLeaseLua;
-        case Script::EmitFast: return kEmitFastLua;
+        case Script::Emit:
+            return kEmitLua;
+        case Script::Ckpt:
+            return kCkptLua;
+        case Script::FinalTrim:
+            return kFinalTrimLua;
+        case Script::Lease:
+            return kLeaseLua;
+        case Script::EmitFast:
+            return kEmitFastLua;
     }
     return kEmitLua;
 }
@@ -58,7 +65,8 @@ const char* script_source(Script s) noexcept {
 ScriptCall emit_call(const Keys& k, const pipeline::Emission& e, const EmitParams& p) {
     if (e.fields.empty()) throw std::invalid_argument("emit_call: emission " + e.event_id + " has no fields");
     if (e.dedup_key.rfind("dedup:", 0) != 0)
-        throw std::invalid_argument("emit_call: emission " + e.event_id + " has a malformed dedup key '" + e.dedup_key + "'");
+        throw std::invalid_argument("emit_call: emission " + e.event_id + " has a malformed dedup key '" + e.dedup_key +
+                                    "'");
 
     ScriptCall c;
     c.script = Script::Emit;
@@ -142,10 +150,14 @@ std::string pack_fields(const std::vector<pipeline::Field>& fields) {
     return boost::json::serialize(fields_to_json(fields));
 }
 
-core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json) {
-    const auto v = parse_json(json, "unpack_fields");
-    if (!v) return v.error();
-    return fields_from_json(*v, "unpack_fields", json);
+core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json) noexcept {
+    try {
+        const auto v = parse_json(json, "unpack_fields");
+        if (!v) return v.error();
+        return fields_from_json(*v, "unpack_fields", json);
+    } catch (...) {
+        return core::Error("unpack_fields: exception");
+    }
 }
 
 std::vector<pipeline::Field> unpack_fields(std::string_view json) {
@@ -161,45 +173,66 @@ std::string pack_released(core::StreamKind stream, const std::vector<pipeline::F
     return boost::json::serialize(o);
 }
 
-ReleasedImage unpack_released(std::string_view json) {
-    const auto v_res = parse_json(json, "unpack_released");
-    if (!v_res) throw core::DecodeError(v_res.error().what());
-    const boost::json::value& v = *v_res;
-    if (!v.is_object()) throw core::DecodeError("unpack_released: not a JSON object: " + std::string(json));
-    const auto& o = v.as_object();
-    const auto* stream = o.if_contains("stream");
-    const auto* fields = o.if_contains("fields");
-    if (!stream || !stream->is_string() || !fields)
-        throw core::DecodeError("unpack_released: needs a string `stream` and a `fields` array: " + std::string(json));
+core::Result<ReleasedImage> try_unpack_released(std::string_view json) noexcept {
+    try {
+        const auto v_res = parse_json(json, "unpack_released");
+        if (!v_res) return v_res.error();
+        const boost::json::value& v = *v_res;
+        if (!v.is_object()) return core::Error("unpack_released: not a JSON object: " + std::string(json));
+        const auto& o = v.as_object();
+        const auto* stream = o.if_contains("stream");
+        const auto* fields = o.if_contains("fields");
+        if (!stream || !stream->is_string() || !fields) {
+            return core::Error("unpack_released: needs a string `stream` and a `fields` array: " + std::string(json));
+        }
 
-    ReleasedImage out;
-    if (stream->as_string() == core::to_string(core::StreamKind::Events)) out.stream = core::StreamKind::Events;
-    else if (stream->as_string() == core::to_string(core::StreamKind::Registry)) out.stream = core::StreamKind::Registry;
-    else throw core::DecodeError("unpack_released: unknown stream '" + std::string(stream->as_string()) + "': " + std::string(json));
-    auto fields_res = fields_from_json(*fields, "unpack_released", json);
-    if (!fields_res) throw core::DecodeError(fields_res.error().what());
-    out.fields = std::move(*fields_res);
-    return out;
+        ReleasedImage out;
+        if (stream->as_string() == core::to_string(core::StreamKind::Events)) {
+            out.stream = core::StreamKind::Events;
+        } else if (stream->as_string() == core::to_string(core::StreamKind::Registry)) {
+            out.stream = core::StreamKind::Registry;
+        } else {
+            return core::Error("unpack_released: unknown stream '" + std::string(stream->as_string()) +
+                               "': " + std::string(json));
+        }
+        auto fields_res = fields_from_json(*fields, "unpack_released", json);
+        if (!fields_res) return fields_res.error();
+        out.fields = std::move(*fields_res);
+        return out;
+    } catch (...) {
+        return core::Error("unpack_released: exception");
+    }
+}
+
+ReleasedImage unpack_released(std::string_view json) {
+    auto r = try_unpack_released(json);
+    if (!r) throw core::DecodeError(r.error().what());
+    return std::move(*r);
 }
 
 std::string pack_manifest(const std::vector<std::string>& manifest) {
     boost::json::array arr;
-    for (const auto& s : manifest) arr.push_back(boost::json::string(s));
+    for (const auto& s : manifest)
+        arr.push_back(boost::json::string(s));
     return boost::json::serialize(arr);
 }
 
-core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json) {
-    boost::system::error_code ec;
-    const boost::json::value v = boost::json::parse(json, ec);
-    if (ec) return core::Error("unpack_manifest: invalid JSON (" + ec.message() + "): " + std::string(json));
-    if (!v.is_array()) return core::Error("unpack_manifest: not a JSON array: " + std::string(json));
+core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json) noexcept {
+    try {
+        boost::system::error_code ec;
+        const boost::json::value v = boost::json::parse(json, ec);
+        if (ec) return core::Error("unpack_manifest: invalid JSON (" + ec.message() + "): " + std::string(json));
+        if (!v.is_array()) return core::Error("unpack_manifest: not a JSON array: " + std::string(json));
 
-    std::vector<std::string> out;
-    for (const auto& item : v.as_array()) {
-        if (!item.is_string()) return core::Error("unpack_manifest: element is not a string: " + std::string(json));
-        out.emplace_back(item.as_string());
+        std::vector<std::string> out;
+        for (const auto& item : v.as_array()) {
+            if (!item.is_string()) return core::Error("unpack_manifest: element is not a string: " + std::string(json));
+            out.emplace_back(item.as_string());
+        }
+        return out;
+    } catch (...) {
+        return core::Error("unpack_manifest: exception");
     }
-    return out;
 }
 
 std::vector<std::string> unpack_manifest(std::string_view json) {

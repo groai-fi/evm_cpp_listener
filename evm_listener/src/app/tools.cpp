@@ -1,7 +1,14 @@
 #include "app/tools.hpp"
 
 #include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -14,12 +21,6 @@
 #include <unordered_set>
 #include <variant>
 #include <vector>
-
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include "app/host.hpp"
 #include "app/pool_config.hpp"
@@ -36,13 +37,13 @@
 #include "pipeline/sweeper.hpp"
 #include "provider/provider_pool.hpp"
 #include "rpc/backoff.hpp"
-#include "rpc/blocking_http.hpp"
 #include "rpc/codec.hpp"
+#include "rpc/http_rpc_client.hpp"
 #include "sink/keys.hpp"
 #include "sink/lease.hpp"
-#include "sink/redispp_conn.hpp"
 #include "sink/redis_sink.hpp"
 #include "sink/redis_startup.hpp"
+#include "sink/redispp_conn.hpp"
 
 namespace evml::app {
 
@@ -63,65 +64,102 @@ using core::Address20;
 using core::Config;
 using core::Provider;
 
-/// @brief Exception thrown when an RPC provider responds with an HTTP error or JSON-RPC error payload.
-struct RpcFailure : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
 /// @brief Truncates error messages to avoid console flooding on large response bodies.
 std::string clip(std::string_view s, std::size_t n = 120) {
     return std::string(s.substr(0, n));
 }
 
-/// @brief Executes a single blocking JSON-RPC call over HTTP against a specific provider.
-/// @return Raw JSON result payload.
-/// @throws TransportError On network I/O or connect failure.
-/// @throws RpcFailure On non-200 HTTP code or JSON-RPC error object.
-/// @throws DecodeError On invalid JSON structure.
-std::string rpc_call(const Config& cfg, const Provider& p, const std::string& body, rpc::Decoder& dec) {
-    // Dispatch blocking HTTP POST with configured backfill timeout and evaluated user agent.
-    const auto resp = rpc::http_post_json(p.http_url, body, std::chrono::milliseconds(cfg.backfill.request_timeout_ms),
-                                          user_agent(cfg));
-    // Check HTTP status code; parse JSON-RPC error payload if provided in response body.
-    if (resp.status != 200) {
-        if (const auto err = dec.try_parse_error_body(resp.body)) {
-            throw RpcFailure(p.name + ": HTTP " + std::to_string(resp.status) + " rpc error " +
-                             std::to_string(err->code) + ": " + clip(err->message));
+/// @brief Executes a single blocking JSON-RPC call over HTTP against a specific provider without throwing.
+/// @return Raw JSON result payload or operational error.
+[[nodiscard]] core::Result<std::string> rpc_call(const Config& cfg, const Provider& p, std::string_view body,
+                                                 rpc::Decoder& dec) noexcept {
+    try {
+        namespace net = boost::asio;
+        net::io_context ioc;
+        rpc::HttpRpcClient client(
+            ioc.get_executor(),
+            rpc::HttpRpcClientConfig{.name = p.name,
+                                     .url = p.http_url,
+                                     .user_agent = user_agent(cfg),
+                                     .timeout = std::chrono::milliseconds(cfg.backfill.request_timeout_ms)});
+        std::optional<core::Result<rpc::HttpResult>> call_res;
+        net::co_spawn(ioc, client.try_call(std::string(body)),
+                      [&ioc, &client, &call_res](const std::exception_ptr&, core::Result<rpc::HttpResult> res) {
+                          call_res = std::move(res);
+                          client.cancel();
+                          ioc.stop();
+                      });
+        ioc.run();
+        if (!call_res) {
+            return core::Error{p.name + ": HTTP request did not complete"};
         }
-        throw RpcFailure(p.name + ": HTTP " + std::to_string(resp.status) + ": " + clip(resp.body));
+        if (!*call_res) {
+            return call_res->error();
+        }
+        const auto& resp = **call_res;
+        // Check HTTP status code; parse JSON-RPC error payload if provided in response body.
+        if (resp.status != 200) {
+            if (const auto err = dec.try_parse_error_body(resp.body)) {
+                return core::Error{p.name + ": HTTP " + std::to_string(resp.status) + " rpc error " +
+                                   std::to_string(err->code) + ": " + clip(err->message)};
+            }
+            return core::Error{p.name + ": HTTP " + std::to_string(resp.status) + ": " + clip(resp.body)};
+        }
+        // Decode JSON-RPC message envelope.
+        const auto msg = dec.try_decode(resp.body);
+        if (!msg) {
+            return core::Error{p.name + ": " + msg.error().what()};
+        }
+        const auto* r = std::get_if<rpc::Response>(&*msg);
+        if (!r) return core::Error{p.name + ": unexpected notification in HTTP response"};
+        if (!r->ok) {
+            return core::Error{p.name + ": rpc error " + std::to_string(r->error.code) + ": " + clip(r->error.message)};
+        }
+        return r->result_raw;
+    } catch (const std::exception& e) {
+        try {
+            return core::Error{p.name + ": " + e.what()};
+        } catch (...) {
+            return core::Error{};
+        }
+    } catch (...) {
+        return core::Error{};
     }
-    // Decode JSON-RPC message envelope.
-    const auto msg = dec.decode(resp.body);
-    const auto* r = std::get_if<rpc::Response>(&msg);
-    if (!r) throw RpcFailure(p.name + ": unexpected notification in HTTP response");
-    if (!r->ok) throw RpcFailure(p.name + ": rpc error " + std::to_string(r->error.code) + ": " + clip(r->error.message));
-    return r->result_raw;
 }
 
 /// @brief Determines whether bytecode exists based on the hex string length ("0x" means empty).
-bool has_code(const std::string& code_hex) {
+[[nodiscard]] constexpr bool has_code(std::string_view code_hex) noexcept {
     // "0x" = no code; anything longer must be 0x + hex.
     return code_hex.size() > 2;
 }
 
 /// @brief Queries eth_getCode for an address at a specified block with automatic provider failover.
-bool code_at(const Config& cfg, const Address20& addr, const std::string& block, rpc::Decoder& dec,
-             std::uint64_t id) {
-    std::string failures;
-    // Iterate through configured getLogs provider priority chain until one succeeds.
-    for (const auto& p : cfg.getlogs_chain) {
-        try {
+[[nodiscard]] core::Result<bool> code_at(const Config& cfg, const Address20& addr, std::string_view block,
+                                         rpc::Decoder& dec, std::uint64_t id) noexcept {
+    try {
+        std::string failures;
+        // Iterate through configured getLogs provider priority chain until one succeeds.
+        for (const auto& p : cfg.getlogs_chain) {
             const auto raw = rpc_call(cfg, p, rpc::build_get_code(id, addr, block), dec);
-            return has_code(dec.parse_string(raw));
-        } catch (const std::exception& e) {
-            failures += "\n  - " + std::string(e.what());
+            if (!raw) {
+                failures += "\n  - " + raw.error().what();
+                continue;
+            }
+            const auto code = dec.try_parse_string(*raw);
+            if (!code) {
+                failures += "\n  - " + p.name + ": " + code.error().what();
+                continue;
+            }
+            return has_code(*code);
         }
+        return core::Error{"eth_getCode " + addr.to_hex() + " @" + std::string(block) +
+                           " failed on every provider:" + failures};
+    } catch (...) {
+        return core::Error{};
     }
-    throw std::runtime_error("eth_getCode " + addr.to_hex() + " @" + block + " failed on every provider:" + failures);
 }
 
 struct ProbeState {
-    boost::asio::io_context ioc;
     Config cfg;
     unsigned seconds{0};
     std::shared_ptr<provider::ProviderPool> pool;
@@ -135,12 +173,12 @@ struct ProbeState {
 
 boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
     namespace net = boost::asio;
-    net::steady_timer t(st->ioc);
+    net::steady_timer t(co_await net::this_coro::executor);
     t.expires_after(std::chrono::seconds(st->seconds));
     co_await t.async_wait(net::use_awaitable);
 
-    std::cout << "streamed: " << st->heads << " heads (last " << st->last_head << " via " << st->head_from
-              << "), " << st->logs << " logs\n";
+    std::cout << "streamed: " << st->heads << " heads (last " << st->last_head << " via " << st->head_from << "), "
+              << st->logs << " logs\n";
     bool good = st->heads > 0;
     // Verify historical getLogs query across the 2 blocks preceding the latest streamed head.
     if (st->last_head >= 2) {
@@ -161,8 +199,8 @@ boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
                 good = false;
             }
         } else {
-            std::cout << "getLogs:   FAILED (" << rpc::to_string(o.kind) << ") via " << o.provider << ": "
-                      << o.error << "\n";
+            std::cout << "getLogs:   FAILED (" << rpc::to_string(o.kind) << ") via " << o.provider << ": " << o.error
+                      << "\n";
             good = false;
         }
         // Verify that both safe and finalized block tags can be resolved.
@@ -182,9 +220,6 @@ boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
         std::cout << "getLogs:   skipped (no head received)\n";
     }
     st->ok = good;
-    // Tear down pool resources and shut down Boost.Asio event loop.
-    st->pool->stop();
-    st->ioc.stop();
 }
 
 }  // namespace
@@ -192,23 +227,26 @@ boost::asio::awaitable<void> run_probe_coro(std::shared_ptr<ProbeState> st) {
 /// @brief Prints human-readable configuration summary with all secrets and endpoint tokens redacted.
 void print_config_summary(const Config& cfg) {
     std::cout << "shard:    " << cfg.shard.id << " (host " << cfg.shard.host_id << ")\n";
-    std::cout << "chain:    " << cfg.chain.name << " id=" << cfg.chain.chain_id << " block_time_ms="
-              << cfg.chain.block_time_ms << " start_policy="
-              << (cfg.chain.start_policy == core::StartPolicy::Gate ? "gate" : "contract_start") << "\n";
+    std::cout << "chain:    " << cfg.chain.name << " id=" << cfg.chain.chain_id
+              << " block_time_ms=" << cfg.chain.block_time_ms
+              << " start_policy=" << (cfg.chain.start_policy == core::StartPolicy::Gate ? "gate" : "contract_start")
+              << "\n";
     std::cout << "ws providers:\n";
     // Redact tokens/credentials from printed provider URLs.
-    for (const auto& p : cfg.ws_chain) std::cout << "  " << p.name << "  " << core::env::redact(p.ws_url) << "\n";
+    for (const auto& p : cfg.ws_chain)
+        std::cout << "  " << p.name << "  " << core::env::redact(p.ws_url) << "\n";
     std::cout << "getlogs providers:\n";
     for (const auto& p : cfg.getlogs_chain) {
         std::cout << "  " << p.name << "  " << core::env::redact(p.http_url) << "  max_range=" << p.max_getlogs_range
                   << "\n";
     }
-    for (const auto& n : cfg.notes) std::cout << "note: " << n << "\n";
+    for (const auto& n : cfg.notes)
+        std::cout << "note: " << n << "\n";
     std::cout << "contracts:\n";
     for (const auto& c : cfg.contracts) {
         std::cout << "  " << c.name << " " << c.address.to_hex() << " finality=" << core::to_string(c.finality)
-                  << " stream=" << core::to_string(c.stream) << " start_block="
-                  << (c.start_block ? std::to_string(*c.start_block) : std::string("gate")) << "\n";
+                  << " stream=" << core::to_string(c.stream)
+                  << " start_block=" << (c.start_block ? std::to_string(*c.start_block) : std::string("gate")) << "\n";
         for (std::size_t i = 0; i < c.events.size(); ++i) {
             std::cout << "    " << c.events[i] << "  " << c.topics[i].to_hex() << "\n";
         }
@@ -225,20 +263,24 @@ int check_config_online(const Config& cfg) {
 
     // Verify eth_chainId across all declared getLogs providers.
     for (const auto& p : cfg.getlogs_chain) {
-        try {
-            const auto raw = rpc_call(cfg, p, rpc::build_chain_id(id++), dec);
-            const auto got = dec.parse_quantity(raw);
-            // Invariant: Provider chain ID must strictly match configured chain ID to prevent cross-chain corruption.
-            if (got != cfg.chain.chain_id) {
-                std::cerr << "FATAL " << p.name << ": eth_chainId=" << got << " but config chain_id="
-                          << cfg.chain.chain_id << "\n";
-                fatal = true;
-            } else {
-                std::cout << "ok    " << p.name << ": eth_chainId=" << got << "\n";
-                ++working;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "WARN  " << e.what() << "\n";
+        const auto raw = rpc_call(cfg, p, rpc::build_chain_id(id++), dec);
+        if (!raw) {
+            std::cerr << "WARN  " << raw.error().what() << "\n";
+            continue;
+        }
+        const auto got = dec.try_parse_quantity(*raw);
+        if (!got) {
+            std::cerr << "WARN  " << p.name << ": " << got.error().what() << "\n";
+            continue;
+        }
+        // Invariant: Provider chain ID must strictly match configured chain ID to prevent cross-chain corruption.
+        if (*got != cfg.chain.chain_id) {
+            std::cerr << "FATAL " << p.name << ": eth_chainId=" << *got << " but config chain_id=" << cfg.chain.chain_id
+                      << "\n";
+            fatal = true;
+        } else {
+            std::cout << "ok    " << p.name << ": eth_chainId=" << *got << "\n";
+            ++working;
         }
     }
     if (fatal) return kExitFailure;
@@ -250,15 +292,14 @@ int check_config_online(const Config& cfg) {
     int missing = 0;
     // Verify that every tracked contract exists (has non-empty bytecode) on the target network.
     for (const auto& c : cfg.contracts) {
-        try {
-            if (code_at(cfg, c.address, "latest", dec, id++)) {
-                std::cout << "ok    " << c.name << " has code at latest\n";
-            } else {
-                std::cerr << "FAIL  " << c.name << " " << c.address.to_hex() << " has NO code at latest\n";
-                ++missing;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "FAIL  " << c.name << ": " << e.what() << "\n";
+        const auto exists = code_at(cfg, c.address, "latest", dec, id++);
+        if (!exists) {
+            std::cerr << "FAIL  " << c.name << ": " << exists.error().what() << "\n";
+            ++missing;
+        } else if (*exists) {
+            std::cout << "ok    " << c.name << " has code at latest\n";
+        } else {
+            std::cerr << "FAIL  " << c.name << " " << c.address.to_hex() << " has NO code at latest\n";
             ++missing;
         }
     }
@@ -276,29 +317,41 @@ std::uint64_t find_deploy_block(const Config& cfg, const Address20& address) {
         bool got = false;
         // Obtain current chain tip block number to establish upper search bound.
         for (const auto& p : cfg.getlogs_chain) {
-            try {
-                head = dec.parse_quantity(rpc_call(cfg, p, rpc::build_block_number(id++), dec));
-                got = true;
-                break;
-            } catch (const std::exception& e) {
-                failures += "\n  - " + std::string(e.what());
+            const auto raw = rpc_call(cfg, p, rpc::build_block_number(id++), dec);
+            if (!raw) {
+                failures += "\n  - " + raw.error().what();
+                continue;
             }
+            const auto parsed = dec.try_parse_quantity(*raw);
+            if (!parsed) {
+                failures += "\n  - " + p.name + ": " + parsed.error().what();
+                continue;
+            }
+            head = *parsed;
+            got = true;
+            break;
         }
         if (!got) throw std::runtime_error("eth_blockNumber failed on every provider:" + failures);
     }
 
+    const auto require_code = [&](std::uint64_t blk) -> bool {
+        const auto res = code_at(cfg, address, core::to_hex_u64(blk), dec, id++);
+        if (!res) throw std::runtime_error(res.error().what());
+        return *res;
+    };
+
     // Verify contract has code at head before commencing binary search.
-    if (!code_at(cfg, address, core::to_hex_u64(head), dec, id++)) {
+    if (!require_code(head)) {
         throw std::runtime_error(address.to_hex() + " has no code at head block " + std::to_string(head));
     }
     // Invariant: no code at `lo` (block 0 is assumed codeless for any non-genesis contract), code at `hi`.
     std::uint64_t lo = 0, hi = head;
     // Edge case: contract existed at genesis block 0.
-    if (code_at(cfg, address, core::to_hex_u64(lo), dec, id++)) return 0;
+    if (require_code(lo)) return 0;
     // Binary search over block range [lo, hi] in O(log N) queries.
     while (hi - lo > 1) {
         const std::uint64_t mid = lo + (hi - lo) / 2;
-        if (code_at(cfg, address, core::to_hex_u64(mid), dec, id++)) {
+        if (require_code(mid)) {
             hi = mid;  // Bytecode exists; deployment block is at or before mid.
         } else {
             lo = mid;  // No bytecode; deployment block is strictly after mid.
@@ -312,21 +365,27 @@ int probe_transport(const Config& cfg, unsigned seconds) {
     namespace net = boost::asio;
     core::log::init("info");
 
+    net::io_context ioc;
     auto st = std::make_shared<ProbeState>(cfg, seconds);
+    const std::weak_ptr<ProbeState> weak_st = st;
 
     provider::PoolHandlers h;
     // Track streamed block heads and logging provider identity.
-    h.on_head = [st](const rpc::Head& x, const std::string& p) {
-        ++st->heads;
-        st->last_head = x.number;
-        st->head_from = p;
+    h.on_head = [weak_st](const rpc::Head& x, std::string_view p) {
+        if (const auto s = weak_st.lock()) {
+            ++s->heads;
+            s->last_head = x.number;
+            s->head_from = std::string(p);
+        }
     };
-    h.on_log = [st](const rpc::Log&, const std::string&) { ++st->logs; };
+    h.on_log = [weak_st](const rpc::Log&, std::string_view) {
+        if (const auto s = weak_st.lock()) ++s->logs;
+    };
     h.on_ws_active_changed = [](const std::optional<std::string>&, const std::optional<std::string>& p,
                                 std::string_view why) {
         std::cout << "ws active: " << (p ? *p : std::string("none")) << " (" << why << ")\n";
     };
-    h.on_ws_down = [](const rpc::WsClosed& c, const std::string& p) {
+    h.on_ws_down = [](const rpc::WsClosed& c, std::string_view p) {
         std::cout << "ws down:   " << p << " [" << rpc::to_string(c.kind) << "] " << c.reason << "\n";
     };
     h.on_transition = [](const provider::Transition& t, std::string_view why) {
@@ -334,12 +393,19 @@ int probe_transport(const Config& cfg, unsigned seconds) {
                   << provider::to_string(t.to) << " (" << why << ")\n";
     };
 
-    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
+    st->pool = provider::ProviderPool::create(ioc.get_executor(), make_pool_config(cfg, user_agent(cfg)), std::move(h));
     st->pool->start();
 
     // Spawn coroutine to stream heads for `seconds` and issue post-stream verification queries.
-    net::co_spawn(st->ioc, run_probe_coro(st), net::detached);
-    st->ioc.run();
+    net::co_spawn(ioc, run_probe_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+        if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
+        ioc.stop();
+    });
+    ioc.run();
+    if (st->pool) {
+        st->pool->stop();
+        st->pool.reset();
+    }
     return st->ok ? kExitOk : kExitFailure;
 }
 
@@ -355,9 +421,9 @@ int check_redis(const Config& cfg) {
     std::string wait_family;
     sink::StartupOptions opts;
     opts.require_noeviction = cfg.sink.require_noeviction;
-    opts.on_waiting = [&](const std::string& err, const std::string& fam, std::chrono::milliseconds) {
-        wait_error = err;
-        wait_family = fam;
+    opts.on_waiting = [&](std::string_view err, std::string_view fam, std::chrono::milliseconds) {
+        wait_error = std::string(err);
+        wait_family = std::string(fam);
         failed = true;
     };
     opts.stop = [&] { return failed; };
@@ -373,11 +439,12 @@ int check_redis(const Config& cfg) {
             std::cerr << "FAIL  redis unreachable (address_family=" << wait_family << "): " << wait_error << "\n";
             return kExitFailure;
         }
-        std::cout << "ok    redis version=" << rep->version.major << "." << rep->version.minor << "." << rep->version.patch
-                  << " address_family=" << rep->address_family
+        std::cout << "ok    redis version=" << rep->version.major << "." << rep->version.minor << "."
+                  << rep->version.patch << " address_family=" << rep->address_family
                   << " maxmemory_policy=" << (rep->maxmemory_policy.empty() ? "unknown" : rep->maxmemory_policy)
                   << " appendonly=" << (rep->appendonly.empty() ? "unknown" : rep->appendonly) << "\n";
-        for (const auto& w : rep->warnings) std::cout << "warn  " << w << "\n";
+        for (const auto& w : rep->warnings)
+            std::cout << "warn  " << w << "\n";
         return kExitOk;
     } catch (const sink::StartupFatal& e) {
         if (e.tenancy_violation) {
@@ -419,14 +486,14 @@ Config single_contract_config(const Config& base, const core::ContractCfg& targe
 
 std::uint64_t wall_now_ms() {
     return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
 }
 
 struct BackfillState {
-    boost::asio::io_context ioc;
     Config cfg;
     core::ContractCfg target;
-    sink::RedisSink& sink;
+    std::shared_ptr<sink::RedisSink> sink;
     std::shared_ptr<provider::ProviderPool> pool;
     std::unique_ptr<PoolLogSource> source;
     pipeline::SweeperOptions sw_opt;
@@ -434,9 +501,9 @@ struct BackfillState {
     int rc{kExitOk};
     std::optional<std::vector<std::string>> ck_contracts;
 
-    BackfillState(Config c, core::ContractCfg t, sink::RedisSink& s, pipeline::SweeperOptions sw,
+    BackfillState(Config c, core::ContractCfg t, std::shared_ptr<sink::RedisSink> s, pipeline::SweeperOptions sw,
                   pipeline::EventContext ec)
-        : cfg(std::move(c)), target(std::move(t)), sink(s), sw_opt(std::move(sw)), ectx(std::move(ec)) {}
+        : cfg(std::move(c)), target(std::move(t)), sink(std::move(s)), sw_opt(std::move(sw)), ectx(std::move(ec)) {}
 };
 
 boost::asio::awaitable<bool> drive_backfill_sweeper(std::shared_ptr<BackfillState> st,
@@ -446,8 +513,8 @@ boost::asio::awaitable<bool> drive_backfill_sweeper(std::shared_ptr<BackfillStat
     rpc::Backoff backoff(1, std::chrono::milliseconds(100), std::chrono::milliseconds(5000));
     std::uint32_t retries = 0;
     for (;;) {
-        if (st->sink.mode() == sink::SinkMode::Fenced || st->sink.mode() == sink::SinkMode::Failed) {
-            std::cerr << "FAIL  sink entered " << sink::to_string(st->sink.mode()) << " during backfill\n";
+        if (st->sink->mode() == sink::SinkMode::Fenced || st->sink->mode() == sink::SinkMode::Failed) {
+            std::cerr << "FAIL  sink entered " << sink::to_string(st->sink->mode()) << " during backfill\n";
             co_return false;
         }
         const pipeline::StepResult r = co_await sw->backfill_step(ceiling, kind);
@@ -465,20 +532,17 @@ boost::asio::awaitable<bool> drive_backfill_sweeper(std::shared_ptr<BackfillStat
             std::cerr << "FAIL  backfill exceeded retry limit: " << r.detail << "\n";
             co_return false;
         }
-        net::steady_timer timer(st->ioc);
-        timer.expires_after(r.status == pipeline::StepStatus::Paused ? std::chrono::milliseconds(100)
-                                                                     : backoff.next());
+        net::steady_timer timer(co_await net::this_coro::executor);
+        timer.expires_after(r.status == pipeline::StepStatus::Paused ? std::chrono::milliseconds(100) : backoff.next());
         co_await timer.async_wait(net::use_awaitable);
     }
 }
 
 boost::asio::awaitable<void> run_backfill_coro(std::shared_ptr<BackfillState> st) {
-    const auto ck = co_await st->sink.load_checkpoint();
+    const auto ck = co_await st->sink->load_checkpoint();
     if (!ck || !ck->safe || !ck->finalized || !ck->contracts || *ck->finalized > *ck->safe) {
         std::cerr << "FAIL  checkpoint is missing or incomplete in Redis\n";
         st->rc = kExitFailure;
-        st->pool->stop();
-        st->ioc.stop();
         co_return;
     }
     st->ck_contracts = ck->contracts;
@@ -490,13 +554,11 @@ boost::asio::awaitable<void> run_backfill_coro(std::shared_ptr<BackfillState> st
         const std::uint64_t start_cursor = start > 0 ? start - 1 : 0;
         if (start <= c_f) {
             const auto final_cfg = single_contract_config(st->cfg, st->target, core::Finality::Finalized);
-            auto sw = std::make_shared<pipeline::Sweeper>(final_cfg, st->ectx, *st->source, st->sink, wall_now_ms,
+            auto sw = std::make_shared<pipeline::Sweeper>(final_cfg, st->ectx, *st->source, *st->sink, wall_now_ms,
                                                           st->sw_opt);
             sw->set_cursors(start_cursor, start_cursor);
             if (!(co_await drive_backfill_sweeper(st, sw, c_f, core::Finality::Finalized))) {
                 st->rc = kExitFailure;
-                st->pool->stop();
-                st->ioc.stop();
                 co_return;
             }
         }
@@ -504,24 +566,19 @@ boost::asio::awaitable<void> run_backfill_coro(std::shared_ptr<BackfillState> st
             const std::uint64_t safe_cursor = std::max<std::uint64_t>(start_cursor, c_f);
             if (safe_cursor < c_s) {
                 const auto safe_cfg = single_contract_config(st->cfg, st->target, core::Finality::Safe);
-                auto sw = std::make_shared<pipeline::Sweeper>(safe_cfg, st->ectx, *st->source, st->sink, wall_now_ms,
+                auto sw = std::make_shared<pipeline::Sweeper>(safe_cfg, st->ectx, *st->source, *st->sink, wall_now_ms,
                                                               st->sw_opt);
                 sw->set_cursors(safe_cursor, std::min(safe_cursor, c_f));
                 if (!(co_await drive_backfill_sweeper(st, sw, c_s, core::Finality::Safe))) {
                     st->rc = kExitFailure;
-                    st->pool->stop();
-                    st->ioc.stop();
                     co_return;
                 }
             }
         }
     }
-    st->pool->stop();
-    st->ioc.stop();
 }
 
 struct AuditFetchState {
-    boost::asio::io_context ioc;
     Config cfg;
     std::uint64_t from_block{0};
     std::uint64_t to_block{0};
@@ -554,8 +611,6 @@ struct AuditFetchState {
 boost::asio::awaitable<void> run_audit_coro(std::shared_ptr<AuditFetchState> st) {
     namespace net = boost::asio;
     if (st->filter.addresses.empty()) {
-        st->pool->stop();
-        st->ioc.stop();
         co_return;
     }
 
@@ -639,7 +694,7 @@ boost::asio::awaitable<void> run_audit_coro(std::shared_ptr<AuditFetchState> st)
                 break;
             }
             if (!page_done && attempt < 10) {
-                net::steady_timer timer(st->ioc);
+                net::steady_timer timer(co_await net::this_coro::executor);
                 timer.expires_after(backoff.next());
                 co_await timer.async_wait(net::use_awaitable);
             }
@@ -649,8 +704,6 @@ boost::asio::awaitable<void> run_audit_coro(std::shared_ptr<AuditFetchState> st)
             break;
         }
     }
-    st->pool->stop();
-    st->ioc.stop();
 }
 
 }  // namespace
@@ -682,7 +735,8 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     const auto sleep_until_deadline = [&](std::chrono::milliseconds d) {
         const auto now = std::chrono::steady_clock::now();
         if (now < deadline) {
-            std::this_thread::sleep_for(std::min(d, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+            std::this_thread::sleep_for(
+                std::min(d, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
         }
     };
 
@@ -732,35 +786,46 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     auto sopts = sink::RedisSinkOptions::from_config(cfg.sink, cfg.lease, token);
     sopts.deploy_env = so.deploy_env;
     sopts.expected_db = expected_db;
-    sink::RedisSink sink(std::move(sopts), keys,
-                         std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
-                                                             "evml:" + cfg.shard.host_id + ":data"),
-                         std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
-                                                             "evml:" + cfg.shard.host_id + ":lease"));
-    sink.start();
+    auto sink = std::make_shared<sink::RedisSink>(
+        std::move(sopts), keys,
+        std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
+                                            "evml:" + cfg.shard.host_id + ":data"),
+        std::make_unique<sink::RedisppConn>(redis_url, keys, std::chrono::milliseconds(2000),
+                                            "evml:" + cfg.shard.host_id + ":lease"));
+    sink->start();
 
     pipeline::SweeperOptions sw_opt;
     sw_opt.min_range = cfg.backfill.min_range;
     sw_opt.max_page_logs = std::max<std::size_t>(1, cfg.sink.queue_capacity / 2);
     const pipeline::EventContext ectx{cfg.shard.id, cfg.shard.host_id, core::version_string()};
 
+    net::io_context ioc;
     auto st = std::make_shared<BackfillState>(cfg, *target, sink, sw_opt, ectx);
-    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), pool_cfg, {});
+    st->pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
     st->pool->start_http_only();
     st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
-    net::co_spawn(st->ioc, run_backfill_coro(st), net::detached);
-    st->ioc.run();
+    const std::weak_ptr<BackfillState> weak_st = st;
+    net::co_spawn(ioc, run_backfill_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+        if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
+        ioc.stop();
+    });
+    ioc.run();
+    st->source.reset();
+    if (st->pool) {
+        st->pool->stop();
+        st->pool.reset();
+    }
 
     if (st->rc != kExitOk || !st->ck_contracts) {
-        (void)sink.drain(std::chrono::seconds(5));
+        (void)sink->drain(std::chrono::seconds(5));
         return kExitFailure;
     }
 
     // Update the manifest only after the last page is acknowledged (§5.6a).
-    if (!sink.wait_idle(std::chrono::seconds(30)) || sink.mode() != sink::SinkMode::Connected) {
+    if (!sink->wait_idle(std::chrono::seconds(30)) || sink->mode() != sink::SinkMode::Connected) {
         std::cerr << "FAIL  sink did not acknowledge backfill emissions\n";
-        (void)sink.drain(std::chrono::seconds(5));
+        (void)sink->drain(std::chrono::seconds(5));
         return kExitFailure;
     }
 
@@ -772,10 +837,10 @@ int backfill_contract(const Config& cfg, std::string_view contract_name, std::ch
     const auto one_manifest = pipeline::contract_manifest(single_contract_config(cfg, *target, target->finality));
     updated.insert(updated.end(), one_manifest.begin(), one_manifest.end());
     std::sort(updated.begin(), updated.end());
-    sink.set_contracts(std::move(updated));
+    sink->set_contracts(std::move(updated));
 
-    const auto drained = sink.drain(std::chrono::seconds(25));
-    if (!drained.flushed || sink.mode() != sink::SinkMode::Connected) {
+    const auto drained = sink->drain(std::chrono::seconds(25));
+    if (!drained.flushed || sink->mode() != sink::SinkMode::Connected) {
         std::cerr << "FAIL  sink failed to flush updated contract manifest\n";
         return kExitFailure;
     }
@@ -829,7 +894,12 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
     try {
         sink::RedisppConn conn(redis_url, keys, std::chrono::milliseconds(2000),
                                "evml:" + cfg.shard.host_id + ":audit");
-        const auto ck = conn.read_checkpoint();
+        const auto ck_res = conn.try_read_checkpoint();
+        if (!ck_res) {
+            std::cerr << "FAIL  redis read failed: " << ck_res.error().what() << "\n";
+            return finish(kExitFailure);
+        }
+        const auto& ck = *ck_res;
         if (!ck.finalized || to_block > *ck.finalized) {
             std::cerr << "FAIL  to_block (" << to_block << ") exceeds ckpt.finalized ("
                       << (ck.finalized ? std::to_string(*ck.finalized) : std::string("none")) << ")\n";
@@ -843,6 +913,14 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
 
         using Attrs = std::unordered_map<std::string, std::string>;
         using StreamItem = std::pair<std::string, sw::redis::Optional<Attrs>>;
+
+        const auto parse_field_u64 = [](std::string_view s) noexcept -> std::optional<std::uint64_t> {
+            if (s.empty()) return std::nullopt;
+            std::uint64_t v = 0;
+            const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+            if (ec != std::errc{} || p != s.data() + s.size()) return std::nullopt;
+            return v;
+        };
 
         for (const auto stream_kind : {core::StreamKind::Events, core::StreamKind::Registry}) {
             std::vector<StreamItem> items;
@@ -865,9 +943,15 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
                     fn_it == attrs.end() || ad_it == attrs.end() || tp_it == attrs.end() || da_it == attrs.end()) {
                     continue;
                 }
-                const std::uint64_t bn = std::stoull(bn_it->second);
+                const auto bn_opt = parse_field_u64(bn_it->second);
+                const auto li_opt = parse_field_u64(li_it->second);
+                if (!bn_opt || !li_opt) {
+                    std::cerr << "FAIL  redis read failed: invalid block_number or log_index\n";
+                    return finish(kExitFailure);
+                }
+                const std::uint64_t bn = *bn_opt;
                 if (bn < from_block || bn > to_block) continue;
-                const std::uint64_t li = std::stoull(li_it->second);
+                const std::uint64_t li = *li_opt;
                 const std::string& event_id = id_it->second;
                 const std::string& type = ty_it->second;
 
@@ -929,7 +1013,8 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
     // provider when one is configured and healthy (§6.2).
     std::size_t best_count = 0;
     for (const auto& [src, cnt] : source_counts) {
-        if (cnt > best_count || (cnt == best_count && !report.dominant_source.empty() && src < report.dominant_source)) {
+        if (cnt > best_count ||
+            (cnt == best_count && !report.dominant_source.empty() && src < report.dominant_source)) {
             best_count = cnt;
             report.dominant_source = src;
         }
@@ -942,13 +1027,23 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
         }
     }
 
+    net::io_context ioc;
     auto st = std::make_shared<AuditFetchState>(cfg, from_block, to_block, cfg.filter());
-    st->pool = provider::ProviderPool::create(st->ioc.get_executor(), pool_cfg, {});
+    st->pool = provider::ProviderPool::create(ioc.get_executor(), pool_cfg, {});
     st->pool->start_http_only();
     st->source = std::make_unique<PoolLogSource>(st->pool, nullptr);
 
-    net::co_spawn(st->ioc, run_audit_coro(st), net::detached);
-    st->ioc.run();
+    const std::weak_ptr<AuditFetchState> weak_st = st;
+    net::co_spawn(ioc, run_audit_coro(st), [&ioc, weak_st](const std::exception_ptr&) {
+        if (const auto s = weak_st.lock(); s && s->pool) s->pool->stop();
+        ioc.stop();
+    });
+    ioc.run();
+    st->source.reset();
+    if (st->pool) {
+        st->pool->stop();
+        st->pool.reset();
+    }
 
     report.audit_provider = st->audit_provider;
     if (!st->fetch_ok) {
@@ -1004,8 +1099,7 @@ int audit_stream(const Config& cfg, std::uint64_t from_block, std::uint64_t to_b
         }
     }
 
-    const bool clean =
-        report.missing == 0 && report.phantom == 0 && report.dup_live == 0 && report.field_mismatch == 0;
+    const bool clean = report.missing == 0 && report.phantom == 0 && report.dup_live == 0 && report.field_mismatch == 0;
     std::cout << (clean ? "ok    " : "FAIL  ") << "audit-stream blocks=" << from_block << ".." << to_block
               << " provider=" << (report.audit_provider.empty() ? "none" : report.audit_provider)
               << " dominant_source=" << (report.dominant_source.empty() ? "none" : report.dominant_source)
@@ -1067,18 +1161,25 @@ int run_cli(int argc, char** argv) {
         } else if (a == "--audit-stream" && i + 2 < argc) {
             const std::string f_str = argv[++i];
             const std::string t_str = argv[++i];
-            const auto is_u64 = [](const std::string& s) {
-                return !s.empty() && s.size() <= 20 &&
-                       std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+            const auto is_u64 = [](std::string_view s) noexcept {
+                if (s.empty()) return false;
+                std::uint64_t v = 0;
+                const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+                return ec == std::errc{} && p == s.data() + s.size();
             };
             if (!is_u64(f_str) || !is_u64(t_str)) {
                 std::cerr << "--audit-stream needs <from_block> <to_block> as unsigned integers\n";
                 return usage();
             }
-            audit_range = std::pair{std::stoull(f_str), std::stoull(t_str)};
+            std::uint64_t f_val = 0;
+            std::uint64_t t_val = 0;
+            (void)std::from_chars(f_str.data(), f_str.data() + f_str.size(), f_val);
+            (void)std::from_chars(t_str.data(), t_str.data() + t_str.size(), t_val);
+            audit_range = std::pair{f_val, t_val};
         } else if (a == "--probe-transport" && i + 1 < argc) {
             const std::string v = argv[++i];
-            if (v.empty() || v.size() > 4 || !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            if (v.empty() || v.size() > 4 ||
+                !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); })) {
                 std::cerr << "--probe-transport needs a number of seconds (1..9999)\n";
                 return usage();
             }

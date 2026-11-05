@@ -10,13 +10,16 @@ std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash
 }
 
 // Prefixes event_id with dedup namespace for Redis string storage.
-std::string dedup_key(const Event& e) { return "dedup:" + e.event_id; }
+std::string dedup_key(const Event& e) {
+    return "dedup:" + e.event_id;
+}
 
 // Enriches raw RPC log into structured Event entity according to schema v=1.
 Event make_event(const rpc::Log& log, const core::Config& cfg, const EventContext& ctx, EventType type,
                  std::uint64_t block_timestamp, std::string first_source, std::uint64_t observed_ms,
                  std::uint64_t emitted_ms) {
-    if (log.topics.empty()) throw std::invalid_argument("make_event: log without topic0 at block " + std::to_string(log.block_number));
+    if (log.topics.empty())
+        throw std::invalid_argument("make_event: log without topic0 at block " + std::to_string(log.block_number));
     // Find dispatch rule for contract address and event signature topic0
     const core::EventRoute* route = cfg.route(log.address, log.topics[0]);
     if (route == nullptr) {
@@ -39,7 +42,8 @@ Event make_event(const rpc::Log& log, const core::Config& cfg, const EventContex
             if (c.topics[i] == log.topics[0]) e.signature = c.events[i];
         }
     }
-    if (e.signature.empty()) throw std::logic_error("make_event: route without a configured signature: " + route->contract);
+    if (e.signature.empty())
+        throw std::logic_error("make_event: route without a configured signature: " + route->contract);
     e.block_number = log.block_number;
     e.block_hash = log.block_hash;
     e.block_timestamp = block_timestamp;
@@ -48,7 +52,7 @@ Event make_event(const rpc::Log& log, const core::Config& cfg, const EventContex
     e.log_index = log.log_index;
     e.topics = log.topics;
     e.data = log.data;
-    e.event_id = make_event_id(e.chain_id, e.block_hash, e.log_index); // Unique event key
+    e.event_id = make_event_id(e.chain_id, e.block_hash, e.log_index);  // Unique event key
     e.first_source = std::move(first_source);
     e.observed_ms = observed_ms;
     e.emitted_ms = emitted_ms;

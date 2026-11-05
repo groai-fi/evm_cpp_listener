@@ -18,10 +18,14 @@ enum class GateSignal : std::uint8_t {
 };
 [[nodiscard]] constexpr const char* to_string(GateSignal s) noexcept {
     switch (s) {
-        case GateSignal::None: return "none";
-        case GateSignal::SafeRegression: return "safe_regression";
-        case GateSignal::SafeHashMismatch: return "safe_hash_mismatch";
-        case GateSignal::FinalizedAnomaly: return "finalized_anomaly";
+        case GateSignal::None:
+            return "none";
+        case GateSignal::SafeRegression:
+            return "safe_regression";
+        case GateSignal::SafeHashMismatch:
+            return "safe_hash_mismatch";
+        case GateSignal::FinalizedAnomaly:
+            return "finalized_anomaly";
     }
     return "unknown";
 }

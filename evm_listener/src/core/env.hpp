@@ -6,8 +6,8 @@
 
 namespace evml::core::env {
 
-/// @brief Walks up filesystem directories starting from `start` to root, loading `.env`, `.env.local.dev`, `.env.local`.
-/// Invariants:
+/// @brief Walks up filesystem directories starting from `start` to root, loading `.env`, `.env.local.dev`,
+/// `.env.local`. Invariants:
 /// - Priority: Earlier-discovered (nearer to current working directory) files take precedence over parent files.
 /// - Non-Overwriting: Variables already defined in process environment are preserved (overwrite = 0).
 /// - Parsing: Handles CRLF line breaks, `export ` prefixes, single/double quotes, and inline ` #` comments.

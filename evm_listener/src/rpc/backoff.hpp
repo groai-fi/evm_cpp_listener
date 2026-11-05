@@ -11,7 +11,8 @@ namespace evml::rpc {
 // so a connect-then-die flap keeps escalating instead of hammering the provider.
 /// @brief Full-jitter exponential backoff generator with connection stability tracking.
 /// Guarantees:
-/// - Anti-Flapping: Attempt counter does not reset on connect; only resets after session stays live for `min_live` (default 30s).
+/// - Anti-Flapping: Attempt counter does not reset on connect; only resets after session stays live for `min_live`
+/// (default 30s).
 /// - Full Jitter: Uniform distribution in [0, min(cap, base * 2^attempt)] avoids synchronization spikes.
 class Backoff {
 public:

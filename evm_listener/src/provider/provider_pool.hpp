@@ -1,6 +1,9 @@
 #pragma once
 
 #include <array>
+#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -12,10 +15,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/steady_timer.hpp>
 
 #include "core/config.hpp"
 #include "provider/provider_book.hpp"
@@ -32,8 +31,8 @@ namespace evml::provider {
 /// @brief Network endpoint descriptor for a single RPC provider (WebSocket and HTTP URLs).
 struct ProviderEndpoint {
     std::string name;
-    std::string ws_url;    // empty for providers that are only used for getLogs
-    std::string http_url;  // required for every provider that appears in an order list
+    std::string ws_url;                              // empty for providers that are only used for getLogs
+    std::string http_url;                            // required for every provider that appears in an order list
     std::optional<std::uint32_t> reconcile_rps{};    // optional override of PoolConfig::reconcile_rps
     std::optional<std::uint32_t> reconcile_burst{};  // optional override of PoolConfig::reconcile_burst
 };
@@ -65,13 +64,14 @@ struct PoolConfig {
     ms backoff_cap{30000};
     ms backoff_min_live{30000};  // a session must stay Ready this long to count as healthy
 
-    ms tick{250};                   // maintenance cadence
+    ms tick{250};                    // maintenance cadence
     ms standby_probe_period{60000};  // eth_blockNumber probe of Up providers that carry no traffic
     ms safe_poll{4000};              // getLogs provider: head + `safe`
     ms finalized_poll{12000};        // getLogs provider: `finalized`
     ms crosscheck_period{60000};     // WS provider's own `safe` (for the getLogs-lag check)
 
-    // Per-provider pacing of call_to() (reconcile getLogs retries, block lookups). call(), probes and polls are not paced.
+    // Per-provider pacing of call_to() (reconcile getLogs retries, block lookups). call(), probes and polls are not
+    // paced.
     std::uint32_t reconcile_rps{2};
     std::uint32_t reconcile_burst{4};  // must be >= reconcile_rps
 };
@@ -82,16 +82,18 @@ enum class Tag : std::uint8_t { Safe, Finalized };
 /// @brief Event callbacks fired by the provider pool for streaming blocks, logs, transitions, and connection events.
 struct PoolHandlers {
     // All optional; called on the pool's executor, must not throw.
-    std::function<void(const rpc::Head&, const std::string& provider)> on_head;
-    std::function<void(const rpc::Log&, const std::string& provider)> on_log;
+    std::function<void(const rpc::Head&, std::string_view provider)> on_head;
+    std::function<void(const rpc::Log&, std::string_view provider)> on_log;
     std::function<void(const Transition&, std::string_view reason)> on_transition;
-    // (from, to, reason): nullopt = no WS provider available. `reason`: initial | failover | switch_back | none_available.
+    // (from, to, reason): nullopt = no WS provider available. `reason`: initial | failover | switch_back |
+    // none_available.
     std::function<void(const std::optional<std::string>& from, const std::optional<std::string>& to,
-                       std::string_view reason)> on_ws_active_changed;
-    std::function<void(const std::string& provider)> on_ws_ready;
-    std::function<void(const rpc::WsClosed&, const std::string& provider)> on_ws_down;
+                       std::string_view reason)>
+        on_ws_active_changed;
+    std::function<void(std::string_view provider)> on_ws_ready;
+    std::function<void(const rpc::WsClosed&, std::string_view provider)> on_ws_down;
     // A fresh `safe` / `finalized` tag answered by `provider` (every successful read_tag, whoever asked for it).
-    std::function<void(const std::string& provider, Tag, std::uint64_t number, const core::Hash32& hash)> on_tag;
+    std::function<void(std::string_view provider, Tag, std::uint64_t number, const core::Hash32& hash)> on_tag;
 };
 
 /// @brief Point-in-time snapshot of a resolved block tag (number and hash) from a specific provider.
@@ -107,13 +109,13 @@ using RequestBuilder = std::function<std::string(std::uint64_t id)>;
 /// @brief Result of a JSON-RPC HTTP invocation with error classification and retry metadata.
 struct RpcOutcome {
     bool ok{false};
-    std::string provider;    // who answered (or who failed last)
-    std::string result_raw;  // raw JSON `result` when ok
+    std::string provider;                      // who answered (or who failed last)
+    std::string result_raw;                    // raw JSON `result` when ok
     rpc::FailKind kind{rpc::FailKind::Retry};  // when !ok
     std::optional<std::uint32_t> range_limit;  // RangeTooLarge: provider's limit when it states one
     std::optional<std::chrono::seconds> retry_after;
-    std::string error;  // human-readable, no secrets
-    int http_status{0};                   // when !ok and the provider answered over HTTP; 0 = no HTTP answer
+    std::string error;                     // human-readable, no secrets
+    int http_status{0};                    // when !ok and the provider answered over HTTP; 0 = no HTTP answer
     std::optional<std::int64_t> rpc_code;  // JSON-RPC error.code when the provider answered with one
 };
 
@@ -122,9 +124,9 @@ struct ProviderHealth {
     std::string name;
     State state{State::Up};
     // Meaningful for Cooldown (quota) and Disabled (auth): what the provider last answered with.
-    int http_status{0};                    // 0 = unknown (e.g. a JSON-RPC level error)
+    int http_status{0};  // 0 = unknown (e.g. a JSON-RPC level error)
     std::optional<std::int64_t> rpc_code;
-    std::string fault_message;             // redacted, one line
+    std::string fault_message;                               // redacted, one line
     std::optional<std::chrono::milliseconds> next_probe_in;  // Down / Cooldown / Disabled: time left until the re-probe
 };
 
@@ -136,7 +138,8 @@ struct ProviderHealth {
 /// @brief Multi-provider RPC orchestrator managing active WebSocket streaming and HTTP request failover.
 /// Invariants & Architecture:
 /// - Dual Paths: Keeps active WebSocket stream for real-time events while using distinct HTTP endpoints for getLogs.
-/// - Self-Healing: Background tick probes dormant providers, polls safe/finalized block tags, and restarts dropped sessions.
+/// - Self-Healing: Background tick probes dormant providers, polls safe/finalized block tags, and restarts dropped
+/// sessions.
 /// - Concurrency: Thread-confined to a single Boost.Asio io_context executor.
 class ProviderPool : public std::enable_shared_from_this<ProviderPool> {
 public:
@@ -151,7 +154,7 @@ public:
     /// @brief Starts background HTTP probe/cooldown maintenance timer without opening WS sessions or tag polling.
     void start_http_only();  // throws std::logic_error if called twice
     /// @brief Stops timers, terminates active WebSocket session, and suppresses pending callbacks.
-    void stop();   // idempotent; no handler is called afterwards
+    void stop();  // idempotent; no handler is called afterwards
 
     // One JSON-RPC request over the getLogs chain. `build` is called once per attempt with that attempt's id.
     // A provider failure falls through to the next provider; RangeTooLarge returns immediately (it is the
@@ -184,9 +187,7 @@ public:
         return node_at(provider).inconsistent;
     }
     /// @brief Number of call_to() calls that had to wait for a token (getlogs_throttled_total).
-    [[nodiscard]] std::uint64_t throttled_total(std::string_view provider) const {
-        return node_at(provider).throttled;
-    }
+    [[nodiscard]] std::uint64_t throttled_total(std::string_view provider) const { return node_at(provider).throttled; }
     /// @brief Total HTTP JSON-RPC requests sent to the provider, keyed by method name.
     [[nodiscard]] const std::map<std::string, std::uint64_t>& rpc_requests_total(std::string_view provider) const {
         return node_at(provider).rpc_requests;
@@ -214,7 +215,8 @@ public:
     /// @brief Returns current health state of named provider.
     [[nodiscard]] State state(std::string_view provider) const { return book_.state(provider).state; }
     /// @brief newHeads silence, in ms, since the last head (or pool start before the first one). Never reset on WS
-    /// failover; also counts while no WS provider is active. nullopt = the pool is not running or does not subscribe to heads.
+    /// failover; also counts while no WS provider is active. nullopt = the pool is not running or does not subscribe to
+    /// heads.
     [[nodiscard]] std::optional<std::uint32_t> ms_since_head() const noexcept;
     /// @brief Health of every provider, in config order. Pure read; call on the pool's executor.
     [[nodiscard]] std::vector<ProviderHealth> health() const;

@@ -1,10 +1,9 @@
 #include "ops/ops_http_server.hpp"
 
-#include <stdexcept>
-
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <stdexcept>
 
 #include "core/log.hpp"
 
@@ -81,7 +80,8 @@ net::awaitable<void> session(std::shared_ptr<OpsHttpServer::State> st, tcp::sock
             path = path.substr(0, path.find('?'));
             const bool keep = req.keep_alive();
 
-            http::response<http::string_body> res = make_response(req.version(), keep, 404, "not found\n", "text/plain");
+            http::response<http::string_body> res =
+                make_response(req.version(), keep, 404, "not found\n", "text/plain");
             if (req.method() != http::verb::get) {
                 res = make_response(req.version(), keep, 405, "method not allowed\n", "text/plain");
                 res.set(http::field::allow, "GET");
@@ -129,9 +129,13 @@ OpsHttpServer::OpsHttpServer(net::io_context& ioc, std::string_view listen, Rout
     net::co_spawn(ioc, accept_loop(st_), net::detached);
 }
 
-OpsHttpServer::~OpsHttpServer() { stop(); }
+OpsHttpServer::~OpsHttpServer() {
+    stop();
+}
 
-std::uint16_t OpsHttpServer::port() const { return st_->acceptor.local_endpoint().port(); }
+std::uint16_t OpsHttpServer::port() const {
+    return st_->acceptor.local_endpoint().port();
+}
 
 void OpsHttpServer::stop() {
     boost::system::error_code ec;

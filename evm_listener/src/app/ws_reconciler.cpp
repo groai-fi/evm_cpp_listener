@@ -31,7 +31,8 @@ pipeline::CrossCheck WsReconciler::on_sweep_page(core::Finality kind, const pipe
     };
     std::uint64_t& reconciled_to = want_safe ? reconciled_safe_to_ : reconciled_final_to_;
     // Historical catch-up pages below live_from_block_, or blocks already reconciled before a safe reorg rewound the
-    // cursor, cannot be cross-checked against PendingBuffer again. Evict any staged entries in that range without counting misses.
+    // cursor, cannot be cross-checked against PendingBuffer again. Evict any staged entries in that range without
+    // counting misses.
     if (!live_from_block_) {
         reconciled_to = std::max(reconciled_to, range.to);
         (void)pending_.reconcile(range.from, range.to, logs, in_scope);
@@ -116,4 +117,3 @@ void WsReconciler::on_ring_resync(std::uint64_t new_head_number) {
 }
 
 }  // namespace evml::app
-

@@ -55,9 +55,10 @@ ConsumerLag evaluate_consumer_lag(const core::ConsumerGroupCfg& cfg, const Group
         StreamId::parse(*f.smallest_pending_id) < StreamId::parse(*f.first_entry_id))
         out.trimmed_unread = true;
     // Redis counts every entry ever appended. Each one is either read by the group, still waiting (lag), or gone
-    // (MINID trim never updates max-deleted-entry-id, so this is the rule that catches unread entries lost to retention).
-    // Only provable when Redis knows both counters. A group that never delivered anything (last-delivered 0-0) has
-    // read zero entries even though Redis reports entries-read as nil for it; otherwise an unknown entries-read is not flagged.
+    // (MINID trim never updates max-deleted-entry-id, so this is the rule that catches unread entries lost to
+    // retention). Only provable when Redis knows both counters. A group that never delivered anything (last-delivered
+    // 0-0) has read zero entries even though Redis reports entries-read as nil for it; otherwise an unknown
+    // entries-read is not flagged.
     std::optional<std::uint64_t> read = f.entries_read;
     if (!read && last_delivered == StreamId{0, 0}) read = 0;
     // Arithmetic check: if total appended exceeds read + lag, intermediate entries were evicted by retention.

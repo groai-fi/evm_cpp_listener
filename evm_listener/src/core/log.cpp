@@ -1,16 +1,17 @@
 #include "core/log.hpp"
 
+#include <spdlog/sinks/stdout_sinks.h>
+
 #include <chrono>
 #include <cstdio>
 #include <ctime>
-
-#include <spdlog/sinks/stdout_sinks.h>
 
 namespace evml::core::log {
 
 namespace {
 
-/// @brief Generates high-resolution UTC ISO-8601 timestamp string with millisecond precision (e.g., 2026-10-21T18:30:00.123Z).
+/// @brief Generates high-resolution UTC ISO-8601 timestamp string with millisecond precision (e.g.,
+/// 2026-10-21T18:30:00.123Z).
 std::string iso_utc_ms() {
     const auto now = std::chrono::system_clock::now();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -27,13 +28,20 @@ std::string iso_utc_ms() {
 /// @brief Maps spdlog severity level enum to lowercase JSON string.
 const char* level_name(spdlog::level::level_enum l) {
     switch (l) {
-        case spdlog::level::trace: return "trace";
-        case spdlog::level::debug: return "debug";
-        case spdlog::level::info: return "info";
-        case spdlog::level::warn: return "warn";
-        case spdlog::level::err: return "error";
-        case spdlog::level::critical: return "critical";
-        default: return "info";
+        case spdlog::level::trace:
+            return "trace";
+        case spdlog::level::debug:
+            return "debug";
+        case spdlog::level::info:
+            return "info";
+        case spdlog::level::warn:
+            return "warn";
+        case spdlog::level::err:
+            return "error";
+        case spdlog::level::critical:
+            return "critical";
+        default:
+            return "info";
     }
 }
 
@@ -62,11 +70,21 @@ std::string json_escape(std::string_view s) {
     out.reserve(s.size() + 2);
     for (const unsigned char c : s) {
         switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
                 // Escape ASCII control codes < 0x20 into unicode hex escape
                 if (c < 0x20) {
@@ -113,9 +131,17 @@ void emit(spdlog::logger& logger, spdlog::level::level_enum lvl, std::string_vie
     logger.log(lvl, line);
 }
 
-void info(std::string_view c, std::string_view m, std::initializer_list<Field> f) { emit(global(), spdlog::level::info, c, m, f); }
-void warn(std::string_view c, std::string_view m, std::initializer_list<Field> f) { emit(global(), spdlog::level::warn, c, m, f); }
-void error(std::string_view c, std::string_view m, std::initializer_list<Field> f) { emit(global(), spdlog::level::err, c, m, f); }
-void debug(std::string_view c, std::string_view m, std::initializer_list<Field> f) { emit(global(), spdlog::level::debug, c, m, f); }
+void info(std::string_view c, std::string_view m, std::initializer_list<Field> f) {
+    emit(global(), spdlog::level::info, c, m, f);
+}
+void warn(std::string_view c, std::string_view m, std::initializer_list<Field> f) {
+    emit(global(), spdlog::level::warn, c, m, f);
+}
+void error(std::string_view c, std::string_view m, std::initializer_list<Field> f) {
+    emit(global(), spdlog::level::err, c, m, f);
+}
+void debug(std::string_view c, std::string_view m, std::initializer_list<Field> f) {
+    emit(global(), spdlog::level::debug, c, m, f);
+}
 
 }  // namespace evml::core::log

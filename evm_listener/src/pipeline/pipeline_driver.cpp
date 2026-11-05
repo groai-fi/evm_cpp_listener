@@ -18,7 +18,7 @@ struct PipelineDriver::State {
         std::uint32_t missed{0};
     };
 
-    const core::Config& cfg;
+    const core::Config cfg;
     Sweeper& sweeper;
     Sink& sink;
     LogSource& source;
@@ -59,7 +59,7 @@ struct PipelineDriver::State {
     // Invariant I2 (Dual Finality): clamp final ceiling to C_s so finalized blocks never outrun safe cursor.
     [[nodiscard]] std::optional<std::uint64_t> final_ceiling() const noexcept {
         if (!g_f) return std::nullopt;
-        return std::min(*g_f, sweeper.c_s()); // Clamp G_f to C_s (Invariant I2)
+        return std::min(*g_f, sweeper.c_s());  // Clamp G_f to C_s (Invariant I2)
     }
 
     // Terminates pipeline with fatal error; requires operator manual intervention to restart.
@@ -80,16 +80,16 @@ struct PipelineDriver::State {
                          std::uint64_t now) {
         if (cursor != p.last_cursor) {
             p.last_cursor = cursor;
-            p.behind_since.reset(); // Reset stall timer upon any forward movement
+            p.behind_since.reset();  // Reset stall timer upon any forward movement
             p.missed = 0;
         }
         if (!ceiling || cursor >= *ceiling) {
-            p.behind_since.reset(); // No work pending; cancel stall timer
+            p.behind_since.reset();  // No work pending; cancel stall timer
             p.missed = 0;
             return;
         }
         if (!p.behind_since) {
-            p.behind_since = now; // Arm stall detection timer
+            p.behind_since = now;  // Arm stall detection timer
             return;
         }
         // Check if stalled for longer than progress_stall_ms watchdog deadline
@@ -107,20 +107,20 @@ struct PipelineDriver::State {
     [[nodiscard]] TickResult after_step(StepStatus status, std::string_view detail) {
         switch (status) {
             case StepStatus::Advanced:
-                backoff.reset(); // Reset exponential backoff after successful forward progress
+                backoff.reset();  // Reset exponential backoff after successful forward progress
                 stalled = false;
                 stall_detail.clear();
-                return TickResult{milliseconds{0}, false}; // Immediate next tick
+                return TickResult{milliseconds{0}, false};  // Immediate next tick
             case StepStatus::Retry:
-                return TickResult{backoff.next(), false}; // Exponential backoff with full jitter
+                return TickResult{backoff.next(), false};  // Exponential backoff with full jitter
             case StepStatus::Stalled:
                 stalled = true;
                 stall_detail = std::string(detail);
                 return TickResult{backoff.next(), false};
             case StepStatus::Paused:
-                return TickResult{opt.pause_poll, false}; // Wait fixed interval while sink is saturated
+                return TickResult{opt.pause_poll, false};  // Wait fixed interval while sink is saturated
             case StepStatus::NoWork:
-                return TickResult{opt.idle_poll, false}; // Sleep idle interval waiting for new head
+                return TickResult{opt.idle_poll, false};  // Sleep idle interval waiting for new head
         }
         return TickResult{opt.idle_poll, false};
     }
@@ -152,14 +152,18 @@ void PipelineDriver::set_gates(std::optional<std::uint64_t> g_s, std::optional<s
     state_->g_f = g_f;
 }
 
-void PipelineDriver::on_safe_reorg_signal(std::string reason) { state_->on_safe_reorg_signal(std::move(reason)); }
+void PipelineDriver::on_safe_reorg_signal(std::string reason) {
+    state_->on_safe_reorg_signal(std::move(reason));
+}
 
 void PipelineDriver::on_gate_frozen(std::string reason) {
     state_->frozen = true;
     state_->frozen_reason = std::move(reason);
 }
 
-void PipelineDriver::request_drain() noexcept { state_->drain = true; }
+void PipelineDriver::request_drain() noexcept {
+    state_->drain = true;
+}
 
 // Restores cursors and contract manifest from Redis sink checkpoint; verifies coverage.
 // Watch out: Returns idle_poll if Redis is unreachable; never throws on temporary sink outage.
@@ -181,9 +185,8 @@ asio::awaitable<TickResult> PipelineDriver::recover(std::shared_ptr<State> st) {
         st->sink.init_checkpoint(c0, manifest);  // one atomic write: never a partial checkpoint (rev 6, E)
     } else if (present != 3) {
         // Partial checkpoint indicates split-brain or incomplete manual restore; halt immediately
-        co_return st->fail(std::string("partial checkpoint: safe=") + (ck.safe ? "set" : "missing") +
-                           " finalized=" + (ck.finalized ? "set" : "missing") +
-                           " contracts=" + (ck.contracts ? "set" : "missing") +
+        co_return st->fail(std::string("partial checkpoint: safe=") + (ck.safe ? "set" : "missing") + " finalized=" +
+                           (ck.finalized ? "set" : "missing") + " contracts=" + (ck.contracts ? "set" : "missing") +
                            "; operator action required (restore the keys or delete all of them to start fresh)");
     } else {
         std::vector<std::string> uncovered;
@@ -195,7 +198,8 @@ asio::awaitable<TickResult> PipelineDriver::recover(std::shared_ptr<State> st) {
         }
         if (!uncovered.empty()) {
             std::string names;
-            for (const auto& n : uncovered) names += (names.empty() ? "" : ", ") + n;
+            for (const auto& n : uncovered)
+                names += (names.empty() ? "" : ", ") + n;
             co_return st->fail("history not covered for contract(s): " + names +
                                "; run with --backfill-contract <name> for each");
         }
@@ -205,7 +209,7 @@ asio::awaitable<TickResult> PipelineDriver::recover(std::shared_ptr<State> st) {
                                std::to_string(*ck.safe));
         }
         st->sweeper.set_cursors(*ck.safe, *ck.finalized);
-        if (*ck.contracts != manifest) st->sink.set_contracts(manifest); // Sync new additions to manifest
+        if (*ck.contracts != manifest) st->sink.set_contracts(manifest);  // Sync new additions to manifest
         // Events of the previous run may have been lost in a discarded spill, including a revert that never
         // reached Redis. Re-check the released window now instead of waiting for the final sweep (rev 6, F).
         // Nothing is released above C_f when C_f == C_s, so there is nothing to verify then.
@@ -214,7 +218,7 @@ asio::awaitable<TickResult> PipelineDriver::recover(std::shared_ptr<State> st) {
 
     st->safe_progress = State::Progress{st->sweeper.c_s(), std::nullopt, 0};
     st->final_progress = State::Progress{st->sweeper.c_f(), std::nullopt, 0};
-    st->state = PipelineState::CatchingUp; // Transition to CatchingUp once checkpoint is valid
+    st->state = PipelineState::CatchingUp;  // Transition to CatchingUp once checkpoint is valid
     co_return TickResult{milliseconds{0}, false};
 }
 
@@ -228,11 +232,11 @@ asio::awaitable<TickResult> PipelineDriver::tick() {
 asio::awaitable<TickResult> PipelineDriver::tick_impl(std::shared_ptr<State> st) {
     if (st->state == PipelineState::Failed) co_return TickResult{milliseconds{0}, true};
     if (st->drain) {
-        st->state = PipelineState::Draining; // Graceful stop requested
+        st->state = PipelineState::Draining;  // Graceful stop requested
         co_return TickResult{milliseconds{0}, true};
     }
     if (st->state == PipelineState::Init || st->state == PipelineState::Recovering) co_return co_await recover(st);
-    if (st->frozen) co_return TickResult{st->opt.idle_poll, false}; // Frozen on FinalizedAnomaly; do not advance
+    if (st->frozen) co_return TickResult{st->opt.idle_poll, false};  // Frozen on FinalizedAnomaly; do not advance
 
     const std::uint64_t now = st->now_ms();
     st->update_progress(st->safe_progress, "safe", st->sweeper.c_s(), st->safe_ceiling(), now);
@@ -243,7 +247,7 @@ asio::awaitable<TickResult> PipelineDriver::tick_impl(std::shared_ptr<State> st)
         const ReverifyResult r = co_await st->sweeper.reverify_released();
         switch (r.status) {
             case StepStatus::Advanced:
-                st->reverify_pending = false; // Successfully re-verified canonical fork
+                st->reverify_pending = false;  // Successfully re-verified canonical fork
                 if (r.reorg) {
                     ++st->safe_reorgs;
                     st->last_fork = r.fork_point;
@@ -255,7 +259,8 @@ asio::awaitable<TickResult> PipelineDriver::tick_impl(std::shared_ptr<State> st)
                 st->reverify_pending = false;
                 ++st->reverify_clean;
                 break;
-            default: break;  // Retry / Stalled / Paused: keep the flag
+            default:
+                break;  // Retry / Stalled / Paused: keep the flag
         }
         const TickResult t = st->after_step(r.status == StepStatus::NoWork ? StepStatus::Advanced : r.status, r.detail);
         st->refresh_state();
@@ -268,7 +273,7 @@ asio::awaitable<TickResult> PipelineDriver::tick_impl(std::shared_ptr<State> st)
 
     if (!safe_work && !final_work) {
         st->refresh_state();
-        co_return TickResult{st->opt.idle_poll, false}; // Both sweeps caught up with gates
+        co_return TickResult{st->opt.idle_poll, false};  // Both sweeps caught up with gates
     }
 
     // Interleave final sweep every final_every ticks to avoid starving finalization during catch-up

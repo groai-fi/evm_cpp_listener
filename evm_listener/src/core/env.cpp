@@ -112,9 +112,8 @@ std::string redact(std::string_view url) {
     if (scheme_end == std::string_view::npos || scheme_end == 0) return "<invalid-url>";
     const std::size_t authority_start = scheme_end + 3;
     const auto path_start = url.find_first_of("/?#", authority_start);
-    std::string_view authority = url.substr(authority_start, path_start == std::string_view::npos
-                                                                 ? std::string_view::npos
-                                                                 : path_start - authority_start);
+    std::string_view authority = url.substr(
+        authority_start, path_start == std::string_view::npos ? std::string_view::npos : path_start - authority_start);
     if (authority.empty()) return "<invalid-url>";
     std::string out(url.substr(0, authority_start));
     // Mask userinfo credentials (user:pass@) if present in authority

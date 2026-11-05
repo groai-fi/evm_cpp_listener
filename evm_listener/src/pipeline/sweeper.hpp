@@ -1,5 +1,6 @@
 #pragma once
 
+#include <boost/asio/awaitable.hpp>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -7,8 +8,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "pipeline/aimd_pager.hpp"
@@ -20,21 +19,26 @@
 namespace evml::pipeline {
 
 enum class StepStatus : std::uint8_t {
-    NoWork,   // cursor already at its ceiling
-    Advanced, // one page swept, emitted and checkpointed
-    Retry,    // transient: nothing emitted, cursor unchanged (a provider failure, an unreadable block)
-    Stalled,  // cannot proceed without operator action (I5): CRITICAL, cursor unchanged. Also: bad responses persisted
-              // through max_bad_attempts (no agreement between getLogs and the canonical-hash source)
-    Paused,   // sink saturated (plan 4.6): nothing done
+    NoWork,    // cursor already at its ceiling
+    Advanced,  // one page swept, emitted and checkpointed
+    Retry,     // transient: nothing emitted, cursor unchanged (a provider failure, an unreadable block)
+    Stalled,   // cannot proceed without operator action (I5): CRITICAL, cursor unchanged. Also: bad responses persisted
+               // through max_bad_attempts (no agreement between getLogs and the canonical-hash source)
+    Paused,    // sink saturated (plan 4.6): nothing done
 };
 
 [[nodiscard]] constexpr const char* to_string(StepStatus s) noexcept {
     switch (s) {
-        case StepStatus::NoWork: return "NoWork";
-        case StepStatus::Advanced: return "Advanced";
-        case StepStatus::Retry: return "Retry";
-        case StepStatus::Stalled: return "Stalled";
-        case StepStatus::Paused: return "Paused";
+        case StepStatus::NoWork:
+            return "NoWork";
+        case StepStatus::Advanced:
+            return "Advanced";
+        case StepStatus::Retry:
+            return "Retry";
+        case StepStatus::Stalled:
+            return "Stalled";
+        case StepStatus::Paused:
+            return "Paused";
     }
     return "?";
 }
@@ -56,9 +60,9 @@ struct ReverifyResult {
 };
 
 struct SweepStats {
-    std::uint64_t emitted_safe{0};     // safe sweep log emissions
-    std::uint64_t emitted_final{0};    // final sweep log emissions (finalized-class + late)
-    std::uint64_t deduped{0};          // skipped by the in-process layer
+    std::uint64_t emitted_safe{0};   // safe sweep log emissions
+    std::uint64_t emitted_final{0};  // final sweep log emissions (finalized-class + late)
+    std::uint64_t deduped{0};        // skipped by the in-process layer
     std::uint64_t reverts{0};
     std::uint64_t late{0};             // safe-class logs the safe sweep missed (safe_missed_total)
     std::uint64_t last_late_block{0};  // block number of the latest safe-class log the safe sweep missed
@@ -72,8 +76,8 @@ struct SweepStats {
 };
 
 struct SweeperOptions {
-    std::uint32_t min_range{10};         // [backfill] min_range; clamped per provider by AimdPager
-    std::size_t recent_capacity{8192};   // layer-1 dedup window
+    std::uint32_t min_range{10};        // [backfill] min_range; clamped per provider by AimdPager
+    std::size_t recent_capacity{8192};  // layer-1 dedup window
     // A response that fails validation or the canonical-hash check is discarded, the provider is reported bad and
     // the page is retried; no agreement after this many attempts => Stalled (rev 5, G2). Must be >= 1.
     std::uint32_t max_bad_attempts{3};

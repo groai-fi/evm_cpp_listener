@@ -33,9 +33,9 @@ std::uint64_t age_ms(std::uint64_t now, std::uint64_t beat, std::uint64_t baseli
 // "YYYY-MM-DDTHH:MM:SS.mmmZ" from the wall clock without gmtime_r (which takes a libc lock: not safe while wedged).
 // Civil-from-days algorithm (H. Hinnant), valid for the proleptic Gregorian calendar.
 void format_iso_utc_ms(char (&out)[96]) {
-    const auto ms_total = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
+    const auto ms_total =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     const long long days = ms_total / 86'400'000;
     const long long ms_of_day = ms_total % 86'400'000;
     const long long z = days + 719468;
@@ -52,7 +52,9 @@ void format_iso_utc_ms(char (&out)[96]) {
                   static_cast<int>(ms_of_day / 1000 % 60), static_cast<int>(ms_of_day % 1000));
 }
 
-constexpr unsigned long long ull(std::uint64_t v) { return static_cast<unsigned long long>(v); }
+constexpr unsigned long long ull(std::uint64_t v) {
+    return static_cast<unsigned long long>(v);
+}
 
 }  // namespace
 
@@ -63,7 +65,9 @@ Watchdog::Watchdog(Options opts) : opts_(std::move(opts)) {
     if (!opts_.on_abort) opts_.on_abort = abort_process;
 }
 
-Watchdog::~Watchdog() { stop(); }
+Watchdog::~Watchdog() {
+    stop();
+}
 
 void Watchdog::arm() {
     const std::uint64_t now = opts_.now();
@@ -84,9 +88,13 @@ void Watchdog::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-void Watchdog::beat_io() { io_beat_.store(opts_.now(), std::memory_order_relaxed); }
+void Watchdog::beat_io() {
+    io_beat_.store(opts_.now(), std::memory_order_relaxed);
+}
 
-void Watchdog::beat_sink() { sink_beat_.store(opts_.now(), std::memory_order_relaxed); }
+void Watchdog::beat_sink() {
+    sink_beat_.store(opts_.now(), std::memory_order_relaxed);
+}
 
 void Watchdog::set_sink_registered(bool registered) {
     if (registered) sink_beat_.store(opts_.now(), std::memory_order_relaxed);
@@ -138,7 +146,8 @@ void Watchdog::fire(const char* which, std::uint64_t age) {
     char buf[1024];  // stack only: no allocation while wedged. Same keys as core/log (ts, level, message, component).
     const int n = std::snprintf(
         buf, sizeof buf,
-        "{\"ts\":\"%s\",\"level\":\"critical\",\"message\":\"watchdog abort: heartbeat stale\",\"component\":\"watchdog\","
+        "{\"ts\":\"%s\",\"level\":\"critical\",\"message\":\"watchdog abort: heartbeat "
+        "stale\",\"component\":\"watchdog\","
         "\"heartbeat\":\"%s\",\"stale_ms\":\"%llu\",\"limit_ms\":\"%llu\",\"role\":\"%llu\",\"driver_state\":\"%llu\","
         "\"c_s\":\"%llu\",\"c_f\":\"%llu\",\"g_s\":\"%llu\",\"g_f\":\"%llu\",\"sink_mode\":\"%llu\"}\n",
         ts, which, ull(age), ull(opts_.stall_ms), ull(state_[0].load(std::memory_order_relaxed)),

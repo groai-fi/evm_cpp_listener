@@ -8,12 +8,12 @@ namespace evml::provider {
 
 /// @brief Configurable block and time thresholds for stale node and stall detection.
 struct StaleThresholds {
-    std::uint32_t ws_lag_blocks{5};                   // WS head behind the getLogs provider's head by MORE than this...
-    std::chrono::seconds ws_lag_for{30};              // ...continuously for this long => WS provider is stale
-    std::uint32_t safe_lag_blocks{30};                // getLogs provider's `safe` behind the WS provider's by MORE than this...
-    std::chrono::seconds safe_lag_for{120};           // ...continuously for this long => getLogs provider is stale
-    std::chrono::seconds head_stall{15};              // no newHeads at all for this long => WS session must fail
-    std::uint32_t divergence_blocks{200};             // ~1 L1 epoch: heads/tags this far apart => WARN
+    std::uint32_t ws_lag_blocks{5};          // WS head behind the getLogs provider's head by MORE than this...
+    std::chrono::seconds ws_lag_for{30};     // ...continuously for this long => WS provider is stale
+    std::uint32_t safe_lag_blocks{30};       // getLogs provider's `safe` behind the WS provider's by MORE than this...
+    std::chrono::seconds safe_lag_for{120};  // ...continuously for this long => getLogs provider is stale
+    std::chrono::seconds head_stall{15};     // no newHeads at all for this long => WS session must fail
+    std::uint32_t divergence_blocks{200};    // ~1 L1 epoch: heads/tags this far apart => WARN
 };
 
 // Pure stale/lag detection for the head tracker (plan 2.6). No I/O, no clock: every call takes `now`.
@@ -22,7 +22,8 @@ struct StaleThresholds {
 /// @brief Pure evaluation state machine tracking head block and safe tag divergence across dual providers.
 /// Guarantees:
 /// - Silent Stall Catch: Flags WS stalls if no newHeads are received within `head_stall` duration (default 15s).
-/// - Cross-Provider Lag: Detects if WS head lags HTTP head by > 5 blocks for > 30s, or getLogs safe tag lags by > 30 blocks for > 120s.
+/// - Cross-Provider Lag: Detects if WS head lags HTTP head by > 5 blocks for > 30s, or getLogs safe tag lags by > 30
+/// blocks for > 120s.
 /// - Deterministic: Pure logic with zero I/O; accepts explicit `TimePoint now` on all methods for mockability.
 class StaleDetector {
 public:
@@ -51,12 +52,14 @@ public:
     /// @brief Time since the last newHeads block (or since start before the first one). Never reset on WS failover.
     [[nodiscard]] std::chrono::milliseconds ws_head_silence(TimePoint now) const noexcept;
     /// @brief Returns true if WS head has continuously lagged HTTP head by > ws_lag_blocks for > ws_lag_for.
-    [[nodiscard]] bool ws_stale(TimePoint now) const noexcept;         // WS head lags the getLogs provider's head
-    /// @brief Returns true if HTTP safe tag has continuously lagged WS safe tag by > safe_lag_blocks for > safe_lag_for.
-    [[nodiscard]] bool getlogs_stale(TimePoint now) const noexcept;    // getLogs `safe` lags the WS provider's `safe`
+    [[nodiscard]] bool ws_stale(TimePoint now) const noexcept;  // WS head lags the getLogs provider's head
+    /// @brief Returns true if HTTP safe tag has continuously lagged WS safe tag by > safe_lag_blocks for >
+    /// safe_lag_for.
+    [[nodiscard]] bool getlogs_stale(TimePoint now) const noexcept;  // getLogs `safe` lags the WS provider's `safe`
 
     // Largest head/safe distance between the two sides when it exceeds divergence_blocks (WARN material).
-    /// @brief Returns maximum block distance between WS and HTTP if it exceeds divergence threshold (default 200 blocks).
+    /// @brief Returns maximum block distance between WS and HTTP if it exceeds divergence threshold (default 200
+    /// blocks).
     [[nodiscard]] std::optional<std::uint64_t> divergence() const noexcept;
 
 private:

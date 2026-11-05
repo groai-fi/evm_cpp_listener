@@ -1,15 +1,14 @@
 #pragma once
 // Ops HTTP server on the io thread (plan 60 §5.2, slice 5-B3): GET /healthz, /readyz, /metrics through callbacks that
-// return status + body. Unknown path 404, other methods 405. Binds `[::]:port` dual-stack (IPv4 too) when the host is an
-// IPv6 literal. The service has no public domain; no endpoint may put secrets in a body.
+// return status + body. Unknown path 404, other methods 405. Binds `[::]:port` dual-stack (IPv4 too) when the host is
+// an IPv6 literal. The service has no public domain; no endpoint may put secrets in a body.
+#include <boost/asio/io_context.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
-
-#include <boost/asio/io_context.hpp>
 
 namespace evml::ops {
 
@@ -29,9 +28,12 @@ public:
         Handler metrics;
     };
 
-    /// @param listen "host:port" with an optional bracketed IPv6 host, e.g. "[::]:9464", "127.0.0.1:0" (port 0 = ephemeral).
-    /// @param request_timeout per-connection deadline for reading one request and for an idle keep-alive (slow-client guard).
-    /// @throws std::invalid_argument on a malformed `listen` or a null handler; boost::system::system_error if the bind fails.
+    /// @param listen "host:port" with an optional bracketed IPv6 host, e.g. "[::]:9464", "127.0.0.1:0" (port 0 =
+    /// ephemeral).
+    /// @param request_timeout per-connection deadline for reading one request and for an idle keep-alive (slow-client
+    /// guard).
+    /// @throws std::invalid_argument on a malformed `listen` or a null handler; boost::system::system_error if the bind
+    /// fails.
     OpsHttpServer(boost::asio::io_context& ioc, std::string_view listen, Routes routes,
                   std::chrono::milliseconds request_timeout = std::chrono::seconds(10));
     ~OpsHttpServer();

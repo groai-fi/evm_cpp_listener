@@ -1,13 +1,12 @@
 #include "provider/provider_pool.hpp"
 
 #include <algorithm>
-#include <limits>
-#include <stdexcept>
-
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <limits>
+#include <stdexcept>
 
 #include "core/error.hpp"
 #include "rpc/blocking_http.hpp"
@@ -21,17 +20,26 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-const char* tag_name(Tag t) { return t == Tag::Safe ? "safe" : "finalized"; }
-std::size_t tag_index(Tag t) { return static_cast<std::size_t>(t); }
+const char* tag_name(Tag t) {
+    return t == Tag::Safe ? "safe" : "finalized";
+}
+std::size_t tag_index(Tag t) {
+    return static_cast<std::size_t>(t);
+}
 
 const char* reason_name(ProviderBook::WsDecision::Reason r) {
     using R = ProviderBook::WsDecision::Reason;
     switch (r) {
-        case R::Keep: return "keep";
-        case R::Initial: return "initial";
-        case R::Forced: return "failover";
-        case R::SwitchBack: return "switch_back";
-        case R::NoneAvailable: return "none_available";
+        case R::Keep:
+            return "keep";
+        case R::Initial:
+            return "initial";
+        case R::Forced:
+            return "failover";
+        case R::SwitchBack:
+            return "switch_back";
+        case R::NoneAvailable:
+            return "none_available";
     }
     return "unknown";
 }
@@ -119,10 +127,10 @@ ProviderPool::ProviderPool(Private, net::any_io_executor executor, PoolConfig cf
         }
         const std::uint32_t rps = p.reconcile_rps.value_or(cfg_.reconcile_rps);
         const std::uint32_t burst = p.reconcile_burst.value_or(cfg_.reconcile_burst);
-        nodes_.emplace(p.name, Node(p, std::move(http),
-                                    rpc::Backoff(cfg_.seed + i++, cfg_.backoff_base, cfg_.backoff_cap,
-                                                 cfg_.backoff_min_live),
-                                    TokenBucket(rps, burst, Clock::now())));
+        nodes_.emplace(p.name,
+                       Node(p, std::move(http),
+                            rpc::Backoff(cfg_.seed + i++, cfg_.backoff_base, cfg_.backoff_cap, cfg_.backoff_min_live),
+                            TokenBucket(rps, burst, Clock::now())));
         names_.push_back(p.name);
     }
 }
@@ -136,7 +144,8 @@ void ProviderPool::start() {
     next_poll_ = now;
     next_finalized_ = now;
     next_crosscheck_ = now + cfg_.crosscheck_period;
-    for (auto& [_, n] : nodes_) n.next_standby_probe = now + cfg_.standby_probe_period;
+    for (auto& [_, n] : nodes_)
+        n.next_standby_probe = now + cfg_.standby_probe_period;
     tick();
 }
 
@@ -146,7 +155,8 @@ void ProviderPool::start_http_only() {
     running_ = true;
     http_only_ = true;
     const auto now = Clock::now();
-    for (auto& [_, n] : nodes_) n.next_standby_probe = now + cfg_.standby_probe_period;
+    for (auto& [_, n] : nodes_)
+        n.next_standby_probe = now + cfg_.standby_probe_period;
     schedule_tick();
 }
 
@@ -261,7 +271,7 @@ void ProviderPool::end_session(rpc::WsClosed c) {
     reconcile();
     if (!running_ || session_) return;  // reconcile already started a session on another provider
     const auto& active = book_.active_ws();
-    if (!active) return;                // nothing usable: tick() retries as providers recover
+    if (!active) return;  // nothing usable: tick() retries as providers recover
     // Apply backoff delay respecting Retry-After hint before reconnecting.
     const auto hint = c.retry_after ? std::chrono::duration_cast<ms>(*c.retry_after) : ms{0};
     schedule_restart(*active, std::max(node_at(*active).backoff.next(), hint));
@@ -271,13 +281,14 @@ void ProviderPool::schedule_restart(std::string_view name, ms delay) {
     const auto gen = session_gen_;
     std::string target(name);
     restart_timer_.expires_after(delay);
-    restart_timer_.async_wait([w = weak_from_this(), gen, name = std::move(target)](const boost::system::error_code& ec) {
-        if (ec) return;
-        auto p = w.lock();
-        if (!p || !p->running_ || p->session_gen_ != gen || p->session_) return;
-        if (p->book_.active_ws() != name) return;
-        p->start_session(name);
-    });
+    restart_timer_.async_wait(
+        [w = weak_from_this(), gen, name = std::move(target)](const boost::system::error_code& ec) {
+            if (ec) return;
+            auto p = w.lock();
+            if (!p || !p->running_ || p->session_gen_ != gen || p->session_) return;
+            if (p->book_.active_ws() != name) return;
+            p->start_session(name);
+        });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -297,7 +308,8 @@ std::optional<std::uint32_t> ProviderPool::ms_since_head() const noexcept {
     // resets it, so a pool stuck without heads still reports growing silence and WebSocket Stalled can fire.
     if (!running_ || !cfg_.subscribe_heads) return std::nullopt;
     const auto ms_silent = detector_.ws_head_silence(Clock::now()).count();
-    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms_silent, 0, std::numeric_limits<std::uint32_t>::max()));
+    return static_cast<std::uint32_t>(
+        std::clamp<std::int64_t>(ms_silent, 0, std::numeric_limits<std::uint32_t>::max()));
 }
 
 std::vector<ProviderHealth> ProviderPool::health() const {
@@ -393,7 +405,8 @@ void ProviderPool::tick() {
         Node& n = node_at(name);
         bool due;
         if (st == State::Up) {
-            if (http_only_ || active == name || cur == name) continue;  // carries real traffic: that is its health signal
+            if (http_only_ || active == name || cur == name)
+                continue;  // carries real traffic: that is its health signal
             due = now >= n.next_standby_probe;
         } else {
             due = book_.probe_due(name, now);

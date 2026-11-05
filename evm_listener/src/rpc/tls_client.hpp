@@ -1,11 +1,11 @@
 #pragma once
 
+#include <openssl/ssl.h>
+
+#include <boost/asio/ssl.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
-
-#include <boost/asio/ssl.hpp>
-#include <openssl/ssl.h>
 
 namespace evml::rpc {
 
@@ -30,4 +30,3 @@ template <class SslStream>
 }
 
 }  // namespace evml::rpc
-

@@ -15,7 +15,8 @@ const std::array<std::uint32_t, 256>& crc_table() {
         std::array<std::uint32_t, 256> t{};
         for (std::uint32_t i = 0; i < 256; ++i) {
             std::uint32_t c = i;
-            for (int k = 0; k < 8; ++k) c = (c & 1u) ? (c >> 1) ^ 0x82F63B78u : (c >> 1);
+            for (int k = 0; k < 8; ++k)
+                c = (c & 1u) ? (c >> 1) ^ 0x82F63B78u : (c >> 1);
             t[i] = c;
         }
         return t;
@@ -24,12 +25,14 @@ const std::array<std::uint32_t, 256>& crc_table() {
 }
 
 void put_u32(std::string& out, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((v >> (8 * i)) & 0xFFu));
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<char>((v >> (8 * i)) & 0xFFu));
 }
 
 std::uint32_t get_u32(const char* p) {
     std::uint32_t v = 0;
-    for (int i = 0; i < 4; ++i) v |= static_cast<std::uint32_t>(static_cast<unsigned char>(p[i])) << (8 * i);
+    for (int i = 0; i < 4; ++i)
+        v |= static_cast<std::uint32_t>(static_cast<unsigned char>(p[i])) << (8 * i);
     return v;
 }
 
@@ -43,13 +46,13 @@ bool is_spill_segment(const std::filesystem::path& p) {
 std::uint32_t crc32c(core::BytesView data) noexcept {
     const auto& t = crc_table();
     std::uint32_t crc = 0xFFFFFFFFu;
-    for (const std::uint8_t b : data) crc = t[(crc ^ b) & 0xFFu] ^ (crc >> 8);
+    for (const std::uint8_t b : data)
+        crc = t[(crc ^ b) & 0xFFu] ^ (crc >> 8);
     return ~crc;
 }
 
 std::uint32_t crc32c(std::string_view data) noexcept {
-    return crc32c(
-        core::BytesView(reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+    return crc32c(core::BytesView(reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
 }
 
 Spill::Spill(std::filesystem::path dir, std::uint64_t max_bytes, std::uint64_t segment_bytes)
@@ -62,7 +65,8 @@ Spill::Spill(std::filesystem::path dir, std::uint64_t max_bytes, std::uint64_t s
     std::filesystem::create_directories(dir_, ec);
     if (ec) throw SpillError("spill: cannot create " + dir_.string() + ": " + ec.message());
 
-    // Wipe leftovers of an earlier process. Only our own segment files: a mis-set spill_dir must not delete anything else.
+    // Wipe leftovers of an earlier process. Only our own segment files: a mis-set spill_dir must not delete anything
+    // else.
     for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
         if (!entry.is_regular_file() || !is_spill_segment(entry.path())) continue;
         std::error_code rm_ec;
@@ -77,7 +81,8 @@ Spill::~Spill() {
     writer_.close();
     reader_.close();
     std::error_code ec;
-    for (const auto& s : segments_) std::filesystem::remove(path_of(s.id), ec);
+    for (const auto& s : segments_)
+        std::filesystem::remove(path_of(s.id), ec);
 }
 
 std::filesystem::path Spill::path_of(std::uint64_t id) const {
@@ -117,7 +122,8 @@ void Spill::append(std::uint8_t kind, std::string_view payload) {
     buf.append(payload);
     // Compute Castagnoli CRC32C over [kind + payload] and backfill into header.
     const std::uint32_t crc = crc32c(std::string_view(buf).substr(8, 1 + payload.size()));
-    for (std::size_t i = 0; i < 4; ++i) buf[4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFFu);
+    for (std::size_t i = 0; i < 4; ++i)
+        buf[4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFFu);
 
     writer_.write(buf.data(), static_cast<std::streamsize>(buf.size()));
     writer_.flush();  // to the OS, so the reader (same process) sees it; deliberately no fsync
@@ -149,7 +155,8 @@ std::optional<SpillRecord> Spill::peek() {
     char header[kHeaderBytes];
     reader_.read(header, static_cast<std::streamsize>(kHeaderBytes));
     if (reader_.gcount() != static_cast<std::streamsize>(kHeaderBytes))
-        throw SpillError("spill: short header read in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
+        throw SpillError("spill: short header read in segment " + std::to_string(s.id) + " at offset " +
+                         std::to_string(s.read_off));
 
     const std::uint32_t len = get_u32(header);
     const std::uint32_t crc = get_u32(header + 4);
@@ -162,11 +169,13 @@ std::optional<SpillRecord> Spill::peek() {
     if (len > 0) {
         reader_.read(body.data() + 1, static_cast<std::streamsize>(len));
         if (reader_.gcount() != static_cast<std::streamsize>(len))
-            throw SpillError("spill: short payload read in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
+            throw SpillError("spill: short payload read in segment " + std::to_string(s.id) + " at offset " +
+                             std::to_string(s.read_off));
     }
     // Verify CRC32C checksum over kind discriminator byte and payload string.
     if (crc32c(std::string_view(body)) != crc)
-        throw SpillError("spill: CRC mismatch in segment " + std::to_string(s.id) + " at offset " + std::to_string(s.read_off));
+        throw SpillError("spill: CRC mismatch in segment " + std::to_string(s.id) + " at offset " +
+                         std::to_string(s.read_off));
 
     peeked_ = SpillRecord{static_cast<std::uint8_t>(static_cast<unsigned char>(body[0])), body.substr(1)};
     peeked_size_ = kHeaderBytes + len;
@@ -208,7 +217,8 @@ std::uint64_t Spill::discard_all() {
     segments_.clear();
     records_ = 0;
     bytes_ = 0;
-    for (const auto& s : all) remove_segment_file(s.id);
+    for (const auto& s : all)
+        remove_segment_file(s.id);
     return dropped;
 }
 

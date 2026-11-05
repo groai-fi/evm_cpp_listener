@@ -1,12 +1,12 @@
 #pragma once
 
+#include <spdlog/spdlog.h>
+
 #include <initializer_list>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include <spdlog/spdlog.h>
 
 namespace evml::core::log {
 

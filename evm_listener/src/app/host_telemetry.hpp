@@ -1,5 +1,6 @@
 #pragma once
 
+#include <boost/asio/any_io_executor.hpp>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -7,8 +8,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-
-#include <boost/asio/any_io_executor.hpp>
 
 #include "app/ws_reconciler.hpp"
 #include "chain/reorg_detector.hpp"

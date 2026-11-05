@@ -8,10 +8,12 @@
 
 namespace evml::sink {
 
-// Redis key schema of one shard (plan 4.1). Every key shares the hash tag `{shard}`, so every Lua script is single-slot.
+// Redis key schema of one shard (plan 4.1). Every key shares the hash tag `{shard}`, so every Lua script is
+// single-slot.
 /// @brief Redis key naming generator scoped by shard hashtag {shard}.
 /// Guarantees:
-/// - Cluster Compatibility: Every key contains the `{shard}` hashtag, guaranteeing all shard keys hash to the same cluster slot for atomic Lua execution.
+/// - Cluster Compatibility: Every key contains the `{shard}` hashtag, guaranteeing all shard keys hash to the same
+/// cluster slot for atomic Lua execution.
 class Keys {
 public:
     /// @brief Initializes key prefix using shard name.

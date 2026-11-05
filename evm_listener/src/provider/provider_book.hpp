@@ -36,24 +36,29 @@ enum class State : std::uint8_t {
 };
 [[nodiscard]] constexpr const char* to_string(State s) noexcept {
     switch (s) {
-        case State::Up: return "up";
-        case State::Down: return "down";
-        case State::Cooldown: return "cooldown";
-        case State::Disabled: return "disabled";
-        case State::Fatal: return "fatal";
+        case State::Up:
+            return "up";
+        case State::Down:
+            return "down";
+        case State::Cooldown:
+            return "cooldown";
+        case State::Disabled:
+            return "disabled";
+        case State::Fatal:
+            return "fatal";
     }
     return "unknown";
 }
 
 /// @brief Thresholds and cooldowns governing provider health state transitions and failover hysteresis.
 struct Policy {
-    unsigned failover_after{3};            // consecutive session/request failures before Up -> Down
-    seconds quota_cooldown{3600};          // QuotaExhausted
-    seconds auth_disable{600};             // AuthFatal
-    seconds probe_interval{30};            // re-probe cadence for Down providers
-    seconds default_rate_limit_wait{10};   // RateLimited without a Retry-After hint
-    seconds prefer_primary_after{600};     // a better-ranked provider must be healthy this long to take over again
-    seconds min_voluntary_gap{60};         // spacing between switch-backs / stale demotions / forced failovers
+    unsigned failover_after{3};           // consecutive session/request failures before Up -> Down
+    seconds quota_cooldown{3600};         // QuotaExhausted
+    seconds auth_disable{600};            // AuthFatal
+    seconds probe_interval{30};           // re-probe cadence for Down providers
+    seconds default_rate_limit_wait{10};  // RateLimited without a Retry-After hint
+    seconds prefer_primary_after{600};    // a better-ranked provider must be healthy this long to take over again
+    seconds min_voluntary_gap{60};        // spacing between switch-backs / stale demotions / forced failovers
 };
 
 /// @brief Per-provider health record tracking consecutive errors, rate limit backoff, and probe timers.
@@ -87,8 +92,10 @@ struct Transition {
 //    to have been healthy for `prefer_primary_after`.
 /// @brief Deterministic failover book tracking provider health, rate limits, and dual-provider cross-checking.
 /// Invariants & Rules:
-/// - Sticky Primary: Current WebSocket provider is retained while Up; primary switchback requires 10 min sustained health.
-/// - Independent Cross-Check: `pick_getlogs` prefers a different provider than `active_ws` to cross-validate chain state.
+/// - Sticky Primary: Current WebSocket provider is retained while Up; primary switchback requires 10 min sustained
+/// health.
+/// - Independent Cross-Check: `pick_getlogs` prefers a different provider than `active_ws` to cross-validate chain
+/// state.
 /// - Anti-Flap: Minimum 60-second gap enforced between voluntary switches and stale demotions.
 class ProviderBook {
 public:
@@ -97,9 +104,10 @@ public:
     ProviderBook(std::vector<std::string> ws_order, std::vector<std::string> getlogs_order, Policy policy = {});
 
     // ---- events (unknown provider names throw std::out_of_range) ----
-    /// @brief Records request failure and updates state (Down on consecutive retries, Cooldown on quota, Disabled on auth).
-    std::optional<Transition> on_failure(std::string_view name, rpc::FailKind kind,
-                                         std::optional<seconds> retry_after, TimePoint now);
+    /// @brief Records request failure and updates state (Down on consecutive retries, Cooldown on quota, Disabled on
+    /// auth).
+    std::optional<Transition> on_failure(std::string_view name, rpc::FailKind kind, std::optional<seconds> retry_after,
+                                         TimePoint now);
     /// @brief Records successful call, resetting failure counts and promoting to Up.
     std::optional<Transition> on_success(std::string_view name, TimePoint now);
     /// @brief Records health probe outcome, transitioning Down providers back to Up if successful.
@@ -125,7 +133,8 @@ public:
         Reason reason{Reason::Keep};
     };
     // Stateful: remembers the active WS provider. Call after any event and periodically.
-    /// @brief Evaluates active WebSocket provider selection, applying sticky retention and 10-minute switchback hysteresis.
+    /// @brief Evaluates active WebSocket provider selection, applying sticky retention and 10-minute switchback
+    /// hysteresis.
     WsDecision select_ws(TimePoint now);
     /// @brief Returns currently active WebSocket provider name, or nullopt if none assigned.
     [[nodiscard]] const std::optional<std::string>& active_ws() const noexcept { return active_ws_; }

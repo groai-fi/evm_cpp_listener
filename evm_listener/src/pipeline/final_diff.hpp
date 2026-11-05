@@ -10,9 +10,9 @@
 namespace evml::pipeline {
 
 struct FinalDiff {
-    std::vector<std::string> matched;       // released and still canonical: nothing to do
-    std::vector<rpc::Log> late;             // in the sweep only: the safe sweep missed it (safe_missed_total)
-    std::vector<ReleasedEntry> vanished;    // released only: no longer canonical -> revert (SafeReorg)
+    std::vector<std::string> matched;     // released and still canonical: nothing to do
+    std::vector<rpc::Log> late;           // in the sweep only: the safe sweep missed it (safe_missed_total)
+    std::vector<ReleasedEntry> vanished;  // released only: no longer canonical -> revert (SafeReorg)
 };
 
 // Reconciles previously released safe logs against canonical finalized sweep logs (plan 3.5).

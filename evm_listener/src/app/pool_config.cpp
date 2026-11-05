@@ -11,11 +11,11 @@ provider::PoolConfig make_pool_config(const core::Config& cfg, std::string_view 
     provider::PoolConfig p;
 
     // Deduplicate endpoints so a provider configured for both WS streaming and HTTP getLogs shares state.
-    const auto upsert = [&p](const std::string& name) -> provider::ProviderEndpoint& {
+    const auto upsert = [&p](std::string_view name) -> provider::ProviderEndpoint& {
         auto it = std::find_if(p.providers.begin(), p.providers.end(),
                                [&](const provider::ProviderEndpoint& e) { return e.name == name; });
         if (it == p.providers.end()) {
-            p.providers.push_back({name, "", ""});
+            p.providers.push_back({std::string(name), "", ""});
             return p.providers.back();
         }
         return *it;

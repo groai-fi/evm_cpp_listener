@@ -18,8 +18,10 @@ ProviderBook::ProviderBook(std::vector<std::string> ws_order, std::vector<std::s
     if (ws_order_.empty() && getlogs_order_.empty()) throw std::invalid_argument("ProviderBook: no providers");
     if (has_duplicates(ws_order_)) throw std::invalid_argument("ProviderBook: duplicate name in ws_order");
     if (has_duplicates(getlogs_order_)) throw std::invalid_argument("ProviderBook: duplicate name in getlogs_order");
-    for (const auto& n : ws_order_) providers_.emplace(n, ProviderState{});
-    for (const auto& n : getlogs_order_) providers_.emplace(n, ProviderState{});
+    for (const auto& n : ws_order_)
+        providers_.emplace(n, ProviderState{});
+    for (const auto& n : getlogs_order_)
+        providers_.emplace(n, ProviderState{});
 }
 
 ProviderState& ProviderBook::at(std::string_view name) {
@@ -32,7 +34,9 @@ const ProviderState& ProviderBook::at(std::string_view name) const {
     if (it == providers_.end()) throw std::out_of_range("ProviderBook: unknown provider '" + std::string(name) + "'");
     return it->second;
 }
-const ProviderState& ProviderBook::state(std::string_view name) const { return at(name); }
+const ProviderState& ProviderBook::state(std::string_view name) const {
+    return at(name);
+}
 
 std::optional<Transition> ProviderBook::set_state(ProviderState& ps, std::string_view name, State to) {
     if (ps.state == to) return std::nullopt;
@@ -91,9 +95,15 @@ std::optional<Transition> ProviderBook::on_probe_result(std::string_view name, b
     if (ps.state == State::Up) return on_failure(name, rpc::FailKind::Retry, std::nullopt, now);
     ps.healthy_since.reset();
     switch (ps.state) {
-        case State::Cooldown: ps.next_probe_at = now + policy_.quota_cooldown; break;
-        case State::Disabled: ps.next_probe_at = now + policy_.auth_disable; break;
-        default: ps.next_probe_at = now + policy_.probe_interval; break;
+        case State::Cooldown:
+            ps.next_probe_at = now + policy_.quota_cooldown;
+            break;
+        case State::Disabled:
+            ps.next_probe_at = now + policy_.auth_disable;
+            break;
+        default:
+            ps.next_probe_at = now + policy_.probe_interval;
+            break;
     }
     return std::nullopt;
 }
@@ -167,7 +177,9 @@ ProviderBook::WsDecision ProviderBook::select_ws(TimePoint now) {
     return {active_ws_, active_ws_, false, Reason::Keep};
 }
 
-std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const { return pick_getlogs(now, {}); }
+std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now) const {
+    return pick_getlogs(now, {});
+}
 
 std::optional<std::string> ProviderBook::pick_getlogs(TimePoint now, const StringSet& exclude) const {
     // Cross-check: prioritize an independent provider distinct from active_ws to avoid single-node blind spots.

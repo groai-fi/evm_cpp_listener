@@ -11,8 +11,7 @@ namespace net = boost::asio;
 namespace evml::app {
 
 struct PoolLogSource::State {
-    State(std::shared_ptr<provider::ProviderPool> p, const chain::ReorgDetector* r)
-        : pool(std::move(p)), ring(r) {}
+    State(std::shared_ptr<provider::ProviderPool> p, const chain::ReorgDetector* r) : pool(std::move(p)), ring(r) {}
 
     void cache_block(std::uint64_t number, const pipeline::BlockInfo& info) {
         if (block_cache.find(number) == block_cache.end()) {
@@ -32,9 +31,9 @@ struct PoolLogSource::State {
 
     std::shared_ptr<provider::ProviderPool> pool;
     const chain::ReorgDetector* ring;
-    rpc::Decoder dec;                       // used only synchronously (never across a co_await)
-    provider::StringSet avoid;              // providers reported bad since the last get_logs
-    provider::StringSet logs_providers;     // every provider that answered get_logs for the current page
+    rpc::Decoder dec;                    // used only synchronously (never across a co_await)
+    provider::StringSet avoid;           // providers reported bad since the last get_logs
+    provider::StringSet logs_providers;  // every provider that answered get_logs for the current page
     std::optional<pipeline::BlockRange> last_logs_range;
     std::vector<core::Address20> seen_split_addresses;
     bool page_sealed{false};
@@ -60,15 +59,15 @@ void PoolLogSource::report_bad(std::string_view provider, std::string_view reaso
     state_->clear_cache();
 }
 
-void PoolLogSource::clear_cache() { state_->clear_cache(); }
+void PoolLogSource::clear_cache() {
+    state_->clear_cache();
+}
 
-net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range,
-                                                            const core::LogFilter& filter) {
+net::awaitable<pipeline::LogResult> PoolLogSource::get_logs(pipeline::BlockRange range, const core::LogFilter& filter) {
     return get_logs_impl(state_, range, filter);
 }
 
-net::awaitable<pipeline::LogResult> PoolLogSource::get_logs_impl(std::shared_ptr<State> st,
-                                                                 pipeline::BlockRange range,
+net::awaitable<pipeline::LogResult> PoolLogSource::get_logs_impl(std::shared_ptr<State> st, pipeline::BlockRange range,
                                                                  core::LogFilter filter) {
     const bool same_split_page =
         st->last_logs_range && st->last_logs_range->from == range.from && st->last_logs_range->to == range.to &&
@@ -171,14 +170,15 @@ net::awaitable<std::optional<pipeline::BlockInfo>> PoolLogSource::block_impl(std
 
         const auto head_res = st->dec.try_parse_block(o.result_raw);
         if (!head_res) {
-            st->pool->report_bad(o.provider, "undecodable block " + std::to_string(number) + ": " + head_res.error().what());
+            st->pool->report_bad(o.provider,
+                                 "undecodable block " + std::to_string(number) + ": " + head_res.error().what());
             continue;
         }
         const auto& head = *head_res;
         if (!head) continue;  // this provider does not have the block (yet): not its fault
         if (head->number != number) {
-            st->pool->report_bad(o.provider, "asked for block " + std::to_string(number) + ", got " +
-                                                 std::to_string(head->number));
+            st->pool->report_bad(o.provider,
+                                 "asked for block " + std::to_string(number) + ", got " + std::to_string(head->number));
             continue;
         }
         if (ring_hash && !(*ring_hash == head->hash)) {

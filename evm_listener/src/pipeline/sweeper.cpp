@@ -24,7 +24,7 @@ bool is_safe_class(const core::Config& cfg, const rpc::Log& log) {
 }  // namespace
 
 struct Sweeper::State {
-    const core::Config& cfg;
+    const core::Config cfg;
     EventContext ctx;
     LogSource& source;
     Sink& sink;
@@ -82,13 +82,21 @@ void Sweeper::set_cursors(std::uint64_t c_s, std::uint64_t c_f) {
     state_->c_f = c_f;
 }
 
-std::uint64_t Sweeper::c_s() const noexcept { return state_->c_s; }
-std::uint64_t Sweeper::c_f() const noexcept { return state_->c_f; }
-const SweepStats& Sweeper::stats() const noexcept { return state_->stats; }
+std::uint64_t Sweeper::c_s() const noexcept {
+    return state_->c_s;
+}
+std::uint64_t Sweeper::c_f() const noexcept {
+    return state_->c_f;
+}
+const SweepStats& Sweeper::stats() const noexcept {
+    return state_->stats;
+}
 
 // Rewinds in-memory safe cursor to the fork point after a chain reorganization.
 // Watch out: Pulls C_f backward only if C_s rewinds below C_f to preserve Invariant I2.
-void Sweeper::rewind_safe(std::uint64_t fork_point) noexcept { state_->rewind_safe(fork_point); }
+void Sweeper::rewind_safe(std::uint64_t fork_point) noexcept {
+    state_->rewind_safe(fork_point);
+}
 
 // Fetches one page of logs from the current provider using AIMD dynamic page sizing.
 // Reconciles block hashes with canonical block references and retries on inconsistency.
@@ -100,7 +108,7 @@ boost::asio::awaitable<Sweeper::Fetched> Sweeper::fetch_page(std::shared_ptr<Sta
 
     // No contract of this class: an empty address list would mean "every address" to eth_getLogs, so do not ask.
     if (filter.addresses.empty()) {
-        out.range = BlockRange{cursor + 1, ceiling}; // Advance cursor without provider query
+        out.range = BlockRange{cursor + 1, ceiling};  // Advance cursor without provider query
         co_return out;
     }
 
@@ -137,7 +145,7 @@ boost::asio::awaitable<Sweeper::Fetched> Sweeper::fetch_page(std::shared_ptr<Sta
                 const std::uint64_t span = r->to - r->from + 1;
                 if ((res.kind == rpc::FailKind::Retry || res.kind == rpc::FailKind::RateLimited) &&
                     span > failed.min()) {
-                    (void)failed.on_range_too_large(std::nullopt); // Multiplicative decrease on congestion
+                    (void)failed.on_range_too_large(std::nullopt);  // Multiplicative decrease on congestion
                     ++st->stats.failure_shrinks;
                 }
                 out.status = StepStatus::Retry;
@@ -207,7 +215,7 @@ boost::asio::awaitable<Sweeper::Fetched> Sweeper::fetch_page(std::shared_ptr<Sta
         }
 
         if (problem.empty()) {
-            if (direct) st->pager_for(out.provider).on_success(); // Additive increase on success streak
+            if (direct) st->pager_for(out.provider).on_success();  // Additive increase on success streak
             if (out.logs.size() > st->opt.max_page_logs) {  // soft memory cap (G6): keep this page, shrink the next
                 (void)st->pager_for(out.provider).on_range_too_large(std::nullopt);
                 ++st->stats.volume_shrinks;
@@ -236,7 +244,7 @@ boost::asio::awaitable<StepResult> Sweeper::safe_step(std::uint64_t g_s) {
 
 boost::asio::awaitable<StepResult> Sweeper::safe_step_impl(std::shared_ptr<State> st, std::uint64_t g_s) {
     if (st->sink.saturated()) co_return StepResult{StepStatus::Paused, std::nullopt, "sink saturated", false};
-    if (st->c_s >= g_s) co_return StepResult{}; // Cursor already at safe gate; nothing to do
+    if (st->c_s >= g_s) co_return StepResult{};  // Cursor already at safe gate; nothing to do
 
     auto f = co_await fetch_page(st, st->c_s, g_s, st->cfg.filter(core::Finality::Safe), core::Finality::Safe);
     if (f.status != StepStatus::Advanced) co_return StepResult{f.status, std::nullopt, std::move(f.detail), false};
@@ -248,11 +256,11 @@ boost::asio::awaitable<StepResult> Sweeper::safe_step_impl(std::shared_ptr<State
             ++st->stats.deduped;
             continue;
         }
-        st->sink.emit(make_emission(ev, ev.block_number)); // Emits log and adds to released ZSET
+        st->sink.emit(make_emission(ev, ev.block_number));  // Emits log and adds to released ZSET
         ++st->stats.emitted_safe;
     }
-    st->sink.checkpoint(CheckpointKind::Safe, f.range.to); // Invariant I3: advance safe checkpoint
-    st->c_s = f.range.to; // Invariant I1: advance in-memory safe cursor
+    st->sink.checkpoint(CheckpointKind::Safe, f.range.to);  // Invariant I3: advance safe checkpoint
+    st->c_s = f.range.to;                                   // Invariant I1: advance in-memory safe cursor
     if (st->opt.on_page) st->opt.on_page(core::Finality::Safe, f.range, f.logs);
     co_return StepResult{StepStatus::Advanced, f.range, {}, false};
 }
@@ -285,7 +293,8 @@ boost::asio::awaitable<StepResult> Sweeper::final_step_impl(std::shared_ptr<Stat
     const FinalDiff diff = diff_released(st->cfg.chain.chain_id, *released, safe_logs);
 
     std::set<std::string> late_ids;
-    for (const auto& l : diff.late) late_ids.insert(make_event_id(st->cfg.chain.chain_id, l.block_hash, l.log_index));
+    for (const auto& l : diff.late)
+        late_ids.insert(make_event_id(st->cfg.chain.chain_id, l.block_hash, l.log_index));
 
     // Invariant I6: Retractions first, then replacement/late logs in (block, logIndex) order.
     for (const auto& v : diff.vanished) {
@@ -293,7 +302,7 @@ boost::asio::awaitable<StepResult> Sweeper::final_step_impl(std::shared_ptr<Stat
             ++st->stats.deduped;
             continue;
         }
-        st->sink.emit(make_revert(v, st->now_ms())); // Emits revert with original before-image fields
+        st->sink.emit(make_revert(v, st->now_ms()));  // Emits revert with original before-image fields
         ++st->stats.reverts;
     }
     for (const auto& log : f.logs) {
@@ -309,14 +318,14 @@ boost::asio::awaitable<StepResult> Sweeper::final_step_impl(std::shared_ptr<Stat
             ++st->stats.late;
             st->stats.last_late_block = ev.block_number;
         }
-        st->sink.emit(make_emission(ev, std::nullopt)); // Finalized logs bypass released tracking
+        st->sink.emit(make_emission(ev, std::nullopt));  // Finalized logs bypass released tracking
         ++st->stats.emitted_final;
     }
     st->stats.matched += diff.matched.size();
 
-    st->sink.final_trim(f.range.to);                       // Trim released ZSET <= C_f to bound memory
-    st->sink.checkpoint(CheckpointKind::Finalized, f.range.to); // Advance finalized checkpoint in Redis
-    st->c_f = f.range.to;                                  // Invariant I2: advance finalized cursor
+    st->sink.final_trim(f.range.to);                             // Trim released ZSET <= C_f to bound memory
+    st->sink.checkpoint(CheckpointKind::Finalized, f.range.to);  // Advance finalized checkpoint in Redis
+    st->c_f = f.range.to;                                        // Invariant I2: advance finalized cursor
     if (st->opt.on_page) {
         std::vector<rpc::Log> final_logs;
         for (const auto& l : f.logs)
@@ -347,8 +356,10 @@ boost::asio::awaitable<StepResult> Sweeper::backfill_step_impl(std::shared_ptr<S
             continue;
         }
         st->sink.emit(make_emission(ev, track_released ? std::optional<std::uint64_t>(ev.block_number) : std::nullopt));
-        if (track_released) ++st->stats.emitted_safe;
-        else ++st->stats.emitted_final;
+        if (track_released)
+            ++st->stats.emitted_safe;
+        else
+            ++st->stats.emitted_final;
     }
     st->c_s = f.range.to;
     if (st->opt.on_page) st->opt.on_page(emit_finality, f.range, f.logs);
@@ -376,7 +387,8 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shar
 
     while (cursor < ceiling) {
         if (st->sink.saturated()) co_return ReverifyResult{StepStatus::Paused, "sink saturated", false, std::nullopt};
-        if (!st->sink.readable()) co_return ReverifyResult{StepStatus::Paused, "sink not readable", false, std::nullopt};
+        if (!st->sink.readable())
+            co_return ReverifyResult{StepStatus::Paused, "sink not readable", false, std::nullopt};
 
         auto f = co_await fetch_page(st, cursor, ceiling, st->cfg.filter(core::Finality::Safe), core::Finality::Safe);
         if (f.status != StepStatus::Advanced)
@@ -387,7 +399,8 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shar
         const FinalDiff diff = diff_released(st->cfg.chain.chain_id, *released, f.logs);
 
         std::set<std::string> new_ids;
-        for (const auto& l : diff.late) new_ids.insert(make_event_id(st->cfg.chain.chain_id, l.block_hash, l.log_index));
+        for (const auto& l : diff.late)
+            new_ids.insert(make_event_id(st->cfg.chain.chain_id, l.block_hash, l.log_index));
 
         // Retractions first (Invariant I6: Revert Fidelity), then replacement logs in order.
         for (const auto& v : diff.vanished) {
@@ -396,7 +409,7 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shar
                 ++st->stats.deduped;
                 continue;
             }
-            st->sink.emit(make_revert(v, st->now_ms())); // Retract ghost log with exact before-image data
+            st->sink.emit(make_revert(v, st->now_ms()));  // Retract ghost log with exact before-image data
             ++st->stats.reverts;
         }
         for (const auto& log : f.logs) {
@@ -411,7 +424,7 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shar
             ++st->stats.reverified_new;
         }
         st->stats.matched += diff.matched.size();
-        cursor = f.range.to; // Step page forward
+        cursor = f.range.to;  // Step page forward
     }
 
     ReverifyResult out;
@@ -419,7 +432,7 @@ boost::asio::awaitable<ReverifyResult> Sweeper::reverify_released_impl(std::shar
     if (st->pending_fork) {
         out.reorg = true;
         out.fork_point = *st->pending_fork;
-        st->rewind_safe(*st->pending_fork); // Rewind safe cursor to common ancestor of fork
+        st->rewind_safe(*st->pending_fork);  // Rewind safe cursor to common ancestor of fork
         st->pending_fork.reset();
     }
     co_return out;

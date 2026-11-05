@@ -1,11 +1,11 @@
 #pragma once
 
+#include <sw/redis++/redis++.h>
+
 #include <array>
 #include <chrono>
 #include <string>
 #include <string_view>
-
-#include <sw/redis++/redis++.h>
 
 #include "sink/keys.hpp"
 #include "sink/redis_conn.hpp"
@@ -49,14 +49,14 @@ public:
     [[nodiscard]] core::Result<std::vector<CallOutcome>, ConnError> try_pipeline(
         const std::vector<ScriptCall>& calls) override;
     [[nodiscard]] core::Result<void, ConnError> try_load_scripts() override;
-    [[nodiscard]] core::Result<pipeline::Checkpoint, ConnError> try_read_checkpoint() override;
+    [[nodiscard]] core::Result<pipeline::Checkpoint, ConnError> try_read_checkpoint() noexcept override;
     [[nodiscard]] core::Result<std::vector<pipeline::ReleasedEntry>, ConnError> try_read_released(
-        std::uint64_t from, std::uint64_t to) override;
+        std::uint64_t from, std::uint64_t to) noexcept override;
     [[nodiscard]] core::Result<void, ConnError> try_set_with_ttl(std::string_view key, std::string_view value,
-                                                                 std::uint32_t ttl_s) override;
+                                                                 std::uint32_t ttl_s) noexcept override;
     [[nodiscard]] core::Result<GroupFacts, ConnError> try_read_group_facts(std::string_view stream_key,
-                                                                           std::string_view group) override;
-    [[nodiscard]] core::Result<TenancyFacts, ConnError> try_read_tenancy_facts() override;
+                                                                           std::string_view group) noexcept override;
+    [[nodiscard]] core::Result<TenancyFacts, ConnError> try_read_tenancy_facts() noexcept override;
 
 private:
     sw::redis::Redis redis_;

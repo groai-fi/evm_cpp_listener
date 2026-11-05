@@ -1,5 +1,6 @@
 #include "pipeline/log_validation.hpp"
 
+#include <string_view>
 #include <unordered_set>
 
 namespace evml::pipeline {
@@ -11,9 +12,9 @@ std::optional<std::string> validate_logs(const std::vector<rpc::Log>& logs, std:
     std::unordered_set<std::string> seen;
     for (std::size_t i = 0; i < logs.size(); ++i) {
         const auto& l = logs[i];
-        const auto where = [&](const std::string& what) {
+        const auto where = [&](std::string_view what) {
             return "log #" + std::to_string(i) + " (block " + std::to_string(l.block_number) + ", index " +
-                   std::to_string(l.log_index) + "): " + what;
+                   std::to_string(l.log_index) + "): " + std::string(what);
         };
         // Invariant: eth_getLogs must never return logs marked removed:true
         if (l.removed) return where("removed=true in an eth_getLogs response");
@@ -24,7 +25,8 @@ std::optional<std::string> validate_logs(const std::vector<rpc::Log>& logs, std:
         if (l.topics.empty()) return where("no topic0");
         // Verify contract address and topic0 exist in active dispatch routing table
         const auto* route = cfg.route(l.address, l.topics[0]);
-        if (route == nullptr) return where("untracked (address, topic0) " + l.address.to_hex() + " " + l.topics[0].to_hex());
+        if (route == nullptr)
+            return where("untracked (address, topic0) " + l.address.to_hex() + " " + l.topics[0].to_hex());
         // Verify log matches expected finality class (Safe vs Finalized)
         if (only_class && route->finality != *only_class) {
             return where(std::string("finality class ") + core::to_string(route->finality) + " not requested (" +
@@ -35,7 +37,7 @@ std::optional<std::string> validate_logs(const std::vector<rpc::Log>& logs, std:
             return where("duplicate (blockHash, logIndex)");
         }
     }
-    return std::nullopt; // All logs structurally valid and verified
+    return std::nullopt;  // All logs structurally valid and verified
 }
 
 }  // namespace evml::pipeline

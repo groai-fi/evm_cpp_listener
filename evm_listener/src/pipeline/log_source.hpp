@@ -1,11 +1,10 @@
 #pragma once
 
+#include <boost/asio/awaitable.hpp>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "core/hex.hpp"
@@ -17,11 +16,11 @@ namespace evml::pipeline {
 
 struct LogResult {
     bool ok{false};
-    std::vector<rpc::Log> logs;                 // when ok
-    rpc::FailKind kind{rpc::FailKind::Retry};   // when !ok
-    std::optional<std::uint32_t> range_limit;   // RangeTooLarge: the provider's stated limit, if any
-    std::string provider;                       // who answered (or failed last)
-    std::string error;                          // no secrets
+    std::vector<rpc::Log> logs;                // when ok
+    rpc::FailKind kind{rpc::FailKind::Retry};  // when !ok
+    std::optional<std::uint32_t> range_limit;  // RangeTooLarge: the provider's stated limit, if any
+    std::string provider;                      // who answered (or failed last)
+    std::string error;                         // no secrets
 };
 
 struct BlockInfo {

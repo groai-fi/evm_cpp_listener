@@ -1,8 +1,10 @@
 #include "pipeline/coverage.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 
 namespace evml::pipeline {
 
@@ -20,18 +22,23 @@ struct Stored {
     std::optional<std::uint64_t> start;
 };
 
-Stored parse_entry(const std::string& e) {
+Stored parse_entry(std::string_view e) {
     const auto a = e.find(':');
-    const auto b = a == std::string::npos ? std::string::npos : e.find(':', a + 1);
-    if (a == std::string::npos || b == std::string::npos || a == 0)
-        throw std::runtime_error("ckpt.contracts: malformed manifest entry '" + e + "' (expected address:start:class)");
+    const auto b = a == std::string_view::npos ? std::string_view::npos : e.find(':', a + 1);
+    if (a == std::string_view::npos || b == std::string_view::npos || a == 0)
+        throw std::runtime_error("ckpt.contracts: malformed manifest entry '" + std::string(e) +
+                                 "' (expected address:start:class)");
     Stored s;
-    s.address = e.substr(0, a);
-    const std::string start = e.substr(a + 1, b - a - 1);
+    s.address = std::string(e.substr(0, a));
+    const std::string_view start = e.substr(a + 1, b - a - 1);
     if (start == kGate) return s;
-    if (start.empty() || start.find_first_not_of("0123456789") != std::string::npos)
-        throw std::runtime_error("ckpt.contracts: malformed start_block in manifest entry '" + e + "'");
-    s.start = std::stoull(start);
+    if (start.empty() || start.find_first_not_of("0123456789") != std::string_view::npos)
+        throw std::runtime_error("ckpt.contracts: malformed start_block in manifest entry '" + std::string(e) + "'");
+    std::uint64_t val = 0;
+    const auto [ptr, ec] = std::from_chars(start.data(), start.data() + start.size(), val);
+    if (ec != std::errc{} || ptr != start.data() + start.size())
+        throw std::runtime_error("ckpt.contracts: malformed start_block in manifest entry '" + std::string(e) + "'");
+    s.start = val;
     return s;
 }
 }  // namespace
@@ -40,8 +47,9 @@ Stored parse_entry(const std::string& e) {
 std::vector<std::string> contract_manifest(const core::Config& cfg) {
     std::vector<std::string> out;
     out.reserve(cfg.contracts.size());
-    for (const auto& c : cfg.contracts) out.push_back(entry_of(c));
-    std::sort(out.begin(), out.end()); // Deterministic sorting ensures exact equality comparisons in Redis
+    for (const auto& c : cfg.contracts)
+        out.push_back(entry_of(c));
+    std::sort(out.begin(), out.end());  // Deterministic sorting ensures exact equality comparisons in Redis
     return out;
 }
 
@@ -61,7 +69,7 @@ std::vector<std::string> uncovered_contracts(const core::Config& cfg, const std:
         const auto it = by_address.find(c.address.to_hex());
         // Verify historical presence: must exist in stored manifest with start_block <= current config start
         const bool covered = it != by_address.end() && it->second.start && *it->second.start <= *c.start_block;
-        if (!covered) out.push_back(c.name); // Missing coverage below C_s
+        if (!covered) out.push_back(c.name);  // Missing coverage below C_s
     }
     return out;
 }

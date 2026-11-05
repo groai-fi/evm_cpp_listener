@@ -34,15 +34,15 @@ struct StreamId {
 struct GroupFacts {
     bool stream_exists{false};  // false: no such key yet
     bool group_found{false};
-    std::string last_delivered_id;                   // XINFO GROUPS last-delivered-id
-    std::optional<std::uint64_t> lag;                // XINFO GROUPS lag; nil when Redis cannot compute it
-    std::optional<std::uint64_t> entries_read;       // XINFO GROUPS entries-read; nil when unknown
-    std::optional<std::uint64_t> entries_added;      // XINFO STREAM entries-added: every entry ever appended
-    std::string max_deleted_id;                      // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
-    std::optional<std::string> first_entry_id;       // XINFO STREAM first-entry (nil on an empty stream)
-    std::optional<std::string> first_undelivered_id; // first entry after last-delivered-id (XRANGE (id + COUNT 1)
-    std::optional<std::string> smallest_pending_id;  // XPENDING summary (nil when nothing is pending)
-    std::uint64_t now_ms{};                          // Redis TIME in ms
+    std::string last_delivered_id;               // XINFO GROUPS last-delivered-id
+    std::optional<std::uint64_t> lag;            // XINFO GROUPS lag; nil when Redis cannot compute it
+    std::optional<std::uint64_t> entries_read;   // XINFO GROUPS entries-read; nil when unknown
+    std::optional<std::uint64_t> entries_added;  // XINFO STREAM entries-added: every entry ever appended
+    std::string max_deleted_id;                  // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
+    std::optional<std::string> first_entry_id;   // XINFO STREAM first-entry (nil on an empty stream)
+    std::optional<std::string> first_undelivered_id;  // first entry after last-delivered-id (XRANGE (id + COUNT 1)
+    std::optional<std::string> smallest_pending_id;   // XPENDING summary (nil when nothing is pending)
+    std::uint64_t now_ms{};                           // Redis TIME in ms
 };
 
 /// @brief Processed lag evaluation snapshot for one stream consumer group.
@@ -50,15 +50,15 @@ struct GroupFacts {
 struct ConsumerLag {
     core::StreamKind stream{core::StreamKind::Events};
     std::string group;
-    bool missing{false};                    // no such group (or no such stream yet): the consumer never started, or the name is wrong
-    std::uint64_t undelivered_age_s{0};     // how long the oldest unread entry has waited; 0 if none
-    std::uint64_t pending_age_s{0};         // age of the oldest delivered-but-unacked entry; 0 if none
-    std::optional<std::uint64_t> lag;       // entry count, for the metric only (nil when Redis cannot compute it)
-    bool trimmed_unread{false};             // entries were trimmed before this group read or acked them: data loss happened
-    std::string last_delivered_id;          // XINFO GROUPS last-delivered-id
-    std::string max_deleted_id;             // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
-    std::string first_entry_id;             // XINFO STREAM first-entry id (empty on an empty stream)
-    std::uint64_t probed_at_ms{0};          // listener wall clock when the probe ran (set by the sink): age of this snapshot
+    bool missing{false};  // no such group (or no such stream yet): the consumer never started, or the name is wrong
+    std::uint64_t undelivered_age_s{0};  // how long the oldest unread entry has waited; 0 if none
+    std::uint64_t pending_age_s{0};      // age of the oldest delivered-but-unacked entry; 0 if none
+    std::optional<std::uint64_t> lag;    // entry count, for the metric only (nil when Redis cannot compute it)
+    bool trimmed_unread{false};     // entries were trimmed before this group read or acked them: data loss happened
+    std::string last_delivered_id;  // XINFO GROUPS last-delivered-id
+    std::string max_deleted_id;     // XINFO STREAM max-deleted-entry-id ("0-0" when nothing was deleted)
+    std::string first_entry_id;     // XINFO STREAM first-entry id (empty on an empty stream)
+    std::uint64_t probed_at_ms{0};  // listener wall clock when the probe ran (set by the sink): age of this snapshot
 };
 
 /// @brief Evaluates consumer group health, computing lag ages and detecting retention trims.

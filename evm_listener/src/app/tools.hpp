@@ -66,7 +66,8 @@ int probe_transport(const core::Config& cfg, unsigned seconds);
 /// @return kExitOk if Redis is reachable and startup checks pass; otherwise kExitFailure.
 int check_redis(const core::Config& cfg);
 
-/// @brief Backfills a single contract's historical events up to the stored Redis checkpoint and updates the manifest (§5.6a, D8).
+/// @brief Backfills a single contract's historical events up to the stored Redis checkpoint and updates the manifest
+/// (§5.6a, D8).
 ///
 /// When `[lease].enabled = true`, acquires the shard lease (blocking up to `lease_timeout`), runs fenced, and releases
 /// the lease on completion. Emits `[start_block, C_f]` at `finality=finalized`, and for safe-class contracts emits

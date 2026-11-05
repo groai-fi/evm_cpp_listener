@@ -27,7 +27,8 @@ std::optional<std::string> lease_token_host(std::string_view token) {
     const auto first = token.find('|');
     const auto last = token.rfind('|');
     if (last == first) return std::nullopt;  // "n|host" has no nonce
-    return std::string(token.substr(first + 1, last - first - 1));  // a host id may itself contain '|': only the outer bars split
+    return std::string(
+        token.substr(first + 1, last - first - 1));  // a host id may itself contain '|': only the outer bars split
 }
 
 namespace {
@@ -40,7 +41,8 @@ core::Result<std::optional<std::string>, ConnError> run_lease_call(RedisConn& co
         if (!out_res) return out_res.error();
         const std::vector<CallOutcome>& out = *out_res;
         if (out.size() != 1)
-            return ConnError(std::string("RedisConn::pipeline returned the wrong number of outcomes for lease ") + what);
+            return ConnError(std::string("RedisConn::pipeline returned the wrong number of outcomes for lease ") +
+                             what);
         if (const auto* f = std::get_if<ScriptFail>(&out.front())) {
             if (f->kind == FailKind::NoScript && attempt == 0) {
                 if (auto lr = conn.try_load_scripts(); !lr) return lr.error();
@@ -62,47 +64,58 @@ std::string random_nonce() {
 
 }  // namespace
 
-core::Result<std::optional<LeaseGrant>, ConnError> try_acquire_lease_result(RedisConn& conn, const Keys& keys,
-                                                                            std::string_view host_id,
-                                                                            std::string_view nonce,
-                                                                            std::uint32_t ttl_ms) {
-    const auto reply_res = run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
-    if (!reply_res) return reply_res.error();
-    const auto& reply = *reply_res;
-    if (!reply) return std::optional<LeaseGrant>{};
-    const auto nl = reply->find('\n');
-    if (nl == std::string::npos) return ConnError("lease acquire: unexpected reply missing newline");
-    LeaseGrant g;
-    g.token = reply->substr(0, nl);
-    g.epoch_n = lease_token_epoch(g.token);
-    if (!g.epoch_n) return ConnError("lease acquire: script returned a malformed token");
-    const std::string prev = reply->substr(nl + 1);
-    if (!prev.empty()) {
-        if (const auto prev_host = lease_token_host(prev)) {
-            if (*prev_host != host_id) g.old_host = *prev_host;
-        } else {
-            core::log::warn("lease", "epoch key is not a lease token: Leader Changed is skipped", {});
+core::Result<LeaseOutcome, LeaseAcquireError> try_acquire_lease(RedisConn& conn, const Keys& keys,
+                                                                std::string_view host_id, std::string_view nonce,
+                                                                std::uint32_t ttl_ms) noexcept {
+    try {
+        const auto reply_res = run_lease_call(conn, lease_acquire_call(keys, host_id, nonce, ttl_ms), "acquire");
+        if (!reply_res) return reply_res.error();
+        const auto& reply = *reply_res;
+        if (!reply) return std::optional<LeaseGrant>{};
+        const auto nl = reply->find('\n');
+        if (nl == std::string::npos) return ConnError("lease acquire: unexpected reply missing newline");
+        LeaseGrant g;
+        g.token = reply->substr(0, nl);
+        g.epoch_n = lease_token_epoch(g.token);
+        if (!g.epoch_n) return ConnError("lease acquire: script returned a malformed token");
+        const std::string prev = reply->substr(nl + 1);
+        if (!prev.empty()) {
+            if (const auto prev_host = lease_token_host(prev)) {
+                if (*prev_host != host_id) g.old_host = *prev_host;
+            } else {
+                core::log::warn("lease", "epoch key is not a lease token: Leader Changed is skipped", {});
+            }
         }
+        return std::optional<LeaseGrant>{std::move(g)};
+    } catch (const std::exception& e) {
+        return ConnError(e.what());
+    } catch (...) {
+        return ConnError("lease acquire: unknown exception");
     }
-    return std::optional<LeaseGrant>{std::move(g)};
 }
 
 /// @brief Attempts single non-blocking lease acquisition via lease.lua.
-std::optional<LeaseGrant> try_acquire_lease(RedisConn& conn, const Keys& keys, std::string_view host_id,
-                                            std::string_view nonce, std::uint32_t ttl_ms) {
-    auto res = try_acquire_lease_result(conn, keys, host_id, nonce, ttl_ms);
+std::optional<LeaseGrant> acquire_lease(RedisConn& conn, const Keys& keys, std::string_view host_id,
+                                        std::string_view nonce, std::uint32_t ttl_ms) {
+    auto res = try_acquire_lease(conn, keys, host_id, nonce, ttl_ms);
     if (!res) throw res.error();
     return std::move(*res);
 }
 
 /// @brief Explicitly surrenders leader lease token without throwing on ConnError.
-core::Result<bool, ConnError> try_release_lease(RedisConn& conn, const Keys& keys, std::string_view token) {
-    const auto reply_res = run_lease_call(conn, lease_release_call(keys, token), "release");
-    if (!reply_res) return reply_res.error();
-    const auto& reply = *reply_res;
-    if (reply == "OK") return true;
-    if (reply == "NOOP") return false;
-    return ConnError("lease release: unexpected reply '" + reply.value_or("<nil>") + "'");
+core::Result<bool, ConnError> try_release_lease(RedisConn& conn, const Keys& keys, std::string_view token) noexcept {
+    try {
+        const auto reply_res = run_lease_call(conn, lease_release_call(keys, token), "release");
+        if (!reply_res) return reply_res.error();
+        const auto& reply = *reply_res;
+        if (reply == "OK") return true;
+        if (reply == "NOOP") return false;
+        return ConnError("lease release: unexpected reply '" + reply.value_or("<nil>") + "'");
+    } catch (const std::exception& e) {
+        return ConnError(e.what());
+    } catch (...) {
+        return ConnError("lease release: unknown exception");
+    }
 }
 
 /// @brief Explicitly surrenders leader lease token to allow standby to take over immediately.
@@ -126,7 +139,7 @@ std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& ke
     while (!(opts.stop && opts.stop())) {
         // Generate random 128-bit hex nonce for lease fencing token generation.
         const std::string nonce = opts.nonce ? opts.nonce() : random_nonce();
-        auto grant_res = try_acquire_lease_result(conn, keys, opts.host_id, nonce, opts.ttl_ms);
+        auto grant_res = try_acquire_lease(conn, keys, opts.host_id, nonce, opts.ttl_ms);
         if (!grant_res) {
             const auto& e = grant_res.error();
             const auto now = std::chrono::steady_clock::now();
@@ -137,8 +150,9 @@ std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& ke
             // Exponential backoff with random jitter on Redis network disconnects.
             const auto ceiling = std::min<std::chrono::milliseconds::rep>(
                 opts.probe_max.count(), opts.probe_min.count() << std::min<std::uint32_t>(failures++, 20));
-            sleep(std::chrono::milliseconds(
-                ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % static_cast<std::uint64_t>(ceiling + 1)) : 0));
+            sleep(std::chrono::milliseconds(ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(
+                                                              rng() % static_cast<std::uint64_t>(ceiling + 1))
+                                                        : 0));
             continue;
         }
         if (*grant_res) {
@@ -161,7 +175,8 @@ std::optional<LeaseGrant> acquire_lease_blocking(RedisConn& conn, const Keys& ke
 }
 
 std::string lease_disabled_token() {
-    core::log::warn("lease", "lease disabled: no acquire, no renew, writes are not fenced. NEVER run two hosts in this mode");
+    core::log::warn("lease",
+                    "lease disabled: no acquire, no renew, writes are not fenced. NEVER run two hosts in this mode");
     return kNoFence;
 }
 

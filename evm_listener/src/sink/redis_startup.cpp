@@ -1,6 +1,7 @@
 #include "sink/redis_startup.hpp"
 
 #include <netdb.h>
+#include <sw/redis++/redis++.h>
 #include <sys/socket.h>
 
 #include <algorithm>
@@ -12,8 +13,6 @@
 #include <set>
 #include <thread>
 #include <utility>
-
-#include <sw/redis++/redis++.h>
 
 #include "sink/keys.hpp"
 
@@ -96,9 +95,8 @@ std::optional<ParsedRedisUrl> parse_redis_url_parts(std::string_view redis_url) 
     std::string_view path;
     if (suffix_start != std::string_view::npos && redis_url[suffix_start] == '/') {
         const auto q_or_f = redis_url.find_first_of("?#", suffix_start + 1);
-        path = (q_or_f == std::string_view::npos)
-                   ? redis_url.substr(suffix_start + 1)
-                   : redis_url.substr(suffix_start + 1, q_or_f - (suffix_start + 1));
+        path = (q_or_f == std::string_view::npos) ? redis_url.substr(suffix_start + 1)
+                                                  : redis_url.substr(suffix_start + 1, q_or_f - (suffix_start + 1));
     }
 
     return ParsedRedisUrl{std::move(scheme), std::move(host), path};
@@ -169,7 +167,8 @@ std::vector<std::string> parse_foreign_client_names(std::string_view client_list
 
         std::size_t tpos = 0;
         while (tpos < line.size()) {
-            while (tpos < line.size() && line[tpos] == ' ') ++tpos;
+            while (tpos < line.size() && line[tpos] == ' ')
+                ++tpos;
             if (tpos >= line.size()) break;
             const auto space = line.find(' ', tpos);
             const std::string_view token =
@@ -431,10 +430,12 @@ RedisVersion parse_redis_version(std::string_view info) {
 StartupReport evaluate_startup(const StartupFacts& facts, bool require_noeviction) {
     StartupReport r;
     r.version = parse_redis_version(facts.info_server);
-    const std::string ver = std::to_string(r.version.major) + "." + std::to_string(r.version.minor) + "." + std::to_string(r.version.patch);
+    const std::string ver =
+        std::to_string(r.version.major) + "." + std::to_string(r.version.minor) + "." + std::to_string(r.version.patch);
     // Lua scripts use the `#!lua` shebang without allow-oom, which requires Redis >= 7.0 to reject on OOM.
     if (r.version.major < 7)
-        throw StartupFatal("redis_version " + ver + " < 7.0: the embedded Lua scripts need the #!lua shebang (Redis >= 7.0)");
+        throw StartupFatal("redis_version " + ver +
+                           " < 7.0: the embedded Lua scripts need the #!lua shebang (Redis >= 7.0)");
 
     r.maxmemory_policy = facts.maxmemory_policy.value_or("");
     r.appendonly = facts.appendonly.value_or("");
@@ -443,7 +444,8 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
         r.warnings.push_back("CONFIG GET maxmemory-policy refused: cannot verify noeviction");
     } else if (*facts.maxmemory_policy != "noeviction") {
         // Eviction enabled: Redis may silently drop stream entries or checkpoint records under memory pressure.
-        const std::string what = "maxmemory-policy is '" + *facts.maxmemory_policy + "', not 'noeviction': Redis may evict our streams or checkpoint";
+        const std::string what = "maxmemory-policy is '" + *facts.maxmemory_policy +
+                                 "', not 'noeviction': Redis may evict our streams or checkpoint";
         if (require_noeviction) throw StartupFatal(what);
         r.warnings.push_back(what);
         r.misconfigured = true;
@@ -454,7 +456,8 @@ StartupReport evaluate_startup(const StartupFacts& facts, bool require_noevictio
         r.warnings.push_back("CONFIG GET appendonly refused: cannot verify persistence");
     } else if (*facts.appendonly == "no") {
         r.misconfigured = true;
-        r.warnings.push_back("appendonly is 'no': a Redis restart loses the streams and the checkpoint (a re-backfill follows)");
+        r.warnings.push_back(
+            "appendonly is 'no': a Redis restart loses the streams and the checkpoint (a re-backfill follows)");
     }
     return r;
 }
@@ -469,7 +472,8 @@ std::optional<StartupReport> await_redis_ready(std::string_view redis_url, const
     try {
         copts = sw::redis::Uri(std::string(redis_url)).connection_options();
     } catch (const sw::redis::Error& e) {
-        throw StartupFatal(std::string("invalid Redis URL: ") + e.what());  // the URL itself is never echoed (credentials)
+        throw StartupFatal(std::string("invalid Redis URL: ") +
+                           e.what());  // the URL itself is never echoed (credentials)
     }
     copts.connect_timeout = opts.io_timeout;
     copts.socket_timeout = opts.io_timeout;
@@ -494,7 +498,8 @@ std::optional<StartupReport> await_redis_ready(std::string_view redis_url, const
             TenancyFacts tf = gather_runtime_tenancy_facts(redis);
             const std::string tenant_key = Keys(opts.shard).tenant();
             if (tf.foreign_key_prefixes.empty() && !has_foreign_db_keys(tf.keyspace_db_keys, expected_db)) {
-                redis.command<sw::redis::OptionalString>("SET", tenant_key, format_tenant_marker(opts.deploy_env), "NX");
+                redis.command<sw::redis::OptionalString>("SET", tenant_key, format_tenant_marker(opts.deploy_env),
+                                                         "NX");
             }
             if (const auto stored = redis.get(tenant_key)) {
                 tf.tenant_marker = *stored;
@@ -508,21 +513,26 @@ std::optional<StartupReport> await_redis_ready(std::string_view redis_url, const
         } catch (const sw::redis::ReplyError& e) {
             // Authentication errors are non-recoverable: fail fast with StartupFatal.
             if (is_auth_error(e.what())) throw StartupFatal(std::string("AUTH rejected: ") + e.what());
-            if (!is_transient_reply(e.what())) throw StartupFatal(std::string("unexpected Redis error at startup: ") + e.what());
+            if (!is_transient_reply(e.what()))
+                throw StartupFatal(std::string("unexpected Redis error at startup: ") + e.what());
             error = e.what();
-        } catch (const sw::redis::Error& e) {  // IoError, TimeoutError, ClosedError, OomError, ProtoError: Redis is not ready
+        } catch (const sw::redis::Error&
+                     e) {  // IoError, TimeoutError, ClosedError, OomError, ProtoError: Redis is not ready
             error = e.what();
         }
 
         if (opts.on_waiting) {
             // Diagnostic callback reporting network address family (IPv4 vs IPv6) and elapsed wait time.
-            opts.on_waiting(error, address_family(copts.host, copts.port),
-                            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0));
+            opts.on_waiting(
+                error, address_family(copts.host, copts.port),
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0));
         }
         // Exponential backoff with random full jitter while awaiting Redis startup.
         const auto ceiling = std::min<std::chrono::milliseconds::rep>(
             opts.probe_max.count(), opts.probe_min.count() << std::min<std::uint32_t>(attempt, 20));
-        sleep(std::chrono::milliseconds(ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % static_cast<std::uint64_t>(ceiling + 1)) : 0));
+        sleep(std::chrono::milliseconds(
+            ceiling > 0 ? static_cast<std::chrono::milliseconds::rep>(rng() % static_cast<std::uint64_t>(ceiling + 1))
+                        : 0));
     }
 }
 

@@ -22,10 +22,14 @@ enum class StageResult : std::uint8_t {
 
 [[nodiscard]] constexpr const char* to_string(StageResult r) noexcept {
     switch (r) {
-        case StageResult::Added: return "Added";
-        case StageResult::Duplicate: return "Duplicate";
-        case StageResult::Removed: return "Removed";
-        case StageResult::RemovedUnknown: return "RemovedUnknown";
+        case StageResult::Added:
+            return "Added";
+        case StageResult::Duplicate:
+            return "Duplicate";
+        case StageResult::Removed:
+            return "Removed";
+        case StageResult::RemovedUnknown:
+            return "RemovedUnknown";
     }
     return "?";
 }

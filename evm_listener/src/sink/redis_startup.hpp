@@ -18,7 +18,8 @@ namespace evml::sink {
 
 // A startup condition that a restart cannot fix (plan 4.3): the process exits with code 2 instead of looping under the
 // restart policy. Unreachable Redis is NOT one of them: that waits.
-/// @brief Fatal exception thrown when Redis configuration violates essential system requirements (version < 7.0, eviction enabled, or tenancy violated).
+/// @brief Fatal exception thrown when Redis configuration violates essential system requirements (version < 7.0,
+/// eviction enabled, or tenancy violated).
 struct StartupFatal : std::runtime_error {
     using std::runtime_error::runtime_error;
     StartupFatal(const std::string& msg, std::string foreign_prefixes, std::string db, std::string marker)
@@ -34,7 +35,8 @@ struct StartupFatal : std::runtime_error {
     std::string marker;
 };
 
-/// @brief Facts gathered during dedicated-Redis tenancy checks (INFO keyspace, bounded SCAN, tenant marker, CLIENT LIST).
+/// @brief Facts gathered during dedicated-Redis tenancy checks (INFO keyspace, bounded SCAN, tenant marker, CLIENT
+/// LIST).
 struct TenancyFacts {
     std::map<int, std::uint64_t> keyspace_db_keys;
     std::vector<std::string> foreign_key_prefixes;  // up to 5 prefixes before first ':', never values
@@ -55,7 +57,8 @@ struct TenancyReport {
 /// @brief Replaces whitespace and control characters outside `[0x21, 0x7e]` with `'_'` for `CLIENT SETNAME`.
 [[nodiscard]] std::string sanitize_client_name(std::string_view raw);
 
-/// @brief Validates `EVML_DEPLOY_ENV` (`local|staging|production`) or defaults to `local` for local dev/test Redis hosts.
+/// @brief Validates `EVML_DEPLOY_ENV` (`local|staging|production`) or defaults to `local` for local dev/test Redis
+/// hosts.
 [[nodiscard]] std::string resolve_deploy_env(std::string_view raw_deploy_env, std::string_view redis_url);
 
 /// @brief Parses `/<db>` from `redis_url` path (defaults to 0; throws StartupFatal on malformed URL or invalid DB).
@@ -81,7 +84,8 @@ struct RedisVersion {
 /// @brief Extracts and parses semver from `INFO server` text output.
 [[nodiscard]] RedisVersion parse_redis_version(std::string_view info_server);
 
-// What the server told us. An absent optional means the command was refused (CONFIG is often disabled on managed Redis).
+// What the server told us. An absent optional means the command was refused (CONFIG is often disabled on managed
+// Redis).
 /// @brief Facts gathered during startup probes (INFO server, maxmemory-policy, appendonly).
 struct StartupFacts {
     std::string info_server;
@@ -122,8 +126,9 @@ struct StartupOptions {
     std::chrono::milliseconds io_timeout{2000};
     // Called after every failed attempt while Redis is unreachable: the host logs it, serves /readyz 503 and raises
     // RedisUnreachable once `waited` passes 60 s. `address_family` is "ipv6", "ipv4" or "unresolved".
-    std::function<void(const std::string& error, const std::string& address_family, std::chrono::milliseconds waited)> on_waiting;
-    std::function<bool()> stop;  // true = give up waiting (shutdown requested)
+    std::function<void(std::string_view error, std::string_view address_family, std::chrono::milliseconds waited)>
+        on_waiting;
+    std::function<bool()> stop;                            // true = give up waiting (shutdown requested)
     std::function<void(std::chrono::milliseconds)> sleep;  // empty = std::this_thread::sleep_for; tests inject
 };
 

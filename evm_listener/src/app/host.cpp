@@ -1,6 +1,13 @@
 #include "app/host.hpp"
 
 #include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <csignal>
 #include <memory>
 #include <mutex>
@@ -9,14 +16,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/redirect_error.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include "app/host_telemetry.hpp"
 #include "app/pool_config.hpp"
@@ -52,11 +51,14 @@ constexpr std::size_t kMaxWalkBlocks = 16;
 constexpr int kWalkAttempts = 3;
 
 std::atomic<bool> g_signal_stop{false};
-extern "C" void on_signal(int) { g_signal_stop.store(true, std::memory_order_relaxed); }
+extern "C" void on_signal(int) {
+    g_signal_stop.store(true, std::memory_order_relaxed);
+}
 
 std::uint64_t wall_ms() {
     return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
 }
 
 struct HeadEvent {
@@ -189,7 +191,8 @@ private:
         const auto now_ms = wall_ms();
         const std::uint64_t ts = rt_->ring.timestamp_of(log.block_number, log.block_hash).value_or(0);
         const pipeline::EventContext ctx{cfg_.shard.id, cfg_.shard.host_id, core::version_string()};
-        auto ev = pipeline::make_event(log, cfg_, ctx, pipeline::EventType::Log, ts, std::string(provider), now_ms, now_ms);
+        auto ev =
+            pipeline::make_event(log, cfg_, ctx, pipeline::EventType::Log, ts, std::string(provider), now_ms, now_ms);
         ev.finality = core::Finality::Latest;
         rt_->sink->emit_fast(std::move(ev));
     }
@@ -203,12 +206,15 @@ private:
     void on_head(const rpc::Head& h, std::string_view provider) {
         if (!rt_ || !rt_->driver || demoting_ || stopping_) return;
         HeadEvent e{chain::BlockRef{h.number, h.hash, h.parent_hash, h.timestamp}, std::string(provider)};
-        if (rt_->walking) rt_->deferred_head = std::move(e);
-        else handle_head(e);
+        if (rt_->walking)
+            rt_->deferred_head = std::move(e);
+        else
+            handle_head(e);
     }
     void handle_head(const HeadEvent& e) {
         std::optional<std::uint64_t> live_c_s;
-        if (rt_->driver && rt_->driver->status().state == pipeline::PipelineState::Live) live_c_s = rt_->driver->status().c_s;
+        if (rt_->driver && rt_->driver->status().state == pipeline::PipelineState::Live)
+            live_c_s = rt_->driver->status().c_s;
         rt_->ws_reconciler.on_head(e.ref.number, live_c_s);
         if (const auto top = rt_->ring.top(); top && e.ref.number > *top + kMaxWalkBlocks) {
             resync_ring(e.ref, "head gap of " + std::to_string(e.ref.number - *top) + " blocks");
@@ -232,7 +238,8 @@ private:
         if (!cur || *cur != provider) return;
 
         auto& gate = rt_->gate;
-        const auto sig = tag == provider::Tag::Safe ? gate.on_safe(provider, number, hash) : gate.on_finalized(provider, number, hash);
+        const auto sig = tag == provider::Tag::Safe ? gate.on_safe(provider, number, hash)
+                                                    : gate.on_finalized(provider, number, hash);
         if (const auto g_s = gate.safe(); g_s && (!rt_->last_g_s || *g_s != *rt_->last_g_s)) {
             rt_->last_g_s = g_s;
             rt_->last_g_s_advance = std::chrono::steady_clock::now();
@@ -243,7 +250,8 @@ private:
             if (rt_->source) rt_->source->clear_cache();
             rt_->driver->on_safe_reorg_signal(std::string(chain::to_string(sig)) + " from " + std::string(provider));
         } else if (sig == chain::GateSignal::FinalizedAnomaly) {
-            log::error("gate", "finalized anomaly: release frozen", {{"provider", provider}, {"reason", gate.frozen_reason()}});
+            log::error("gate", "finalized anomaly: release frozen",
+                       {{"provider", provider}, {"reason", gate.frozen_reason()}});
             rt_->driver->on_gate_frozen(gate.frozen_reason());
         }
     }
@@ -259,8 +267,8 @@ private:
         const auto now = std::chrono::steady_clock::now();
         if (now < next_heartbeat_) return;
         next_heartbeat_ = now + std::chrono::seconds(cfg_.ops.heartbeat_s);
-        rt_->sink->set_heartbeat(
-            HostTelemetry::format_heartbeat_json(wall_ms(), st, rt_->ring.top(), rt_->pool->current_getlogs(), epoch_n_));
+        rt_->sink->set_heartbeat(HostTelemetry::format_heartbeat_json(wall_ms(), st, rt_->ring.top(),
+                                                                      rt_->pool->current_getlogs(), epoch_n_));
     }
     void ops_tick() {
         std::string addr_family;
@@ -285,8 +293,10 @@ private:
             s.g_f = st.g_f.value_or(0);
             if (st.state != last_state_) {
                 log::info("host", "pipeline state",
-                          {{"from", pipeline::to_string(last_state_)}, {"to", pipeline::to_string(st.state)},
-                           {"c_s", std::to_string(st.c_s)}, {"c_f", std::to_string(st.c_f)}});
+                          {{"from", pipeline::to_string(last_state_)},
+                           {"to", pipeline::to_string(st.state)},
+                           {"c_s", std::to_string(st.c_s)},
+                           {"c_f", std::to_string(st.c_f)}});
                 last_state_ = st.state;
             }
             publish_heartbeat(st);
@@ -295,7 +305,8 @@ private:
         wd_.publish_state(s);
         ops_tick();
 
-        if (opt_.stop->load(std::memory_order_relaxed)) begin_shutdown(kExitOk, "stop requested");
+        if (opt_.stop->load(std::memory_order_relaxed))
+            begin_shutdown(kExitOk, "stop requested");
         else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Failed)
             begin_shutdown(kExitFailure, "sink failed: " + rt_->sink->fatal_message());
         else if (rt_ && rt_->sink && rt_->sink->mode() == sink::SinkMode::Fenced)
@@ -307,7 +318,8 @@ private:
         const auto st = rt_->sink->status();
         telemetry_.push_event(ops::sink_fenced_event(why, st.discarded_total));
         telemetry_.update_metrics(build_telemetry_context());
-        log::warn("host", "demoting to standby", {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
+        log::warn("host", "demoting to standby",
+                  {{"reason", why}, {"discarded_records", std::to_string(st.discarded_total)}});
         rt_->driver->request_drain();
         if (rt_->pool) rt_->pool->stop();
         sleep_timer_->cancel();
@@ -329,8 +341,10 @@ private:
         if (exit_set_) return;
         exit_set_ = true;
         exit_code_ = code;
-        if (code == kExitOk) log::info("host", "shutting down", {{"reason", why}});
-        else log::error("host", "shutting down", {{"reason", why}, {"exit_code", std::to_string(code)}});
+        if (code == kExitOk)
+            log::info("host", "shutting down", {{"reason", why}});
+        else
+            log::error("host", "shutting down", {{"reason", why}, {"exit_code", std::to_string(code)}});
     }
     void begin_shutdown(int code, std::string_view why) {
         if (stopping_.exchange(true)) return;
@@ -412,8 +426,11 @@ int Host::run() {
 
     wd_.start();
     log::info("host", "started",
-              {{"version", core::version_string()}, {"shard", cfg_.shard.id}, {"host_id", cfg_.shard.host_id},
-               {"ops_port", std::to_string(ops_->port())}, {"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
+              {{"version", core::version_string()},
+               {"shard", cfg_.shard.id},
+               {"host_id", cfg_.shard.host_id},
+               {"ops_port", std::to_string(ops_->port())},
+               {"lease", cfg_.lease.enabled ? "enabled" : "disabled"}});
 
     if (opt_.test_freeze_io_after) {
         freeze_timer_.expires_after(*opt_.test_freeze_io_after);
@@ -447,7 +464,8 @@ int Host::run() {
         wd_.set_sink_registered(false);
         const auto d = rt_->sink->drain(kDrainBudget);
         log::info("host", "sink drained",
-                  {{"flushed", d.flushed ? "true" : "false"}, {"unflushed", std::to_string(d.unflushed)},
+                  {{"flushed", d.flushed ? "true" : "false"},
+                   {"unflushed", std::to_string(d.unflushed)},
                    {"lease_released", d.lease_released ? "true" : "false"}});
     }
     teardown_runtime();
@@ -464,7 +482,8 @@ void Host::acquire_thread_main(bool first) {
     const auto stop = [this] { return stopping_.load() || opt_.stop->load(std::memory_order_relaxed); };
     const auto sleep = [stop](std::chrono::milliseconds d) {
         const auto end = std::chrono::steady_clock::now() + d;
-        while (std::chrono::steady_clock::now() < end && !stop()) std::this_thread::sleep_for(50ms);
+        while (std::chrono::steady_clock::now() < end && !stop())
+            std::this_thread::sleep_for(50ms);
     };
     try {
         const std::string deploy_env = sink::resolve_deploy_env(core::env::get("EVML_DEPLOY_ENV"), redis_url_);
@@ -477,8 +496,9 @@ void Host::acquire_thread_main(bool first) {
             so.deploy_env = deploy_env;
             so.host_id = cfg_.shard.host_id;
             so.on_waiting = [this](std::string_view error, std::string_view family, std::chrono::milliseconds waited) {
-                log::warn("host", "redis unreachable, waiting",
-                          {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
+                log::warn(
+                    "host", "redis unreachable, waiting",
+                    {{"error", error}, {"address_family", family}, {"waited_ms", std::to_string(waited.count())}});
                 {
                     std::lock_guard lk(redis_wait_mu_);
                     redis_wait_family_ = std::string(family);
@@ -542,7 +562,9 @@ void Host::acquire_thread_main(bool first) {
             begin_shutdown(kExitUsage, "redis startup check failed: " + msg);
         });
     } catch (const std::exception& e) {
-        net::post(ioc_, [this, msg = std::string(e.what())] { begin_shutdown(kExitFailure, "redis startup failed: " + msg); });
+        net::post(ioc_, [this, msg = std::string(e.what())] {
+            begin_shutdown(kExitFailure, "redis startup failed: " + msg);
+        });
     }
 }
 
@@ -555,7 +577,8 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
             const auto ver = std::to_string(rep->version.major) + "." + std::to_string(rep->version.minor) + "." +
                              std::to_string(rep->version.patch);
             if (rep->misconfigured) redis_misconfig_ = ops::RedisMisconfig{rep->maxmemory_policy, rep->appendonly, ver};
-            for (const auto& w : rep->warnings) log::warn("host", "redis startup warning", {{"warning", w}});
+            for (const auto& w : rep->warnings)
+                log::warn("host", "redis startup warning", {{"warning", w}});
             log::info("host", "redis ready", {{"redis_version", ver}});
         }
 
@@ -582,14 +605,21 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
         provider::PoolHandlers h;
         h.on_transition = [](const provider::Transition& t, std::string_view why) {
             log::info("pool", "provider transition",
-                      {{"provider", t.provider}, {"from", provider::to_string(t.from)}, {"to", provider::to_string(t.to)}, {"reason", why}});
+                      {{"provider", t.provider},
+                       {"from", provider::to_string(t.from)},
+                       {"to", provider::to_string(t.to)},
+                       {"reason", why}});
         };
-        h.on_tag = [this](std::string_view p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) { on_tag(p, tag, n, hash); };
+        h.on_tag = [this](std::string_view p, provider::Tag tag, std::uint64_t n, const core::Hash32& hash) {
+            on_tag(p, tag, n, hash);
+        };
         h.on_head = [this](const rpc::Head& head, std::string_view p) { on_head(head, p); };
         h.on_log = [this](const rpc::Log& log, std::string_view p) { on_ws_log(log, p); };
-        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to, std::string_view reason) {
+        h.on_ws_active_changed = [this](const std::optional<std::string>& from, const std::optional<std::string>& to,
+                                        std::string_view reason) {
             if (!rt_) return;
-            log::info("pool", "ws active provider changed", {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
+            log::info("pool", "ws active provider changed",
+                      {{"from", from.value_or("none")}, {"to", to.value_or("none")}, {"reason", reason}});
             if ((reason == "failover" || reason == "switch_back") && to) {
                 if (reason == "failover") ++provider_failovers_total_;
                 telemetry_.push_event(ops::provider_failover_event(from, *to, reason));
@@ -599,7 +629,8 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
             if (rt_->source) rt_->source->clear_cache();
             bump_head_epoch();
         };
-        rt_->pool = provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
+        rt_->pool =
+            provider::ProviderPool::create(ioc_.get_executor(), make_pool_config(cfg_, user_agent(cfg_)), std::move(h));
         rt_->source = std::make_unique<PoolLogSource>(rt_->pool, &rt_->ring);
 
         pipeline::SweeperOptions sw;
@@ -613,7 +644,8 @@ void Host::start_runtime(const std::optional<sink::StartupReport>& rep, const si
 
         pipeline::DriverOptions dopt;
         dopt.seed = std::random_device{}();
-        rt_->driver = std::make_unique<pipeline::PipelineDriver>(cfg_, *rt_->sweeper, *rt_->sink, *rt_->source, wall_ms, dopt);
+        rt_->driver =
+            std::make_unique<pipeline::PipelineDriver>(cfg_, *rt_->sweeper, *rt_->sink, *rt_->source, wall_ms, dopt);
 
         rt_->pool->start();
         phase_ = Phase::Leader;
@@ -636,7 +668,8 @@ net::awaitable<void> Host::pipeline_loop(std::weak_ptr<Host> weak_self, std::sha
                 auto self = weak_self.lock();
                 if (!self || !rt->driver) co_return;
                 if (rt->driver->status().state == pipeline::PipelineState::Live) {
-                    rt->ws_reconciler.on_live_tick(rt->driver->status().c_s, rt->pool && rt->pool->active_ws().has_value());
+                    rt->ws_reconciler.on_live_tick(rt->driver->status().c_s,
+                                                   rt->pool && rt->pool->active_ws().has_value());
                 }
                 if (r.done || self->stopping_ || self->demoting_) break;
                 wait_ms = r.wait;
@@ -697,7 +730,8 @@ net::awaitable<void> Host::walk_fork(std::weak_ptr<Host> weak_self, std::shared_
                 }
                 const auto b_res = dec.try_parse_block(o.result_raw);
                 if (!b_res) {
-                    why = "undecodable block " + std::to_string(n) + " from " + e.provider + ": " + b_res.error().what();
+                    why =
+                        "undecodable block " + std::to_string(n) + " from " + e.provider + ": " + b_res.error().what();
                     break;
                 }
                 const auto& b = *b_res;
@@ -708,8 +742,10 @@ net::awaitable<void> Host::walk_fork(std::weak_ptr<Host> weak_self, std::shared_
                 walk.feed(chain::BlockRef{b->number, b->hash, b->parent_hash, b->timestamp});
             }
             if (!why.empty()) break;
-            if (walk.state() == chain::ForkWalk::State::Done) info = rt->ring.apply(walk);
-            else if (walk.state() == chain::ForkWalk::State::BeyondRing) why = "fork deeper than the head ring";
+            if (walk.state() == chain::ForkWalk::State::Done)
+                info = rt->ring.apply(walk);
+            else if (walk.state() == chain::ForkWalk::State::BeyondRing)
+                why = "fork deeper than the head ring";
         }
         if (!info && why.empty()) why = "fork walk inconsistent after " + std::to_string(kWalkAttempts) + " attempts";
 
@@ -719,13 +755,17 @@ net::awaitable<void> Host::walk_fork(std::weak_ptr<Host> weak_self, std::shared_
         if (info) {
             const auto c_s = rt->driver->status().c_s;
             log::info("host", "head chain resolved",
-                      {{"fork_point", std::to_string(info->fork_point)}, {"depth", std::to_string(info->depth)},
-                       {"old_top", std::to_string(info->old_top)}, {"c_s", std::to_string(c_s)}});
+                      {{"fork_point", std::to_string(info->fork_point)},
+                       {"depth", std::to_string(info->depth)},
+                       {"old_top", std::to_string(info->old_top)},
+                       {"c_s", std::to_string(c_s)}});
             rt->ws_reconciler.on_fork_resolved(*info, e.ref.number);
             if (info->depth > 0 && rt->source) rt->source->clear_cache();
             if (info->depth > 0 && chain::ReorgDetector::crosses_safe(*info, c_s)) {
-                log::warn("host", "head fork below C_s", {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
-                rt->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " + std::to_string(c_s));
+                log::warn("host", "head fork below C_s",
+                          {{"fork_point", std::to_string(info->fork_point)}, {"c_s", std::to_string(c_s)}});
+                rt->driver->on_safe_reorg_signal("head fork at " + std::to_string(info->fork_point) + " below C_s " +
+                                                 std::to_string(c_s));
             }
         } else {
             self->resync_ring(e.ref, why);
@@ -754,7 +794,7 @@ int run_host(const core::Config& cfg, const HostOptions& opt) {
 
 int run_listener(const core::Config& cfg, std::optional<std::chrono::seconds> test_freeze_io_after) {
     core::log::init("info");
-    struct sigaction sa{};
+    struct sigaction sa {};
     sa.sa_handler = on_signal;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, nullptr);

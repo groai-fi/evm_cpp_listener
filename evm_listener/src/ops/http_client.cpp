@@ -1,5 +1,10 @@
 #include "ops/http_client.hpp"
 
+#include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/ssl.hpp>
 #include <cctype>
 #include <cstdint>
 #include <functional>
@@ -7,12 +12,6 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
-
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/ssl.hpp>
 
 #include "core/env.hpp"
 #include "rpc/blocking_http.hpp"
@@ -36,9 +35,10 @@ core::Error format_phase_err(std::string_view who, const char* name, const boost
 }
 
 template <class Stream>
-net::awaitable<core::Result<http::response<http::string_body>>> exchange(
-    std::shared_ptr<Stream> stream, http::request<http::string_body> req, std::chrono::milliseconds timeout,
-    std::size_t max_bytes, std::string who) {
+net::awaitable<core::Result<http::response<http::string_body>>> exchange(std::shared_ptr<Stream> stream,
+                                                                         http::request<http::string_body> req,
+                                                                         std::chrono::milliseconds timeout,
+                                                                         std::size_t max_bytes, std::string who) {
     boost::system::error_code ec;
     beast::get_lowest_layer(*stream).expires_after(timeout);
     co_await http::async_write(*stream, req, net::redirect_error(net::use_awaitable, ec));
@@ -56,7 +56,8 @@ net::awaitable<core::Result<http::response<http::string_body>>> exchange(
 bool iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i)
-        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
     return true;
 }
 
@@ -69,8 +70,7 @@ std::optional<core::Error> validate_headers(const HttpClient::Headers& headers) 
         if (value.find_first_of("\r\n") != std::string::npos)
             return core::Error{"HttpClient: header \"" + name + "\" has a line break in its value"};
         for (const auto owned : kOwned)
-            if (iequals(name, owned))
-                return core::Error{"HttpClient: header \"" + name + "\" is set by the client"};
+            if (iequals(name, owned)) return core::Error{"HttpClient: header \"" + name + "\" is set by the client"};
     }
     return std::nullopt;
 }
@@ -92,8 +92,8 @@ HttpClient::HttpClient(net::any_io_executor executor, HttpClientOptions opts) {
     state_ = std::make_shared<State>(std::move(executor), std::move(opts));
 }
 
-net::awaitable<core::Result<HttpResponse>> HttpClient::try_post_json(
-    std::string url, std::string body, Headers headers) {
+net::awaitable<core::Result<HttpResponse>> HttpClient::try_post_json(std::string url, std::string body,
+                                                                     Headers headers) {
     return request(state_, Method::Post, std::move(url), std::move(body), std::move(headers));
 }
 
@@ -109,16 +109,15 @@ net::awaitable<HttpResponse> HttpClient::get(std::string url, Headers headers) {
     return get_impl(state_, std::move(url), std::move(headers));
 }
 
-net::awaitable<HttpResponse> HttpClient::post_json_impl(
-    std::shared_ptr<State> st, std::string url, std::string body, Headers headers) {
+net::awaitable<HttpResponse> HttpClient::post_json_impl(std::shared_ptr<State> st, std::string url, std::string body,
+                                                        Headers headers) {
     if (const auto err = validate_headers(headers)) throw std::invalid_argument(err->what());
     auto r = co_await request(std::move(st), Method::Post, std::move(url), std::move(body), std::move(headers));
     if (!r) throw rpc::TransportError(r.error().what());
     co_return std::move(*r);
 }
 
-net::awaitable<HttpResponse> HttpClient::get_impl(
-    std::shared_ptr<State> st, std::string url, Headers headers) {
+net::awaitable<HttpResponse> HttpClient::get_impl(std::shared_ptr<State> st, std::string url, Headers headers) {
     if (const auto err = validate_headers(headers)) throw std::invalid_argument(err->what());
     auto r = co_await request(std::move(st), Method::Get, std::move(url), {}, std::move(headers));
     if (!r) throw rpc::TransportError(r.error().what());
@@ -133,8 +132,8 @@ void HttpClient::cancel() {
     }
 }
 
-net::awaitable<core::Result<HttpResponse>> HttpClient::request(
-    std::shared_ptr<State> st, Method method, std::string url, std::string body, Headers headers) {
+net::awaitable<core::Result<HttpResponse>> HttpClient::request(std::shared_ptr<State> st, Method method,
+                                                               std::string url, std::string body, Headers headers) {
     if (const auto err = validate_headers(headers)) co_return *err;
     const std::string who = core::env::redact(url);
     if (st->cancelled) co_return core::Error{"request cancelled for " + who};
@@ -145,8 +144,7 @@ net::awaitable<core::Result<HttpResponse>> HttpClient::request(
     struct CloserGuard {
         std::shared_ptr<State> st;
         std::uint64_t id;
-        CloserGuard(std::shared_ptr<State> s, std::uint64_t i, std::function<void()> fn)
-            : st(std::move(s)), id(i) {
+        CloserGuard(std::shared_ptr<State> s, std::uint64_t i, std::function<void()> fn) : st(std::move(s)), id(i) {
             st->closers[id] = std::move(fn);
         }
         ~CloserGuard() { st->closers.erase(id); }
@@ -166,7 +164,8 @@ net::awaitable<core::Result<HttpResponse>> HttpClient::request(
         req.set(http::field::content_type, "application/json");
         req.body() = std::move(body);
     }
-    for (const auto& [name, value] : headers) req.set(name, value);
+    for (const auto& [name, value] : headers)
+        req.set(name, value);
     req.prepare_payload();
 
     auto resolver = std::make_shared<tcp::resolver>(st->exec);
@@ -198,7 +197,8 @@ net::awaitable<core::Result<HttpResponse>> HttpClient::request(
         stream->close();
     } else {
         // TLS with the system trust store, peer verification and a hostname check. Hold ctx before stream in a
-        // heap-allocated struct so ssl::context is guaranteed to outlive beast::ssl_stream across cancellation/teardown.
+        // heap-allocated struct so ssl::context is guaranteed to outlive beast::ssl_stream across
+        // cancellation/teardown.
         struct TlsHttpConn {
             std::shared_ptr<ssl::context> ctx;
             beast::ssl_stream<beast::tcp_stream> stream;

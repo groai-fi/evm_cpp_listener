@@ -1,9 +1,8 @@
 #include "ops/deadman.hpp"
 
-#include <utility>
-
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <utility>
 
 #include "core/log.hpp"
 #include "ops/http_client.hpp"
@@ -62,13 +61,16 @@ net::awaitable<void> ping(std::shared_ptr<Deadman::State> st) {
 Deadman::Deadman(net::any_io_executor executor, DeadmanOptions opts) : exec_(executor) {
     const bool disabled = opts.url.empty();
     state_ = std::make_shared<State>(std::move(executor), std::move(opts));
-    if (disabled)
-        state_->write(spdlog::level::warn, "DEADMAN_PING_URL is empty: dead-man pings are disabled", {});
+    if (disabled) state_->write(spdlog::level::warn, "DEADMAN_PING_URL is empty: dead-man pings are disabled", {});
 }
 
-bool Deadman::enabled() const noexcept { return !state_->opts.url.empty(); }
+bool Deadman::enabled() const noexcept {
+    return !state_->opts.url.empty();
+}
 
-const char* Deadman::status() const noexcept { return enabled() ? "enabled" : "disabled"; }
+const char* Deadman::status() const noexcept {
+    return enabled() ? "enabled" : "disabled";
+}
 
 bool Deadman::healthy(const DeadmanFacts& f) {
     if (!f.leader) {
@@ -109,7 +111,11 @@ void Deadman::stop() {
     state_->client.cancel();
 }
 
-std::uint64_t Deadman::pings_total() const noexcept { return state_->pings.load(); }
-std::uint64_t Deadman::ping_failures_total() const noexcept { return state_->failures.load(); }
+std::uint64_t Deadman::pings_total() const noexcept {
+    return state_->pings.load();
+}
+std::uint64_t Deadman::ping_failures_total() const noexcept {
+    return state_->failures.load();
+}
 
 }  // namespace evml::ops

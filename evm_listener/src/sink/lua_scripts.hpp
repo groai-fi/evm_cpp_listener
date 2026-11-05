@@ -17,17 +17,23 @@ namespace evml::sink {
 /// Invariants:
 /// - Invariant I3 (Monotonic Ckpt): Ckpt script guarantees stored checkpoint only increases.
 /// - Invariant I4 (Deduplication): Emit script checks dedup key, writes stream with XADD MINID, then sets dedup key.
-/// - Invariant I6 (Revert Fidelity): Releases store before-image for revert emission matching original log stream and fields.
+/// - Invariant I6 (Revert Fidelity): Releases store before-image for revert emission matching original log stream and
+/// fields.
 enum class Script : std::uint8_t { Emit, Ckpt, FinalTrim, Lease, EmitFast };
 inline constexpr std::size_t kScriptCount = 5;
 
 [[nodiscard]] constexpr const char* script_name(Script s) noexcept {
     switch (s) {
-        case Script::Emit: return "emit";
-        case Script::Ckpt: return "ckpt";
-        case Script::FinalTrim: return "final_trim";
-        case Script::Lease: return "lease";
-        case Script::EmitFast: return "emit_fast";
+        case Script::Emit:
+            return "emit";
+        case Script::Ckpt:
+            return "ckpt";
+        case Script::FinalTrim:
+            return "final_trim";
+        case Script::Lease:
+            return "lease";
+        case Script::EmitFast:
+            return "emit_fast";
     }
     return "emit";
 }
@@ -90,13 +96,14 @@ struct EmitParams {
 
 // JSON codecs for the values stored in Redis. Malformed input throws core::DecodeError.
 /// @brief Serializes log fields to JSON string: [["field1","val1"],["field2","val2"]].
-[[nodiscard]] std::string pack_fields(const std::vector<pipeline::Field>& fields);   // [[k,v],...]
-[[nodiscard]] core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json);
+[[nodiscard]] std::string pack_fields(const std::vector<pipeline::Field>& fields);  // [[k,v],...]
+[[nodiscard]] core::Result<std::vector<pipeline::Field>> try_unpack_fields(std::string_view json) noexcept;
 /// @brief Deserializes log fields from JSON string; throws core::DecodeError on parse failure.
 [[nodiscard]] std::vector<pipeline::Field> unpack_fields(std::string_view json);
 /// @brief Serializes contract address manifest array to JSON string.
-[[nodiscard]] std::string pack_manifest(const std::vector<std::string>& manifest);   // ckpt.contracts value: ["addr:start:class",...]
-[[nodiscard]] core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json);
+[[nodiscard]] std::string pack_manifest(
+    const std::vector<std::string>& manifest);  // ckpt.contracts value: ["addr:start:class",...]
+[[nodiscard]] core::Result<std::vector<std::string>> try_unpack_manifest(std::string_view json) noexcept;
 /// @brief Deserializes contract address manifest array from JSON string.
 [[nodiscard]] std::vector<std::string> unpack_manifest(std::string_view json);
 
@@ -109,6 +116,7 @@ struct ReleasedImage {
     core::StreamKind stream{core::StreamKind::Events};
     std::vector<pipeline::Field> fields;
 };
+[[nodiscard]] core::Result<ReleasedImage> try_unpack_released(std::string_view json) noexcept;
 /// @brief Deserializes before-image JSON; throws core::DecodeError if structure is invalid.
 [[nodiscard]] ReleasedImage unpack_released(std::string_view json);
 

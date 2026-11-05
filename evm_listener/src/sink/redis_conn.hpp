@@ -34,7 +34,8 @@ struct ScriptOk {
 /// @brief Classification of script execution failures for error handling.
 enum class FailKind : std::uint8_t {
     NoScript,   // the script cache was flushed (Redis restart, SCRIPT FLUSH): reload and re-send
-    Transient,  // the server refused to run it now (OOM before execution, LOADING, BUSY): nothing was written; retry later
+    Transient,  // the server refused to run it now (OOM before execution, LOADING, BUSY): nothing was written; retry
+                // later
     Fatal,      // anything else (script error reply: an invariant violation, a bug): never retried
 };
 
@@ -111,47 +112,67 @@ public:
         }
     }
 
-    [[nodiscard]] virtual core::Result<pipeline::Checkpoint, ConnError> try_read_checkpoint() {
+    [[nodiscard]] virtual core::Result<pipeline::Checkpoint, ConnError> try_read_checkpoint() noexcept {
         try {
             return read_checkpoint();
         } catch (const ConnError& e) {
             return e;
+        } catch (const std::exception& e) {
+            return ConnError(e.what());
+        } catch (...) {
+            return ConnError();
         }
     }
 
     [[nodiscard]] virtual core::Result<std::vector<pipeline::ReleasedEntry>, ConnError> try_read_released(
-        std::uint64_t from, std::uint64_t to) {
+        std::uint64_t from, std::uint64_t to) noexcept {
         try {
             return read_released(from, to);
         } catch (const ConnError& e) {
             return e;
+        } catch (const std::exception& e) {
+            return ConnError(e.what());
+        } catch (...) {
+            return ConnError();
         }
     }
 
     [[nodiscard]] virtual core::Result<void, ConnError> try_set_with_ttl(std::string_view key, std::string_view value,
-                                                                         std::uint32_t ttl_s) {
+                                                                         std::uint32_t ttl_s) noexcept {
         try {
             set_with_ttl(key, value, ttl_s);
             return {};
         } catch (const ConnError& e) {
             return e;
+        } catch (const std::exception& e) {
+            return ConnError(e.what());
+        } catch (...) {
+            return ConnError();
         }
     }
 
     [[nodiscard]] virtual core::Result<GroupFacts, ConnError> try_read_group_facts(std::string_view stream_key,
-                                                                                   std::string_view group) {
+                                                                                   std::string_view group) noexcept {
         try {
             return read_group_facts(stream_key, group);
         } catch (const ConnError& e) {
             return e;
+        } catch (const std::exception& e) {
+            return ConnError(e.what());
+        } catch (...) {
+            return ConnError();
         }
     }
 
-    [[nodiscard]] virtual core::Result<TenancyFacts, ConnError> try_read_tenancy_facts() {
+    [[nodiscard]] virtual core::Result<TenancyFacts, ConnError> try_read_tenancy_facts() noexcept {
         try {
             return read_tenancy_facts();
         } catch (const ConnError& e) {
             return e;
+        } catch (const std::exception& e) {
+            return ConnError(e.what());
+        } catch (...) {
+            return ConnError();
         }
     }
 };

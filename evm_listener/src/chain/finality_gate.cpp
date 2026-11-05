@@ -39,7 +39,8 @@ GateSignal FinalityGate::on_finalized(std::string_view provider, std::uint64_t n
     const auto it = finalized_by_provider_.find(prov);
     if (it != finalized_by_provider_.end()) {
         if (number < it->second.number) {
-            // Load-balanced RPC gateway routed poll to a lagging backend node; ignore stale height so G_f stays monotonic
+            // Load-balanced RPC gateway routed poll to a lagging backend node; ignore stale height so G_f stays
+            // monotonic
             return GateSignal::None;
         }
         if (number == it->second.number && !(hash == it->second.hash)) {
@@ -52,13 +53,12 @@ GateSignal FinalityGate::on_finalized(std::string_view provider, std::uint64_t n
         for (const auto& [other, seen] : finalized_by_provider_) {
             if (other != provider && seen.number == number && !(seen.hash == hash)) {
                 sig = GateSignal::FinalizedAnomaly;
-                frozen_reason_ = prov + ": finalized block " + std::to_string(number) +
-                                 " hash disagrees with " + other;
+                frozen_reason_ = prov + ": finalized block " + std::to_string(number) + " hash disagrees with " + other;
                 break;
             }
         }
     }
-    if (sig == GateSignal::FinalizedAnomaly) frozen_ = true; // Invariant I5: freeze release permanently
+    if (sig == GateSignal::FinalizedAnomaly) frozen_ = true;  // Invariant I5: freeze release permanently
     finalized_by_provider_[prov] = {number, hash};
     latest_finalized_ = number;
     return sig;
@@ -68,7 +68,7 @@ GateSignal FinalityGate::on_finalized(std::string_view provider, std::uint64_t n
 std::optional<std::uint64_t> FinalityGate::finalized() const noexcept {
     if (!latest_finalized_) return std::nullopt;
     if (!latest_safe_) return latest_finalized_;
-    return std::min(*latest_finalized_, *latest_safe_); // Clamp G_f to G_s
+    return std::min(*latest_finalized_, *latest_safe_);  // Clamp G_f to G_s
 }
 
 }  // namespace evml::chain

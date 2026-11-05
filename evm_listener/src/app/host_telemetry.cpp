@@ -1,10 +1,9 @@
 #include "app/host_telemetry.hpp"
 
 #include <algorithm>
+#include <boost/json.hpp>
 #include <random>
 #include <utility>
-
-#include <boost/json.hpp>
 
 #include "core/env.hpp"
 #include "core/log.hpp"
@@ -19,8 +18,7 @@ namespace {
 constexpr auto kOpsPeriod = 10s;  // plan 5.3.3: the alert engine evaluates a fresh snapshot this often
 }  // namespace
 
-HostTelemetry::HostTelemetry(const core::Config& cfg)
-    : cfg_(cfg), engine_(ops::AlertThresholds::from_config(cfg)) {}
+HostTelemetry::HostTelemetry(const core::Config& cfg) : cfg_(cfg), engine_(ops::AlertThresholds::from_config(cfg)) {}
 
 void HostTelemetry::init_ops_clients(boost::asio::any_io_executor ex, std::string_view user_agent) {
     const auto hook = core::env::get(cfg_.ops.alert_webhook_env);
@@ -50,7 +48,9 @@ void HostTelemetry::stop() {
     if (deadman_) deadman_->stop();
 }
 
-void HostTelemetry::push_event(ops::AlertEvent ev) { snapshots_.push_event(std::move(ev)); }
+void HostTelemetry::push_event(ops::AlertEvent ev) {
+    snapshots_.push_event(std::move(ev));
+}
 
 void HostTelemetry::emit_event_now(ops::AlertEvent ev, std::uint64_t /*ts_ms*/) {
     ops::OpsSnapshot s;
@@ -111,16 +111,18 @@ void HostTelemetry::ops_tick(const TelemetryContext& ctx, std::chrono::steady_cl
 
 void HostTelemetry::set_sink_counters(const sink::SinkStatus& sk) {
     metrics_.counter_total("evml_lease_renew_failures_total", "Lease renew failures", {}, sk.renew_failures_total);
-    metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink", {},
-                           sk.discarded_total);
+    metrics_.counter_total("evml_spill_discarded_records_total", "Spill/queue records discarded on fenced/failed sink",
+                           {}, sk.discarded_total);
     metrics_.counter_total("evml_sink_dup_total", "Duplicate emissions collapsed by Redis emit.lua", {}, sk.dup_total);
-    metrics_.counter_total("evml_sink_below_finalized_total", "Tracked emissions refused at or below finalized checkpoint", {},
-                           sk.below_finalized_total);
-    metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {}, sk.heartbeat_failures_total);
+    metrics_.counter_total("evml_sink_below_finalized_total",
+                           "Tracked emissions refused at or below finalized checkpoint", {}, sk.below_finalized_total);
+    metrics_.counter_total("evml_sink_heartbeat_failures_total", "Redis heartbeat write failures", {},
+                           sk.heartbeat_failures_total);
     metrics_.counter_total("evml_sink_consumer_lag_failures_total", "Consumer-group lag probe failures", {},
                            sk.consumer_lag_failures_total);
     metrics_.counter_total("evml_sink_reconnects_total", "Redis sink reconnects", {}, sk.reconnects_total);
-    metrics_.counter_total("evml_fast_emitted_total", "Fast-stream tip events emitted to Redis", {}, sk.fast_emitted_total);
+    metrics_.counter_total("evml_fast_emitted_total", "Fast-stream tip events emitted to Redis", {},
+                           sk.fast_emitted_total);
     metrics_.counter_total("evml_fast_dropped_total",
                            "Fast-stream tip events dropped due to backpressure, outage, or fencing", {},
                            sk.fast_dropped_total);
@@ -129,24 +131,29 @@ void HostTelemetry::set_sink_counters(const sink::SinkStatus& sk) {
 }
 
 void HostTelemetry::set_sweeper_counters(const pipeline::SweepStats& sw) {
-    metrics_.counter_total("evml_safe_missed_total", "Safe-class logs missed by safe sweep and emitted late by final sweep", {},
-                           sw.late);
+    metrics_.counter_total("evml_safe_missed_total",
+                           "Safe-class logs missed by safe sweep and emitted late by final sweep", {}, sw.late);
     metrics_.counter_total("evml_sweep_emitted_safe_total", "Safe-sweep log emissions", {}, sw.emitted_safe);
     metrics_.counter_total("evml_sweep_emitted_final_total", "Final-sweep log emissions", {}, sw.emitted_final);
     metrics_.counter_total("evml_sweep_deduped_total", "Emissions skipped by in-process dedup layer", {}, sw.deduped);
     metrics_.counter_total("evml_reverts_emitted_total", "Revert events emitted", {}, sw.reverts);
     metrics_.counter_total("evml_sweep_matched_total", "Safe-released logs confirmed by final sweep", {}, sw.matched);
-    metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {}, sw.range_shrinks);
+    metrics_.counter_total("evml_sweep_range_shrinks_total", "AIMD page shrinks due to RangeTooLarge", {},
+                           sw.range_shrinks);
     metrics_.counter_total("evml_sweep_failure_shrinks_total", "AIMD page shrinks due to rate limit/timeout/5xx", {},
                            sw.failure_shrinks);
-    metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {}, sw.volume_shrinks);
-    metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {}, sw.reverified_new);
-    metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {}, sw.address_splits);
+    metrics_.counter_total("evml_sweep_volume_shrinks_total", "AIMD page shrinks due to max_page_logs", {},
+                           sw.volume_shrinks);
+    metrics_.counter_total("evml_sweep_reverified_new_total", "New logs emitted during reverify_released", {},
+                           sw.reverified_new);
+    metrics_.counter_total("evml_sweep_address_splits_total", "Address-split fallback pages at min_range", {},
+                           sw.address_splits);
 }
 
 void HostTelemetry::set_leader_gauges(const sink::SinkStatus* sk, const pipeline::DriverStatus* st,
                                       std::optional<std::uint64_t> head) {
-    metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {}, sk ? static_cast<double>(sk->queue_depth) : 0.0);
+    metrics_.gauge("evml_sink_queue_depth", "In-memory sink queue depth", {},
+                   sk ? static_cast<double>(sk->queue_depth) : 0.0);
     metrics_.gauge("evml_sink_spill_records", "Records currently on disk in the spill buffer", {},
                    sk ? static_cast<double>(sk->spill_records) : 0.0);
     metrics_.gauge("evml_sink_spill_bytes", "Bytes currently on disk in the spill buffer", {},
@@ -171,8 +178,8 @@ void HostTelemetry::set_consumer_lag_gauges(const ops::Metrics::Labels& lbl, dou
                                             double pending_age_s, double lag_entries) {
     metrics_.gauge("evml_consumer_undelivered_age_seconds", "Age in seconds of oldest unread stream entry", lbl,
                    undelivered_age_s);
-    metrics_.gauge("evml_consumer_pending_age_seconds",
-                   "Age in seconds of oldest pending unacknowledged stream entry", lbl, pending_age_s);
+    metrics_.gauge("evml_consumer_pending_age_seconds", "Age in seconds of oldest pending unacknowledged stream entry",
+                   lbl, pending_age_s);
     metrics_.gauge("evml_consumer_lag_entries", "Unread stream entries for consumer group (-1 when unknown)", lbl,
                    lag_entries);
 }
@@ -181,7 +188,8 @@ void HostTelemetry::init_metrics(const core::Config& cfg) {
     metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}}, 0.0);
     metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}}, 0.0);
     metrics_.counter_total("evml_provider_failovers_total", "WS provider failovers", {}, 0);
-    metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", "Safe Gate Stuck"}}, 0);
+    metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine",
+                           {{"alert", "Safe Gate Stuck"}}, 0);
     metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, 0);
     metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}}, 0);
     metrics_.counter_total("evml_alert_send_failures_total", "Alert webhook send failures after retries", {}, 0);
@@ -193,23 +201,28 @@ void HostTelemetry::init_metrics(const core::Config& cfg) {
     set_sweeper_counters({});
     set_leader_gauges(nullptr, nullptr, std::nullopt);
 
-    const auto init_provider_metrics = [this](const std::string& name) {
-        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", name}}, 0.0);
-        metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                               {{"provider", name}}, 0);
+    const auto init_provider_metrics = [this](std::string_view name) {
+        const std::string provider(name);
+        metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs",
+                       {{"provider", provider}}, 0.0);
+        metrics_.counter_total("evml_provider_inconsistency_total",
+                               "Bad or inconsistent responses reported for provider", {{"provider", provider}}, 0);
         metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
-                               {{"provider", name}}, 0);
+                               {{"provider", provider}}, 0);
         for (const char* m : {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber", "eth_chainId"}) {
             metrics_.counter_total("evml_rpc_requests_total", "Total HTTP JSON-RPC requests sent to provider",
-                                   {{"provider", name}, {"method", m}}, 0);
+                                   {{"provider", provider}, {"method", m}}, 0);
         }
         for (const char* s : {"heads", "logs"}) {
-            metrics_.counter_total("evml_ws_messages_total", "Total WebSocket subscription messages received from provider",
-                                   {{"provider", name}, {"stream", s}}, 0);
+            metrics_.counter_total("evml_ws_messages_total",
+                                   "Total WebSocket subscription messages received from provider",
+                                   {{"provider", provider}, {"stream", s}}, 0);
         }
     };
-    for (const auto& p : cfg.getlogs_chain) init_provider_metrics(p.name);
-    for (const auto& p : cfg.ws_chain) init_provider_metrics(p.name);
+    for (const auto& p : cfg.getlogs_chain)
+        init_provider_metrics(p.name);
+    for (const auto& p : cfg.ws_chain)
+        init_provider_metrics(p.name);
     if (cfg.sink.consumer_groups.empty()) {
         set_consumer_lag_gauges({{"stream", "events"}, {"group", "none"}}, 0.0, 0.0, 0.0);
     } else {
@@ -220,17 +233,22 @@ void HostTelemetry::init_metrics(const core::Config& cfg) {
 }
 
 void HostTelemetry::update_metrics(const TelemetryContext& ctx) {
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}}, ctx.role == "leader" ? 1.0 : 0.0);
-    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}}, ctx.role == "standby" ? 1.0 : 0.0);
+    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "leader"}},
+                   ctx.role == "leader" ? 1.0 : 0.0);
+    metrics_.gauge("evml_role", "Current role of this host (1 = active)", {{"role", "standby"}},
+                   ctx.role == "standby" ? 1.0 : 0.0);
     metrics_.counter_total("evml_provider_failovers_total", "WS provider failovers", {}, ctx.provider_failovers_total);
     metrics_.counter_total("evml_alert_send_failures_total", "Alert webhook send failures after retries", {},
                            alerts_ ? alerts_->send_failures_total() : 0);
     metrics_.counter_total("evml_deadman_ping_failures_total", "Dead-man switch ping failures", {},
                            deadman_ ? deadman_->ping_failures_total() : 0);
-    metrics_.counter_total("evml_ws_missed_logs_total", "Logs found by getLogs sweep that WS missed", {}, ctx.ws_missed_total);
-    metrics_.counter_total("evml_ws_extra_logs_total", "Staged WS logs not present in canonical getLogs sweep", {}, ctx.ws_extra_total);
+    metrics_.counter_total("evml_ws_missed_logs_total", "Logs found by getLogs sweep that WS missed", {},
+                           ctx.ws_missed_total);
+    metrics_.counter_total("evml_ws_extra_logs_total", "Staged WS logs not present in canonical getLogs sweep", {},
+                           ctx.ws_extra_total);
     for (const auto& [title, count] : alerts_fired_total_) {
-        metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", title}}, count);
+        metrics_.counter_total("evml_alerts_fired_total", "Alerts fired by the alert engine", {{"alert", title}},
+                               count);
     }
 
     if (ctx.driver) {
@@ -239,14 +257,17 @@ void HostTelemetry::update_metrics(const TelemetryContext& ctx) {
         set_sweeper_counters(ctx.sweeper->stats());
 
         const auto st = ctx.driver->status();
-        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}}, st.reverify_clean);
-        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}}, st.safe_reorgs);
+        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "clean"}},
+                               st.reverify_clean);
+        metrics_.counter_total("evml_reverify_total", "Completed safe-window reverifications", {{"result", "reorg"}},
+                               st.safe_reorgs);
         metrics_.counter_total("evml_pending_evicted_logs_total", "Staged WS logs evicted at pending_max_logs cap", {},
                                ctx.ws_reconciler->evicted_total());
 
         for (const auto& p : ctx.pool->health()) {
-            metrics_.counter_total("evml_provider_inconsistency_total", "Bad or inconsistent responses reported for provider",
-                                   {{"provider", p.name}}, ctx.pool->inconsistency_total(p.name));
+            metrics_.counter_total("evml_provider_inconsistency_total",
+                                   "Bad or inconsistent responses reported for provider", {{"provider", p.name}},
+                                   ctx.pool->inconsistency_total(p.name));
             metrics_.counter_total("evml_getlogs_throttled_total", "eth_getLogs calls throttled by token bucket",
                                    {{"provider", p.name}}, ctx.pool->throttled_total(p.name));
             for (const auto& [method, count] : ctx.pool->rpc_requests_total(p.name)) {
@@ -254,7 +275,8 @@ void HostTelemetry::update_metrics(const TelemetryContext& ctx) {
                                        {{"provider", p.name}, {"method", method}}, count);
             }
             for (const auto& [stream, count] : ctx.pool->ws_messages_total(p.name)) {
-                metrics_.counter_total("evml_ws_messages_total", "Total WebSocket subscription messages received from provider",
+                metrics_.counter_total("evml_ws_messages_total",
+                                       "Total WebSocket subscription messages received from provider",
                                        {{"provider", p.name}, {"stream", stream}}, count);
             }
         }
@@ -266,8 +288,8 @@ void HostTelemetry::update_metrics(const TelemetryContext& ctx) {
             const auto getlogs = ctx.pool->current_getlogs();
             for (const auto& p : ctx.pool->health()) {
                 const bool active = (ws && *ws == p.name) || (getlogs && *getlogs == p.name);
-                metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs", {{"provider", p.name}},
-                               active ? 1.0 : 0.0);
+                metrics_.gauge("evml_provider_active", "Whether provider is currently active for WS or getLogs",
+                               {{"provider", p.name}}, active ? 1.0 : 0.0);
             }
 
             for (const auto& c : ctx.sink->consumer_lag()) {
@@ -349,10 +371,11 @@ ops::OpsResponse HostTelemetry::build_metrics_response(const TelemetryContext& c
     return o;
 }
 
-ops::SnapshotInputs HostTelemetry::build_snapshot_inputs(
-    const TelemetryContext& ctx, std::chrono::steady_clock::time_point now, std::uint64_t ts_ms,
-    const std::optional<ops::RedisMisconfig>& redis_misconfig, std::uint32_t redis_unreachable_s,
-    std::string_view addr_family) const {
+ops::SnapshotInputs HostTelemetry::build_snapshot_inputs(const TelemetryContext& ctx,
+                                                         std::chrono::steady_clock::time_point now, std::uint64_t ts_ms,
+                                                         const std::optional<ops::RedisMisconfig>& redis_misconfig,
+                                                         std::uint32_t redis_unreachable_s,
+                                                         std::string_view addr_family) const {
     ops::SnapshotInputs in;
     in.now = now;
     in.wall_ms = ts_ms;
@@ -387,7 +410,8 @@ ops::SnapshotInputs HostTelemetry::build_snapshot_inputs(
         in.getlogs_provider = getlogs.value_or("");
         in.ws_safe = safe_of(ws);
         in.getlogs_safe = safe_of(getlogs);
-        for (const auto& p : in.providers) in.provider_inconsistent_total[p.name] = ctx.pool->inconsistency_total(p.name);
+        for (const auto& p : in.providers)
+            in.provider_inconsistent_total[p.name] = ctx.pool->inconsistency_total(p.name);
     }
     return in;
 }

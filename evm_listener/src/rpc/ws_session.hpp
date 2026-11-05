@@ -1,14 +1,13 @@
 #pragma once
 
+#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "rpc/classify.hpp"
@@ -38,18 +37,18 @@ struct WsClosed {
     FailKind kind{FailKind::Retry};                   // Actionable failure category for recovery/backoff
     std::string reason;                               // Human-readable diagnostic description (URL redacted)
     std::optional<std::chrono::seconds> retry_after;  // Parsed delta-seconds hint from HTTP upgrade 429
-    int http_status{0};                               // HTTP status of a rejected upgrade (401, 403, 429, ...); 0 = none
-    std::optional<std::int64_t> rpc_code;             // JSON-RPC error.code that ended the session, if any
+    int http_status{0};                    // HTTP status of a rejected upgrade (401, 403, 429, ...); 0 = none
+    std::optional<std::int64_t> rpc_code;  // JSON-RPC error.code that ended the session, if any
 };
 
 /// @brief Callbacks invoked on the session's Boost.Asio executor.
 /// @warning Handlers must NOT throw exceptions. Any throw from on_closed halts the process immediately;
 /// exceptions in other handlers abort the session with FailKind::Retry.
 struct WsHandlers {
-    std::function<void()> on_ready;                     // Invoked once chain ID verified and all feeds ACKed
-    std::function<void(const Head&)> on_head;          // Invoked on new block header push notification
-    std::function<void(const Log&)> on_log;            // Invoked on log event push notification
-    std::function<void(const WsClosed&)> on_closed;    // Invoked once upon session termination
+    std::function<void()> on_ready;                  // Invoked once chain ID verified and all feeds ACKed
+    std::function<void(const Head&)> on_head;        // Invoked on new block header push notification
+    std::function<void(const Log&)> on_log;          // Invoked on log event push notification
+    std::function<void(const WsClosed&)> on_closed;  // Invoked once upon session termination
 };
 
 /// @brief One-shot WebSocket ingestion actor streaming block headers and log events from an EVM node.

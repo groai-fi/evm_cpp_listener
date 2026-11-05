@@ -2,9 +2,8 @@
 
 #include <cctype>
 #include <cstring>
-#include <string>
-
 #include <ethash/keccak.hpp>
+#include <string>
 
 #include "core/error.hpp"
 
@@ -21,8 +20,8 @@ void validate_event_signature(std::string_view sig) {
     for (const char c : sig) {
         // Disallow whitespace and parameter names
         if (std::isspace(static_cast<unsigned char>(c))) fail("whitespace/param names not allowed");
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '(' || c == ')' || c == ',' ||
-              c == '[' || c == ']')) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '(' || c == ')' || c == ',' || c == '[' ||
+              c == ']')) {
             fail("illegal character");
         }
     }

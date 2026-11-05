@@ -1,11 +1,10 @@
 #pragma once
 
+#include <boost/system/result.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include <boost/system/result.hpp>
 
 namespace evml::core {
 

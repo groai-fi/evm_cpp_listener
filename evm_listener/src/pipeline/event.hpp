@@ -44,7 +44,8 @@ struct Event {
 
 // Constructs unique deterministic event identifier "{chain_id}:{blockHash}:{logIndex}".
 // Watch out: A chain reorg produces a different blockHash, yielding a distinct event_id for the new fork.
-[[nodiscard]] std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash, std::uint64_t log_index);
+[[nodiscard]] std::string make_event_id(std::uint64_t chain_id, const core::Hash32& block_hash,
+                                        std::uint64_t log_index);
 
 // Derives Redis deduplication key "dedup:{event_id}" (rev 5, N1).
 // Watch out: Value stores the last emitted EventType (log|revert) to permit log -> revert -> log transitions.

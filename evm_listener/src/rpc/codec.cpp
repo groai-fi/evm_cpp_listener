@@ -1,8 +1,7 @@
 #include "rpc/codec.hpp"
 
-#include <stdexcept>
-
 #include <boost/json.hpp>
+#include <stdexcept>
 
 #include "core/error.hpp"
 
@@ -35,7 +34,8 @@ namespace {
     // Unordered field lookup is faster than ordered scanning
     auto v = obj.find_field_unordered(field);
     if (v.error()) {
-        return fail_field(ctx, field, std::string("missing or unreadable (") + simdjson::error_message(v.error()) + ")");
+        return fail_field(ctx, field,
+                          std::string("missing or unreadable (") + simdjson::error_message(v.error()) + ")");
     }
     return v.value_unsafe();
 }
@@ -420,10 +420,14 @@ std::string request(std::uint64_t id, const char* method, bj::array params) {
 }  // namespace
 
 /// @brief Outbound builder for eth_blockNumber.
-std::string build_block_number(std::uint64_t id) { return request(id, "eth_blockNumber", {}); }
+std::string build_block_number(std::uint64_t id) {
+    return request(id, "eth_blockNumber", {});
+}
 
 /// @brief Outbound builder for eth_chainId.
-std::string build_chain_id(std::uint64_t id) { return request(id, "eth_chainId", {}); }
+std::string build_chain_id(std::uint64_t id) {
+    return request(id, "eth_chainId", {});
+}
 
 /// @brief Outbound builder for eth_subscribe.
 std::string build_subscribe(std::uint64_t id, std::string_view kind) {
@@ -437,9 +441,11 @@ std::string build_subscribe_logs(std::uint64_t id, const core::LogFilter& filter
         throw std::invalid_argument("build_subscribe_logs: filter needs at least one address and one topic0");
     }
     bj::array addrs;
-    for (const auto& a : filter.addresses) addrs.emplace_back(a.to_hex());
+    for (const auto& a : filter.addresses)
+        addrs.emplace_back(a.to_hex());
     bj::array topic0s;
-    for (const auto& t : filter.topic0s) topic0s.emplace_back(t.to_hex());
+    for (const auto& t : filter.topic0s)
+        topic0s.emplace_back(t.to_hex());
     bj::object f;
     f["address"] = std::move(addrs);
     f["topics"] = bj::array{std::move(topic0s)};
@@ -462,16 +468,19 @@ std::string build_get_code(std::uint64_t id, const Address20& address, std::stri
 }
 
 /// @brief Outbound builder for eth_getLogs spanning block interval [from_block, to_block].
-std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block, const core::LogFilter& filter) {
+std::string build_get_logs(std::uint64_t id, std::uint64_t from_block, std::uint64_t to_block,
+                           const core::LogFilter& filter) {
     // Invariant I_1: contiguous range must be ordered
     if (from_block > to_block) throw std::invalid_argument("build_get_logs: from_block > to_block");
     if (filter.addresses.empty() || filter.topic0s.empty()) {
         throw std::invalid_argument("build_get_logs: filter needs at least one address and one topic0");
     }
     bj::array addrs;
-    for (const auto& a : filter.addresses) addrs.emplace_back(a.to_hex());
+    for (const auto& a : filter.addresses)
+        addrs.emplace_back(a.to_hex());
     bj::array topic0s;
-    for (const auto& t : filter.topic0s) topic0s.emplace_back(t.to_hex());
+    for (const auto& t : filter.topic0s)
+        topic0s.emplace_back(t.to_hex());
     bj::object f;
     f["fromBlock"] = core::to_hex_u64(from_block);
     f["toBlock"] = core::to_hex_u64(to_block);

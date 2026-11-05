@@ -12,7 +12,7 @@ Emission make_emission(const Event& e, std::optional<std::uint64_t> released_blo
     m.event_id = e.event_id;
     m.dedup_key = dedup_key(e);
     m.fields = to_fields(e);
-    m.released_block = released_block; // Set for safe-class events to record in released ZSET
+    m.released_block = released_block;  // Set for safe-class events to record in released ZSET
     return m;
 }
 
@@ -23,14 +23,14 @@ Emission make_revert(const ReleasedEntry& entry, std::uint64_t emitted_ms) {
     m.type = EventType::Revert;
     m.event_id = entry.event_id;
     m.dedup_key = "dedup:" + entry.event_id;
-    m.fields = entry.fields; // Invariant I6: exact copy of original fields
+    m.fields = entry.fields;  // Invariant I6: exact copy of original fields
     bool saw_type = false, saw_emitted = false;
     for (auto& [k, v] : m.fields) {
         if (k == "type") {
-            v = to_string(EventType::Revert); // Mutate type to 'revert'
+            v = to_string(EventType::Revert);  // Mutate type to 'revert'
             saw_type = true;
         } else if (k == "emitted_ms") {
-            v = std::to_string(emitted_ms);   // Update emitted timestamp to current time
+            v = std::to_string(emitted_ms);  // Update emitted timestamp to current time
             saw_emitted = true;
         }
     }
@@ -41,7 +41,8 @@ Emission make_revert(const ReleasedEntry& entry, std::uint64_t emitted_ms) {
 
 // Converts an Emission into a ReleasedEntry for tracking in Redis ZSET during safe sweeps.
 ReleasedEntry to_released_entry(const Emission& e) {
-    if (!e.released_block) throw std::logic_error("to_released_entry: emission " + e.event_id + " has no released_block");
+    if (!e.released_block)
+        throw std::logic_error("to_released_entry: emission " + e.event_id + " has no released_block");
     return ReleasedEntry{e.event_id, *e.released_block, e.stream, e.fields};
 }
 

@@ -14,8 +14,8 @@ struct TransportError : std::runtime_error {
 
 /// @brief HTTP response payload carrying numeric status code and response body text.
 struct HttpResponse {
-    int status{};          // HTTP status code (e.g. 200, 429, 500)
-    std::string body;      // Raw response body string
+    int status{};      // HTTP status code (e.g. 200, 429, 500)
+    std::string body;  // Raw response body string
 };
 
 /// @brief One-shot blocking HTTP/HTTPS POST for JSON-RPC payloads (used by CLI tools and startup checks).

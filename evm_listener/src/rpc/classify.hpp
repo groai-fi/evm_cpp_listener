@@ -21,12 +21,18 @@ enum class FailKind : std::uint8_t {
 /// @brief Converts failure classification category to human-readable string.
 [[nodiscard]] constexpr const char* to_string(FailKind k) noexcept {
     switch (k) {
-        case FailKind::Retry: return "retry";
-        case FailKind::RateLimited: return "rate_limited";
-        case FailKind::QuotaExhausted: return "quota_exhausted";
-        case FailKind::AuthFatal: return "auth_fatal";
-        case FailKind::ConfigFatal: return "config_fatal";
-        case FailKind::RangeTooLarge: return "range_too_large";
+        case FailKind::Retry:
+            return "retry";
+        case FailKind::RateLimited:
+            return "rate_limited";
+        case FailKind::QuotaExhausted:
+            return "quota_exhausted";
+        case FailKind::AuthFatal:
+            return "auth_fatal";
+        case FailKind::ConfigFatal:
+            return "config_fatal";
+        case FailKind::RangeTooLarge:
+            return "range_too_large";
     }
     return "unknown";
 }
@@ -34,17 +40,17 @@ enum class FailKind : std::uint8_t {
 /// @brief Unified error envelope capturing HTTP status, JSON-RPC error codes, and server response hints.
 /// All fields are optional or defaulted; unset values indicate absence in the raw exchange.
 struct ErrorInfo {
-    int http_status{0};                                // 0 = no HTTP status (e.g. WebSocket frame)
-    std::optional<std::int64_t> rpc_code;              // JSON-RPC error.code (-32614, -32005, etc.)
-    std::string message;                               // JSON-RPC error.message, or HTTP body excerpt
-    std::optional<std::chrono::seconds> retry_after;   // parsed Retry-After header duration
+    int http_status{0};                               // 0 = no HTTP status (e.g. WebSocket frame)
+    std::optional<std::int64_t> rpc_code;             // JSON-RPC error.code (-32614, -32005, etc.)
+    std::string message;                              // JSON-RPC error.message, or HTTP body excerpt
+    std::optional<std::chrono::seconds> retry_after;  // parsed Retry-After header duration
 };
 
 /// @brief Result of error classification informing recovery, paging, and failover behavior.
 struct Classified {
-    FailKind kind{FailKind::Retry};                    // Actionable failure category
-    std::optional<std::uint32_t> range_limit;          // RangeTooLarge: N parsed from "limited to a N range"
-    std::optional<std::chrono::seconds> retry_after;   // RateLimited: provider backoff hint
+    FailKind kind{FailKind::Retry};                   // Actionable failure category
+    std::optional<std::uint32_t> range_limit;         // RangeTooLarge: N parsed from "limited to a N range"
+    std::optional<std::chrono::seconds> retry_after;  // RateLimited: provider backoff hint
 };
 
 /// @brief Classifies an RPC failure using prioritized heuristics across codes, status, and error text.

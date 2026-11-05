@@ -1,11 +1,6 @@
 #include "ops/alert_sender.hpp"
 
 #include <algorithm>
-#include <ctime>
-#include <stdexcept>
-#include <utility>
-#include <vector>
-
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/redirect_error.hpp>
@@ -13,6 +8,10 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/json/serialize.hpp>
 #include <boost/json/value.hpp>
+#include <ctime>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "core/log.hpp"
 #include "ops/http_client.hpp"
@@ -142,11 +141,16 @@ void AlertSender::send(const Alert& alert) {
 void AlertSender::stop() {
     state_->stopped = true;
     auto timers = state_->retry_timers;
-    for (const auto& t : timers) t->cancel();
+    for (const auto& t : timers)
+        t->cancel();
     state_->client.cancel();
 }
 
-std::uint64_t AlertSender::sent_total() const noexcept { return state_->sent.load(); }
-std::uint64_t AlertSender::send_failures_total() const noexcept { return state_->failures.load(); }
+std::uint64_t AlertSender::sent_total() const noexcept {
+    return state_->sent.load();
+}
+std::uint64_t AlertSender::send_failures_total() const noexcept {
+    return state_->failures.load();
+}
 
 }  // namespace evml::ops

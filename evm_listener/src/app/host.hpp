@@ -1,8 +1,8 @@
 #pragma once
 // The listener host (plan 60 §5.H, slice 5-D1): builds sink + pool + gate bridge + sweeper + driver, runs the tick
 // loop on the calling thread (the "io thread"), serves the ops endpoints, and runs the process watchdog.
-// D1 supported `[lease] enabled = false` only; D2 adds the lease: acquire or the standby loop, per-leadership rebuild and
-// demotion on a fenced sink.
+// D1 supported `[lease] enabled = false` only; D2 adds the lease: acquire or the standby loop, per-leadership rebuild
+// and demotion on a fenced sink.
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -18,8 +18,8 @@ struct HostOptions {
     /// Shutdown request (SIGTERM/SIGINT handler or a test). Required. Read on every beat, so a stop is noticed within
     /// `beat_period`.
     const std::atomic<bool>* stop{nullptr};
-    /// How often the io thread beats the watchdog, publishes state and polls `stop` / the sink. It only has to prove the
-    /// io loop is running, so it is independent of how long one pipeline tick takes.
+    /// How often the io thread beats the watchdog, publishes state and polls `stop` / the sink. It only has to prove
+    /// the io loop is running, so it is independent of how long one pipeline tick takes.
     std::chrono::milliseconds beat_period{1000};
     /// Called on the io thread every beat once the pipeline exists (tests watch for Live).
     std::function<void(const pipeline::DriverStatus&)> on_status;
@@ -38,7 +38,8 @@ struct HostOptions {
 /// @brief Runs the listener until `*opt.stop` is set or the pipeline ends. Returns the process exit code: 0 graceful
 /// stop, 1 runtime failure (sink Failed, Redis connection error), 2 operator action required (driver Failed, unusable
 /// config such as the Redis version/eviction policy).
-/// @throws core::ConfigError if the Redis URL env var is missing; boost::system::system_error if the ops port cannot be bound.
+/// @throws core::ConfigError if the Redis URL env var is missing; boost::system::system_error if the ops port cannot be
+/// bound.
 int run_host(const core::Config& cfg, const HostOptions& opt);
 
 /// @brief Production entry: initialises logging, installs SIGTERM/SIGINT handlers, then run_host().

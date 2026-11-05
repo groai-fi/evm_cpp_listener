@@ -8,11 +8,17 @@ namespace json = boost::json;
 
 namespace {
 
-json::value jv(const std::optional<std::uint64_t>& v) { return v ? json::value(*v) : json::value(nullptr); }
+json::value jv(const std::optional<std::uint64_t>& v) {
+    return v ? json::value(*v) : json::value(nullptr);
+}
 
-std::string num(std::uint64_t v) { return std::to_string(v); }
+std::string num(std::uint64_t v) {
+    return std::to_string(v);
+}
 
-std::string consumer_id(const ConsumerFact& f) { return f.stream + "/" + f.group; }
+std::string consumer_id(const ConsumerFact& f) {
+    return f.stream + "/" + f.group;
+}
 
 struct EventInfo {
     Severity severity;
@@ -22,14 +28,22 @@ struct EventInfo {
 
 EventInfo event_info(AlertEvent::Kind k) {
     switch (k) {
-        case AlertEvent::Kind::ProviderFailover: return {Severity::Warning, "Provider Failover", false};
-        case AlertEvent::Kind::SafeReorg: return {Severity::Critical, "Safe Reorg", false};
-        case AlertEvent::Kind::SinkFenced: return {Severity::Warning, "Sink Fenced", true};
-        case AlertEvent::Kind::SinkInvariant: return {Severity::Critical, "Sink Invariant", false};
-        case AlertEvent::Kind::WsMissedLogs: return {Severity::Warning, "WS Missed Logs", false};
-        case AlertEvent::Kind::ProviderInconsistent: return {Severity::Warning, "Provider Inconsistent", false};
-        case AlertEvent::Kind::LeaderChanged: return {Severity::Warning, "Leader Changed", true};
-        case AlertEvent::Kind::RedisTenancyViolation: return {Severity::Critical, "Redis Tenancy Violation", true};
+        case AlertEvent::Kind::ProviderFailover:
+            return {Severity::Warning, "Provider Failover", false};
+        case AlertEvent::Kind::SafeReorg:
+            return {Severity::Critical, "Safe Reorg", false};
+        case AlertEvent::Kind::SinkFenced:
+            return {Severity::Warning, "Sink Fenced", true};
+        case AlertEvent::Kind::SinkInvariant:
+            return {Severity::Critical, "Sink Invariant", false};
+        case AlertEvent::Kind::WsMissedLogs:
+            return {Severity::Warning, "WS Missed Logs", false};
+        case AlertEvent::Kind::ProviderInconsistent:
+            return {Severity::Warning, "Provider Inconsistent", false};
+        case AlertEvent::Kind::LeaderChanged:
+            return {Severity::Warning, "Leader Changed", true};
+        case AlertEvent::Kind::RedisTenancyViolation:
+            return {Severity::Critical, "Redis Tenancy Violation", true};
     }
     return {Severity::Warning, "?", false};
 }
@@ -54,23 +68,34 @@ AlertThresholds AlertThresholds::from_config(const core::Config& cfg) {
     return t;
 }
 
-std::chrono::seconds AlertEngine::unchanged_for(const std::string& name, std::uint64_t value, AlertClock::time_point now) {
-    auto [it, inserted] = unchanged_.try_emplace(name, value, now);
-    if (!inserted && it->second.first != value) it->second = {value, now};
+std::chrono::seconds AlertEngine::unchanged_for(std::string_view name, std::uint64_t value,
+                                                AlertClock::time_point now) {
+    auto it = unchanged_.find(name);
+    if (it == unchanged_.end()) {
+        it = unchanged_.emplace(std::string(name), std::make_pair(value, now)).first;
+    } else if (it->second.first != value) {
+        it->second = {value, now};
+    }
     return std::chrono::duration_cast<std::chrono::seconds>(now - it->second.second);
 }
 
-bool AlertEngine::sustained(const std::string& name, bool cond, AlertClock::time_point now, std::chrono::seconds limit) {
+bool AlertEngine::sustained(std::string_view name, bool cond, AlertClock::time_point now, std::chrono::seconds limit) {
     if (!cond) {
-        sustained_since_.erase(name);
+        if (const auto it = sustained_since_.find(name); it != sustained_since_.end()) {
+            sustained_since_.erase(it);
+        }
         return false;
     }
-    const auto it = sustained_since_.try_emplace(name, now).first;
+    auto it = sustained_since_.find(name);
+    if (it == sustained_since_.end()) {
+        it = sustained_since_.emplace(std::string(name), now).first;
+    }
     return now - it->second >= limit;
 }
 
 void AlertEngine::reset_leader_state() {
-    for (auto it = firing_.begin(); it != firing_.end();) it = it->second.leader_only ? firing_.erase(it) : std::next(it);
+    for (auto it = firing_.begin(); it != firing_.end();)
+        it = it->second.leader_only ? firing_.erase(it) : std::next(it);
     unchanged_.clear();
     sustained_since_.clear();
     suppressed_inconsistent_.clear();
@@ -82,8 +107,8 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
     std::vector<Candidate> c;
     const auto add = [&c](std::string key, Severity sev, std::string title, std::string message, json::object details,
                           bool leader_only = true, bool renotify = true) {
-        c.push_back(Candidate{std::move(key), sev, std::move(title), std::move(message), std::move(details), leader_only,
-                              renotify});
+        c.push_back(Candidate{std::move(key), sev, std::move(title), std::move(message), std::move(details),
+                              leader_only, renotify});
     };
     using std::chrono::seconds;
     const auto now = s.now;
@@ -97,8 +122,12 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
     if (s.redis_misconfigured) {
         const auto& m = *s.redis_misconfigured;
         add("redis_misconfigured", Severity::Critical, "Redis Misconfigured",
-            "Redis needs noeviction and persistence: maxmemory-policy=" + m.maxmemory_policy + " appendonly=" + m.appendonly,
-            {{"maxmemory_policy", m.maxmemory_policy}, {"appendonly", m.appendonly}, {"redis_version", m.redis_version}}, false);
+            "Redis needs noeviction and persistence: maxmemory-policy=" + m.maxmemory_policy +
+                " appendonly=" + m.appendonly,
+            {{"maxmemory_policy", m.maxmemory_policy},
+             {"appendonly", m.appendonly},
+             {"redis_version", m.redis_version}},
+            false);
     }
     if (!s.leader) return c;
 
@@ -160,7 +189,8 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         }
     }
 
-    const auto ckpt_lag = [&](const char* cls, const std::optional<std::uint64_t>& gate, std::uint64_t ckpt, std::uint64_t limit) {
+    const auto ckpt_lag = [&](const char* cls, const std::optional<std::uint64_t>& gate, std::uint64_t ckpt,
+                              std::uint64_t limit) {
         const std::uint64_t lag = gate && *gate > ckpt ? *gate - ckpt : 0;
         if (sustained(std::string("ckpt_lag:") + cls, lag > limit, now, seconds(t_.ckpt_lag_s))) {
             add(std::string("ckpt_lag:") + cls, Severity::Critical, "Checkpoint Lag",
@@ -176,17 +206,26 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
     const auto cursor_stall = [&](const char* cls, std::uint64_t cursor, std::uint64_t ceiling) {
         const auto idle = unchanged_for(std::string("cursor:") + cls, cursor, now);  // tracked on every snapshot
         if (t_.progress_stall_ms == 0 || ceiling <= cursor) return;
-        const auto limit = seconds(static_cast<std::int64_t>(t_.pipeline_stall_deadlines) * t_.progress_stall_ms / 1000);
+        const auto limit =
+            seconds(static_cast<std::int64_t>(t_.pipeline_stall_deadlines) * t_.progress_stall_ms / 1000);
         if (idle < limit) return;
         add(std::string("pipeline_stalled:") + cls, Severity::Critical, "Pipeline Stalled",
             std::string(cls) + " cursor has not moved for " + num(static_cast<std::uint64_t>(idle.count())) + " s",
-            {{"class", cls}, {"cursor", cursor}, {"gate", ceiling}, {"provider", s.getlogs_provider}, {"detail", "no progress"}});
+            {{"class", cls},
+             {"cursor", cursor},
+             {"gate", ceiling},
+             {"provider", s.getlogs_provider},
+             {"detail", "no progress"}});
     };
     if (s.g_s) cursor_stall("safe", s.c_s, *s.g_s);
     if (s.g_f) cursor_stall("final", s.c_f, std::min(*s.g_f, s.c_s));
     if (!s.stalled_detail.empty()) {
         add("pipeline_stalled:sweep", Severity::Critical, "Pipeline Stalled", "a sweep stalled: " + s.stalled_detail,
-            {{"class", "sweep"}, {"cursor", s.c_s}, {"gate", jv(s.g_s)}, {"provider", s.stalled_provider}, {"detail", s.stalled_detail}});
+            {{"class", "sweep"},
+             {"cursor", s.c_s},
+             {"gate", jv(s.g_s)},
+             {"provider", s.stalled_provider},
+             {"detail", s.stalled_detail}});
     }
 
     if (s.frozen) {
@@ -208,11 +247,13 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
     // every new sweeper, so a drop clears the history.
     if (!late_samples_.empty() && s.safe_late_total < late_samples_.back().second) late_samples_.clear();
     late_samples_.emplace_back(now, s.safe_late_total);
-    while (late_samples_.size() > 1 && late_samples_[1].first <= now - seconds(t_.safe_late_window_s)) late_samples_.pop_front();
+    while (late_samples_.size() > 1 && late_samples_[1].first <= now - seconds(t_.safe_late_window_s))
+        late_samples_.pop_front();
     const std::uint64_t late = s.safe_late_total - late_samples_.front().second;
     if (late > t_.safe_late_max) {
         add("safe_sweep_unreliable", Severity::Warning, "Safe Sweep Unreliable",
-            num(late) + " late logs in the last hour", {{"count_1h", late}, {"provider", s.safe_late_provider}, {"last_block", s.safe_late_last_block}});
+            num(late) + " late logs in the last hour",
+            {{"count_1h", late}, {"provider", s.safe_late_provider}, {"last_block", s.safe_late_last_block}});
     }
 
     for (const auto& f : s.consumers) {
@@ -224,8 +265,8 @@ std::vector<AlertEngine::Candidate> AlertEngine::candidates(const OpsSnapshot& s
         }
         const bool missing = sustained("cmiss:" + id, !f.found, now, seconds(t_.consumer_group_missing_s));
         if (missing) {
-            add(prefix + "missing", Severity::Warning, "Consumer Group Missing", "group " + f.group + " not found on " + f.stream,
-                {{"stream", f.stream}, {"group", f.group}});
+            add(prefix + "missing", Severity::Warning, "Consumer Group Missing",
+                "group " + f.group + " not found on " + f.stream, {{"stream", f.stream}, {"group", f.group}});
         }
         if (!f.found) continue;
         const double age = std::max(f.undelivered_age_s, f.pending_age_s);
@@ -254,8 +295,10 @@ void AlertEngine::emit_event(const OpsSnapshot& s, const AlertEvent& e, std::vec
     std::uint64_t inc_delta = 0;
     if (e.kind == AlertEvent::Kind::ProviderInconsistent) {
         if (const auto* p = details.if_contains("new_inconsistent")) {
-            if (p->is_uint64()) inc_delta = p->as_uint64();
-            else if (p->is_int64() && p->as_int64() > 0) inc_delta = static_cast<std::uint64_t>(p->as_int64());
+            if (p->is_uint64())
+                inc_delta = p->as_uint64();
+            else if (p->is_int64() && p->as_int64() > 0)
+                inc_delta = static_cast<std::uint64_t>(p->as_int64());
         }
     }
     if (!e.subject.empty()) {
@@ -299,12 +342,14 @@ std::vector<Alert> AlertEngine::evaluate(const OpsSnapshot& s) {
     }
 
     for (auto it = firing_.begin(); it != firing_.end();) {
-        const bool is_unknown = std::any_of(unknown.begin(), unknown.end(), [&](const std::string& p) { return it->first.rfind(p, 0) == 0; });
+        const bool is_unknown = std::any_of(unknown.begin(), unknown.end(),
+                                            [&](const std::string& p) { return it->first.rfind(p, 0) == 0; });
         if (active.count(it->first) != 0 || is_unknown) {
             ++it;
             continue;
         }
-        out.push_back(Alert{Severity::Info, "RESOLVED: " + it->second.title, it->second.title + " cleared", {}, it->first, true});
+        out.push_back(
+            Alert{Severity::Info, "RESOLVED: " + it->second.title, it->second.title + " cleared", {}, it->first, true});
         it = firing_.erase(it);
     }
 
@@ -328,14 +373,17 @@ std::vector<Alert> AlertEngine::evaluate(const OpsSnapshot& s) {
                               {"max_deleted_id", effective_max_deleted}};
                 const std::string key = "Consumer Entries Trimmed:" + id;
                 const auto it = event_last_.find(key);
-                if (it != event_last_.end() && s.now - it->second < std::chrono::seconds(t_.event_rate_limit_s)) continue;
+                if (it != event_last_.end() && s.now - it->second < std::chrono::seconds(t_.event_rate_limit_s))
+                    continue;
                 event_last_[key] = s.now;
-                out.push_back(Alert{Severity::Critical, "Consumer Entries Trimmed", ev.message, ev.details, key, false});
+                out.push_back(
+                    Alert{Severity::Critical, "Consumer Entries Trimmed", ev.message, ev.details, key, false});
             }
         }
     }
 
-    for (const auto& e : s.events) emit_event(s, e, out);
+    for (const auto& e : s.events)
+        emit_event(s, e, out);
     return out;
 }
 

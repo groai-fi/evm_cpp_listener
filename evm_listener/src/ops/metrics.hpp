@@ -2,17 +2,17 @@
 // Prometheus metrics registry for /metrics (plan 60 §5.4, slice 5-B4). The sink, sweeper and driver expose running
 // TOTALS, not events, so counters are set from a monotonic total: the registry adds only the difference since the last
 // call. Names and label names are validated by prometheus-cpp (std::invalid_argument on a bad one).
+#include <prometheus/counter.h>
+#include <prometheus/family.h>
+#include <prometheus/gauge.h>
+#include <prometheus/registry.h>
+
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
-
-#include <prometheus/counter.h>
-#include <prometheus/family.h>
-#include <prometheus/gauge.h>
-#include <prometheus/registry.h>
 
 namespace evml::ops {
 
@@ -41,7 +41,8 @@ private:
 
     mutable std::mutex mu_;
     std::unique_ptr<prometheus::Registry> registry_;
-    std::map<std::string, std::pair<prometheus::Family<prometheus::Counter>*, std::string>> counters_;  // name -> (family, help)
+    std::map<std::string, std::pair<prometheus::Family<prometheus::Counter>*, std::string>>
+        counters_;  // name -> (family, help)
     std::map<std::string, std::pair<prometheus::Family<prometheus::Gauge>*, std::string>> gauges_;
     std::map<std::string, std::uint64_t> last_total_;  // series key -> last total seen
 };

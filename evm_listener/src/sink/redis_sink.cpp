@@ -1,15 +1,14 @@
 #include "sink/redis_sink.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <stdexcept>
-#include <utility>
-
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/json.hpp>
+#include <cmath>
+#include <stdexcept>
+#include <utility>
 
 #include "core/error.hpp"
 #include "core/log.hpp"
@@ -37,10 +36,15 @@ struct overloaded : Ts... {
 template <class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
-bool is_terminal(SinkMode m) { return m == SinkMode::Fenced || m == SinkMode::Failed; }
+bool is_terminal(SinkMode m) {
+    return m == SinkMode::Fenced || m == SinkMode::Failed;
+}
 
-// "n|host|nonce" -> n (the lease term). The whole token if it has no '|' (a token is opaque to everything but lease.lua).
-std::string term_of(std::string_view token) { return std::string(token.substr(0, token.find('|'))); }
+// "n|host|nonce" -> n (the lease term). The whole token if it has no '|' (a token is opaque to everything but
+// lease.lua).
+std::string term_of(std::string_view token) {
+    return std::string(token.substr(0, token.find('|')));
+}
 
 bool all_digits(std::string_view s) {
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
@@ -120,7 +124,8 @@ core::Result<std::uint64_t> to_u64(const boost::json::value& v, const char* key,
 }
 
 core::Result<std::string> to_str(const boost::json::value& v, const char* key, std::string_view raw) {
-    if (!v.is_string()) return core::Error(std::string("spill record: `") + key + "` is not a string: " + std::string(raw));
+    if (!v.is_string())
+        return core::Error(std::string("spill record: `") + key + "` is not a string: " + std::string(raw));
     return std::string(v.as_string());
 }
 
@@ -149,15 +154,21 @@ core::Result<WriteItem> decode(const SpillRecord& rec) {
             EmitItem i;
             const auto stream = need_str(o, "stream", raw);
             if (!stream) return stream.error();
-            if (*stream == core::to_string(core::StreamKind::Events)) i.e.stream = core::StreamKind::Events;
-            else if (*stream == core::to_string(core::StreamKind::Registry)) i.e.stream = core::StreamKind::Registry;
-            else return core::Error("spill record: unknown stream '" + *stream + "': " + std::string(raw));
+            if (*stream == core::to_string(core::StreamKind::Events))
+                i.e.stream = core::StreamKind::Events;
+            else if (*stream == core::to_string(core::StreamKind::Registry))
+                i.e.stream = core::StreamKind::Registry;
+            else
+                return core::Error("spill record: unknown stream '" + *stream + "': " + std::string(raw));
 
             const auto type = need_str(o, "type", raw);
             if (!type) return type.error();
-            if (*type == pipeline::to_string(pipeline::EventType::Log)) i.e.type = pipeline::EventType::Log;
-            else if (*type == pipeline::to_string(pipeline::EventType::Revert)) i.e.type = pipeline::EventType::Revert;
-            else return core::Error("spill record: unknown type '" + *type + "': " + std::string(raw));
+            if (*type == pipeline::to_string(pipeline::EventType::Log))
+                i.e.type = pipeline::EventType::Log;
+            else if (*type == pipeline::to_string(pipeline::EventType::Revert))
+                i.e.type = pipeline::EventType::Revert;
+            else
+                return core::Error("spill record: unknown type '" + *type + "': " + std::string(raw));
 
             auto id = need_str(o, "id", raw);
             if (!id) return id.error();
@@ -184,9 +195,12 @@ core::Result<WriteItem> decode(const SpillRecord& rec) {
             CkptItem i;
             const auto kind = need_str(o, "kind", raw);
             if (!kind) return kind.error();
-            if (*kind == "safe") i.kind = pipeline::CheckpointKind::Safe;
-            else if (*kind == "finalized") i.kind = pipeline::CheckpointKind::Finalized;
-            else return core::Error("spill record: unknown checkpoint kind '" + *kind + "': " + std::string(raw));
+            if (*kind == "safe")
+                i.kind = pipeline::CheckpointKind::Safe;
+            else if (*kind == "finalized")
+                i.kind = pipeline::CheckpointKind::Finalized;
+            else
+                return core::Error("spill record: unknown checkpoint kind '" + *kind + "': " + std::string(raw));
 
             const auto blk = need_u64(o, "block", raw);
             if (!blk) return blk.error();
@@ -235,7 +249,8 @@ RedisSinkOptions validated(RedisSinkOptions o) {
     if (o.dedup_ttl_s == 0) bad("dedup_ttl_s must be > 0");
     if (o.token.empty()) bad("token must not be empty (use kNoFence to disable fencing)");
     if (o.token != kNoFence) {
-        if (o.lease_ttl_ms == 0 || o.renew_ms == 0) bad("lease_ttl_ms and renew_ms must be > 0 when a lease token is used");
+        if (o.lease_ttl_ms == 0 || o.renew_ms == 0)
+            bad("lease_ttl_ms and renew_ms must be > 0 when a lease token is used");
         if (o.renew_ms >= o.lease_ttl_ms) bad("renew_ms must be below lease_ttl_ms");
     }
     if (o.heartbeat_ms > 0 && o.host_id.empty()) bad("host_id must not be empty when heartbeat_ms > 0");
@@ -252,8 +267,8 @@ RedisSinkOptions validated(RedisSinkOptions o) {
     if (!o.wall_ms) {
         o.wall_ms = [] {
             return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                   std::chrono::system_clock::now().time_since_epoch())
-                                                   .count());
+                                                  std::chrono::system_clock::now().time_since_epoch())
+                                                  .count());
         };
     }
     return o;
@@ -261,10 +276,12 @@ RedisSinkOptions validated(RedisSinkOptions o) {
 
 }  // namespace
 
-RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease, std::string token) {
+RedisSinkOptions RedisSinkOptions::from_config(const core::SinkCfg& sink, const core::LeaseCfg& lease,
+                                               std::string token) {
     if (lease.enabled == (token == kNoFence))
-        throw std::invalid_argument(lease.enabled ? "RedisSinkOptions: [lease] is enabled but the token disables fencing"
-                                                  : "RedisSinkOptions: [lease] is disabled but a lease token was given");
+        throw std::invalid_argument(lease.enabled
+                                        ? "RedisSinkOptions: [lease] is enabled but the token disables fencing"
+                                        : "RedisSinkOptions: [lease] is disabled but a lease token was given");
     RedisSinkOptions o;
     o.token = std::move(token);
     o.retention_ms = sink.retention_ms;
@@ -284,7 +301,8 @@ struct RedisSink::Verdict {
     std::string message;
 };
 
-RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn> data, std::unique_ptr<RedisConn> lease)
+RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn> data,
+                     std::unique_ptr<RedisConn> lease)
     : opts_(validated(std::move(opts))),
       keys_(std::move(keys)),
       data_(std::move(data)),
@@ -302,7 +320,9 @@ RedisSink::RedisSink(RedisSinkOptions opts, Keys keys, std::unique_ptr<RedisConn
     }
 }
 
-RedisSink::~RedisSink() { stop(); }
+RedisSink::~RedisSink() {
+    stop();
+}
 
 // ---- producer side (any thread) ----
 
@@ -310,14 +330,16 @@ bool RedisSink::saturated() const noexcept {
     return queue_depth_.load() >= opts_.queue_capacity || spill_saturated_.load() || is_terminal(mode_.load());
 }
 
-bool RedisSink::readable() const noexcept { return mode_.load() == SinkMode::Connected && !stop_.load(); }
+bool RedisSink::readable() const noexcept {
+    return mode_.load() == SinkMode::Connected && !stop_.load();
+}
 
 /// @brief Enqueues write item into thread-safe buffer; drops writes if already terminal.
 void RedisSink::enqueue(WriteItem item) {
     {
         std::lock_guard lk(mu_);
-        // Terminal: the pipeline is being told to stop (saturated()); whatever it still hands over is counted, not hidden.
-        // Drops write immediately in terminal state so callers see backpressure without hiding pipeline state.
+        // Terminal: the pipeline is being told to stop (saturated()); whatever it still hands over is counted, not
+        // hidden. Drops write immediately in terminal state so callers see backpressure without hiding pipeline state.
         if (is_terminal(mode_.load())) {
             ++discarded_total_;
             return;
@@ -329,7 +351,9 @@ void RedisSink::enqueue(WriteItem item) {
     cv_.notify_one();
 }
 
-void RedisSink::emit(pipeline::Emission e) { enqueue(EmitItem{std::move(e)}); }
+void RedisSink::emit(pipeline::Emission e) {
+    enqueue(EmitItem{std::move(e)});
+}
 void RedisSink::emit_fast(pipeline::Event e) {
     if (mode_.load() != SinkMode::Connected || saturated()) {
         ++fast_dropped_total_;
@@ -347,12 +371,18 @@ void RedisSink::emit_fast(pipeline::Event e) {
     }
     cv_.notify_one();
 }
-void RedisSink::checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) { enqueue(CkptItem{kind, block}); }
+void RedisSink::checkpoint(pipeline::CheckpointKind kind, std::uint64_t block) {
+    enqueue(CkptItem{kind, block});
+}
 void RedisSink::init_checkpoint(std::uint64_t c0, std::vector<std::string> manifest) {
     enqueue(CkptInitItem{c0, std::move(manifest)});
 }
-void RedisSink::set_contracts(std::vector<std::string> manifest) { enqueue(ContractsItem{std::move(manifest)}); }
-void RedisSink::final_trim(std::uint64_t block) { enqueue(FinalTrimItem{block}); }
+void RedisSink::set_contracts(std::vector<std::string> manifest) {
+    enqueue(ContractsItem{std::move(manifest)});
+}
+void RedisSink::final_trim(std::uint64_t block) {
+    enqueue(FinalTrimItem{block});
+}
 
 /// @brief Dispatches read operation as a queue barrier, guaranteeing earlier writes are acked first.
 template <class T, class Op>
@@ -366,7 +396,8 @@ boost::asio::awaitable<std::optional<T>> RedisSink::read(std::shared_ptr<ReadGat
 
     using Channel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, std::optional<T>)>;
     auto ex = co_await boost::asio::this_coro::executor;
-    // Capacity 1 channel owned only on the caller coroutine so ~Channel() never runs on the sink thread after io_context exits.
+    // Capacity 1 channel owned only on the caller coroutine so ~Channel() never runs on the sink thread after
+    // io_context exits.
     auto channel = std::make_shared<Channel>(ex, 1);
 
     using Executor = decltype(ex);
@@ -443,8 +474,8 @@ boost::asio::awaitable<std::optional<pipeline::Checkpoint>> RedisSink::load_chec
     return read<pipeline::Checkpoint>(read_gate_, [](RedisConn& c) { return c.try_read_checkpoint(); });
 }
 
-boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> RedisSink::released_range(std::uint64_t from,
-                                                                                                      std::uint64_t to) {
+boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> RedisSink::released_range(
+    std::uint64_t from, std::uint64_t to) {
     return read<std::vector<pipeline::ReleasedEntry>>(
         read_gate_, [from, to](RedisConn& c) { return c.try_read_released(from, to); });
 }
@@ -474,12 +505,15 @@ void RedisSink::stop() {
         std::lock_guard lk(mu_);
         std::deque<QueueItem> keep;
         for (auto& qi : queue_) {
-            if (auto* r = std::get_if<ReadItem>(&qi)) reads.push_back(std::move(*r));
-            else keep.push_back(std::move(qi));
+            if (auto* r = std::get_if<ReadItem>(&qi))
+                reads.push_back(std::move(*r));
+            else
+                keep.push_back(std::move(qi));
         }
         queue_.swap(keep);
     }
-    for (auto& r : reads) r.abandon();
+    for (auto& r : reads)
+        r.abandon();
 }
 
 void RedisSink::set_heartbeat(std::string payload) {
@@ -602,7 +636,9 @@ bool RedisSink::pump() {
         if (mode_.load() != SinkMode::Connected) worked |= queue_to_spill();
 
         switch (mode_.load()) {
-            case SinkMode::Degraded: worked |= try_reconnect(); break;
+            case SinkMode::Degraded:
+                worked |= try_reconnect();
+                break;
             case SinkMode::Replaying:
                 // Replay disk spill records in strict FIFO order until empty.
                 if (held_.empty()) worked |= refill_from_spill();
@@ -619,7 +655,8 @@ bool RedisSink::pump() {
                 if (!held_.empty()) worked |= send_held();
                 break;
             case SinkMode::Fenced:
-            case SinkMode::Failed: break;  // reached through service_lease/send_held above; handled on the next pump
+            case SinkMode::Failed:
+                break;  // reached through service_lease/send_held above; handled on the next pump
         }
         return worked;
     } catch (const std::exception& e) {
@@ -704,8 +741,10 @@ bool RedisSink::queue_to_spill() {
         // The spill failed: the sink goes Failed (pump catches). What was not moved is lost, so it is counted.
         std::uint64_t lost = 0;
         for (std::size_t i = done; i < taken.size(); ++i) {
-            if (std::holds_alternative<StampedWrite>(taken[i])) ++lost;
-            else std::get<ReadItem>(taken[i]).abandon();
+            if (std::holds_alternative<StampedWrite>(taken[i]))
+                ++lost;
+            else
+                std::get<ReadItem>(taken[i]).abandon();
         }
         {
             std::lock_guard lk(mu_);
@@ -780,14 +819,9 @@ bool RedisSink::refill_from_spill() {
 }
 
 void RedisSink::execute_read(ReadItem& item) {
-    try {
-        if (auto r = item.run(*data_); !r) {
-            item.abandon();
-            go_degraded(std::string("read failed: ") + r.error().what());
-        }
-    } catch (...) {
+    if (auto r = item.run(*data_); !r) {
         item.abandon();
-        throw;  // schema violation or a bug: pump() fails the sink
+        go_degraded(std::string("read failed: ") + r.error().what());
     }
 }
 
@@ -814,9 +848,12 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
     using K = Verdict::Kind;
     if (const auto* f = std::get_if<ScriptFail>(&outcome)) {
         switch (f->kind) {
-            case FailKind::NoScript: return {K::NoScript, f->message};
-            case FailKind::Transient: return {K::Transient, f->message};
-            case FailKind::Fatal: return {K::Fatal, "script error on " + describe(item) + ": " + f->message};
+            case FailKind::NoScript:
+                return {K::NoScript, f->message};
+            case FailKind::Transient:
+                return {K::Transient, f->message};
+            case FailKind::Fatal:
+                return {K::Fatal, "script error on " + describe(item) + ": " + f->message};
         }
     }
     const auto& ok = std::get<ScriptOk>(outcome);
@@ -869,7 +906,8 @@ RedisSink::Verdict RedisSink::classify(const WriteItem& item, const CallOutcome&
 bool RedisSink::send_held() {
     std::vector<ScriptCall> calls;
     calls.reserve(held_.size());
-    for (const auto& sw : held_) calls.push_back(to_call(sw.item));
+    for (const auto& sw : held_)
+        calls.push_back(to_call(sw.item));
 
     // Dispatches entire batch over data connection in a single network round-trip.
     auto outcomes_res = data_->try_pipeline(calls);
@@ -928,7 +966,8 @@ bool RedisSink::send_held() {
     if (!stop) return true;
 
     switch (stop->kind) {
-        case Verdict::Kind::Ack: break;
+        case Verdict::Kind::Ack:
+            break;
         case Verdict::Kind::NoScript:
             if (++reload_streak_ > 2) {
                 go_degraded("scripts keep disappearing right after a reload");
@@ -939,9 +978,14 @@ bool RedisSink::send_held() {
                 go_degraded(std::string("script reload failed: ") + lr.error().what());
             }
             break;
-        case Verdict::Kind::Fenced: handle_fenced(); break;
-        case Verdict::Kind::Transient: go_degraded(stop->message); break;
-        case Verdict::Kind::Fatal: throw std::runtime_error(stop->message);
+        case Verdict::Kind::Fenced:
+            handle_fenced();
+            break;
+        case Verdict::Kind::Transient:
+            go_degraded(stop->message);
+            break;
+        case Verdict::Kind::Fatal:
+            throw std::runtime_error(stop->message);
     }
     return true;
 }
@@ -1003,28 +1047,21 @@ bool RedisSink::service_consumer_lag() {
     // Advance first, like the heartbeat: wake_time() includes this deadline.
     next_lag_probe_ = now() + std::chrono::milliseconds(opts_.consumer_lag_interval_ms);
     if (mode_.load() == SinkMode::Degraded) return false;  // Redis is known to be down
-    try {
-        std::vector<ConsumerLag> snapshot;
-        snapshot.reserve(opts_.consumer_groups.size());
-        const std::uint64_t probed_at_ms = opts_.wall_ms();
-        for (const auto& g : opts_.consumer_groups) {
-            auto facts_res = lease_->try_read_group_facts(keys_.stream(g.stream), g.group);
-            if (!facts_res) {
-                ++consumer_lag_failures_total_;  // the previous snapshot stays; probed_at_ms tells the host how old it is
-                core::log::warn("sink", "consumer lag probe failed", {{"error", facts_res.error().what()}});
-                return true;
-            }
-            snapshot.push_back(evaluate_consumer_lag(g, *facts_res));
-            snapshot.back().probed_at_ms = probed_at_ms;
+    std::vector<ConsumerLag> snapshot;
+    snapshot.reserve(opts_.consumer_groups.size());
+    const std::uint64_t probed_at_ms = opts_.wall_ms();
+    for (const auto& g : opts_.consumer_groups) {
+        auto facts_res = lease_->try_read_group_facts(keys_.stream(g.stream), g.group);
+        if (!facts_res) {
+            ++consumer_lag_failures_total_;  // the previous snapshot stays; probed_at_ms tells the host how old it is
+            core::log::warn("sink", "consumer lag probe failed", {{"error", facts_res.error().what()}});
+            return true;
         }
-        std::lock_guard lk(lag_mu_);
-        lag_snapshot_ = std::move(snapshot);
-    } catch (const std::exception& e) {
-        // A reply we cannot read (permissions, wrong type, parse error). The probe is read-only and must never stop the
-        // writer, but it is not silent: counted, and logged at ERROR.
-        ++consumer_lag_failures_total_;
-        core::log::error("sink", "consumer lag probe failed, the sink keeps writing", {{"error", e.what()}});
+        snapshot.push_back(evaluate_consumer_lag(g, *facts_res));
+        snapshot.back().probed_at_ms = probed_at_ms;
     }
+    std::lock_guard lk(lag_mu_);
+    lag_snapshot_ = std::move(snapshot);
     return true;
 }
 
@@ -1033,14 +1070,14 @@ bool RedisSink::service_tenancy() {
         return false;
     }
     next_tenancy_check_ = now() + std::chrono::milliseconds(opts_.tenancy_check_interval_ms);
+    auto facts_res = lease_->try_read_tenancy_facts();
+    if (!facts_res) {
+        core::log::warn("sink", "runtime tenancy check failed", {{"error", facts_res.error().what()}});
+        return true;
+    }
+    TenancyFacts facts = std::move(*facts_res);
+    facts.tenant_marker = format_tenant_marker(opts_.deploy_env);
     try {
-        auto facts_res = lease_->try_read_tenancy_facts();
-        if (!facts_res) {
-            core::log::warn("sink", "runtime tenancy check failed", {{"error", facts_res.error().what()}});
-            return true;
-        }
-        TenancyFacts facts = std::move(*facts_res);
-        facts.tenant_marker = format_tenant_marker(opts_.deploy_env);
         (void)evaluate_tenancy(facts, opts_.deploy_env, opts_.expected_db);
     } catch (const StartupFatal& e) {
         ++tenancy_violations_total_;
@@ -1050,8 +1087,6 @@ bool RedisSink::service_tenancy() {
                           {"foreign_prefixes", e.foreign_prefixes},
                           {"db", e.db},
                           {"marker", e.marker}});
-    } catch (const std::exception& e) {
-        core::log::error("sink", "runtime tenancy check failed, the sink keeps writing", {{"error", e.what()}});
     }
     return true;
 }
@@ -1067,23 +1102,20 @@ bool RedisSink::service_heartbeat() {
         payload = hb_payload_;
     }
     if (payload.empty()) return false;
-    try {
-        if (auto res = lease_->try_set_with_ttl(keys_.hb(opts_.host_id), payload, opts_.heartbeat_ttl_s); !res) {
-            ++heartbeat_failures_total_;
-            core::log::warn("sink", "heartbeat write failed", {{"error", res.error().what()}});
-        }
-    } catch (const std::exception& e) {
-        ++heartbeat_failures_total_;  // not silent, but a heartbeat must never stop the writer
-        core::log::error("sink", "heartbeat write failed, the sink keeps writing", {{"error", e.what()}});
+    if (auto res = lease_->try_set_with_ttl(keys_.hb(opts_.host_id), payload, opts_.heartbeat_ttl_s); !res) {
+        ++heartbeat_failures_total_;
+        core::log::warn("sink", "heartbeat write failed", {{"error", res.error().what()}});
     }
     return true;
 }
 
 /// @brief Handles FENCED response from write script by verifying leadership lease status.
 void RedisSink::handle_fenced() {
-    if (!leasing()) throw std::runtime_error("a write script answered FENCED, but fencing is disabled (token 0 never fences)");
+    if (!leasing())
+        throw std::runtime_error("a write script answered FENCED, but fencing is disabled (token 0 never fences)");
     if (++fence_streak_ > 1)
-        throw std::runtime_error("a write was fenced again right after renew accepted the token: lease state is inconsistent");
+        throw std::runtime_error(
+            "a write was fenced again right after renew accepted the token: lease state is inconsistent");
     // Immediate renewal query verifies whether another host took leadership or token expired.
     auto r = renew_lease();
     if (!r) {
@@ -1103,8 +1135,10 @@ void RedisSink::enter_fenced() {
     {
         std::lock_guard lk(mu_);
         for (const auto& sw : held_) {
-            if (std::holds_alternative<FastEmitItem>(sw.item)) ++fast_dropped;
-            else ++dropped;
+            if (std::holds_alternative<FastEmitItem>(sw.item))
+                ++fast_dropped;
+            else
+                ++dropped;
         }
         held_.clear();
         spill_stamps_.clear();
@@ -1159,8 +1193,9 @@ void RedisSink::go_degraded(std::string_view reason) {
 /// @brief Computes exponential backoff interval with full jitter for next reconnect probe.
 void RedisSink::schedule_next_probe() {
     // Calculates exponential backoff capped at probe_max with full random jitter in [0, cap_ms].
-    const double cap_ms = std::min<double>(static_cast<double>(opts_.probe_max.count()),
-                                           static_cast<double>(opts_.probe_min.count()) * std::pow(2.0, std::min(probe_attempt_, 20u)));
+    const double cap_ms =
+        std::min<double>(static_cast<double>(opts_.probe_max.count()),
+                         static_cast<double>(opts_.probe_min.count()) * std::pow(2.0, std::min(probe_attempt_, 20u)));
     std::uniform_int_distribution<std::int64_t> jitter(0, static_cast<std::int64_t>(cap_ms));  // full jitter
     next_probe_ = now() + std::chrono::milliseconds(jitter(rng_));
     ++probe_attempt_;

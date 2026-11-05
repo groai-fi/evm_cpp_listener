@@ -1,10 +1,10 @@
 #pragma once
 
+#include <sw/redis++/redis++.h>
+
 #include <array>
 #include <optional>
 #include <string>
-
-#include <sw/redis++/redis++.h>
 
 #include "sink/lua_scripts.hpp"
 
@@ -21,7 +21,8 @@ namespace evml::sink {
 /// - Automatic NOSCRIPT recovery reloads all 4 scripts if Redis flushes its cache or restarts.
 class ScriptRunner {
 public:
-    // Loads all scripts. Throws on connection failure or a script that Redis rejects (e.g. Redis < 7.0 and the shebang).
+    // Loads all scripts. Throws on connection failure or a script that Redis rejects (e.g. Redis < 7.0 and the
+    // shebang).
     /// @brief Loads all embedded Lua scripts via SCRIPT LOAD and caches their SHA1 digests.
     explicit ScriptRunner(sw::redis::Redis& redis);
 

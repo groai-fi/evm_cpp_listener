@@ -10,12 +10,12 @@ Metrics::Metrics() : registry_(std::make_unique<prometheus::Registry>()) {}
 
 std::string Metrics::series_key(std::string_view name, const Labels& labels) {
     std::string key(name);
-    for (const auto& [k, v] : labels) key += '\x1f' + k + '\x1e' + v;  // std::map keeps label order stable
+    for (const auto& [k, v] : labels)
+        key += '\x1f' + k + '\x1e' + v;  // std::map keeps label order stable
     return key;
 }
 
-void Metrics::counter_total(std::string_view name, std::string_view help, const Labels& labels,
-                            std::uint64_t total) {
+void Metrics::counter_total(std::string_view name, std::string_view help, const Labels& labels, std::uint64_t total) {
     const std::string name_s(name);
     const std::string help_s(help);
     const std::lock_guard lk(mu_);

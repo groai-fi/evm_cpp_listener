@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <boost/asio/awaitable.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -15,8 +16,6 @@
 #include <thread>
 #include <variant>
 #include <vector>
-
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "pipeline/sink.hpp"
@@ -35,15 +34,21 @@ namespace evml::sink {
 /// - Connected: Primary mode; writes pipeline directly to Redis, reads execute against data connection.
 /// - Degraded: Redis unreachable; pipeline writes divert to local spill WAL; reconnect probes back off with jitter.
 /// - Replaying: Reconnected; held batch and spill WAL are drained in strict FIFO order before accepting queue writes.
-/// - Fenced / Failed: Terminal states. Fenced drops queued items to avoid dual-writer split-brain; Failed halts on unrecoverable error.
+/// - Fenced / Failed: Terminal states. Fenced drops queued items to avoid dual-writer split-brain; Failed halts on
+/// unrecoverable error.
 enum class SinkMode : std::uint8_t { Connected, Degraded, Replaying, Fenced, Failed };
 [[nodiscard]] constexpr const char* to_string(SinkMode m) noexcept {
     switch (m) {
-        case SinkMode::Connected: return "connected";
-        case SinkMode::Degraded: return "degraded";
-        case SinkMode::Replaying: return "replaying";
-        case SinkMode::Fenced: return "fenced";
-        case SinkMode::Failed: return "failed";
+        case SinkMode::Connected:
+            return "connected";
+        case SinkMode::Degraded:
+            return "degraded";
+        case SinkMode::Replaying:
+            return "replaying";
+        case SinkMode::Fenced:
+            return "fenced";
+        case SinkMode::Failed:
+            return "failed";
     }
     return "failed";
 }
@@ -65,15 +70,15 @@ struct RedisSinkOptions {
     std::uint64_t spill_segment_bytes{Spill::kDefaultSegmentBytes};
     std::uint32_t lease_ttl_ms{};
     std::uint32_t renew_ms{};
-    std::size_t max_batch{256};                       // emits per pipeline (plan 4.4)
-    std::chrono::milliseconds probe_min{250};         // reconnect backoff: full jitter in [0, min(probe_max, probe_min * 2^n)]
+    std::size_t max_batch{256};                // emits per pipeline (plan 4.4)
+    std::chrono::milliseconds probe_min{250};  // reconnect backoff: full jitter in [0, min(probe_max, probe_min * 2^n)]
     std::chrono::milliseconds probe_max{30000};
-    std::function<Clock::time_point()> steady_now;    // empty = Clock::now; tests inject a fake clock
-    std::function<std::uint64_t()> wall_ms;           // empty = system clock; the listener clock for XADD MINID
+    std::function<Clock::time_point()> steady_now;  // empty = Clock::now; tests inject a fake clock
+    std::function<std::uint64_t()> wall_ms;         // empty = system clock; the listener clock for XADD MINID
 
     // Heartbeat (plan 4.7): `SET hb:<host_id> <payload> EX heartbeat_ttl_s` every heartbeat_ms on the lease connection,
-    // once set_heartbeat() gave it a payload. 0 = disabled. from_config() leaves these at their defaults: the host wires
-    // them from [ops].heartbeat_s and [shard].host_id.
+    // once set_heartbeat() gave it a payload. 0 = disabled. from_config() leaves these at their defaults: the host
+    // wires them from [ops].heartbeat_s and [shard].host_id.
     std::string host_id;
     std::uint32_t heartbeat_ms{0};
     std::uint32_t heartbeat_ttl_s{30};
@@ -88,8 +93,8 @@ struct RedisSinkOptions {
     int expected_db{0};
     std::uint32_t tenancy_check_interval_ms{300000};
 
-    // Process watchdog (plan 60 5.1): when non-null, every sink-loop iteration also stores its steady-clock ms here. The
-    // storage belongs to the Watchdog (process lifetime) and must outlive this sink; null = no watchdog.
+    // Process watchdog (plan 60 5.1): when non-null, every sink-loop iteration also stores its steady-clock ms here.
+    // The storage belongs to the Watchdog (process lifetime) and must outlive this sink; null = no watchdog.
     std::atomic<std::uint64_t>* loop_beat{nullptr};
 
     /// @brief Constructs and validates RedisSinkOptions from configuration sections.
@@ -104,16 +109,19 @@ struct SinkStatus {
     std::uint64_t queue_depth{};
     std::uint64_t spill_records{};
     std::uint64_t spill_bytes{};
-    std::uint64_t pending_writes{};       // accepted and neither acked nor discarded (queue + current batch + spill)
-    std::uint64_t dup_total{};            // emit.lua answered DUP
-    std::uint64_t below_finalized_total{};  // emit.lua refused a tracked emit at or below ckpt.finalized (SinkInvariant)
-    std::uint64_t discarded_total{};      // evml_spill_discarded_records_total: dropped on Fenced (queue, batch, spill); on Failed only queued items (the held batch and spill stay in pending_writes)
+    std::uint64_t pending_writes{};  // accepted and neither acked nor discarded (queue + current batch + spill)
+    std::uint64_t dup_total{};       // emit.lua answered DUP
+    std::uint64_t
+        below_finalized_total{};      // emit.lua refused a tracked emit at or below ckpt.finalized (SinkInvariant)
+    std::uint64_t discarded_total{};  // evml_spill_discarded_records_total: dropped on Fenced (queue, batch, spill); on
+                                      // Failed only queued items (the held batch and spill stay in pending_writes)
     std::uint64_t renew_failures_total{};
     std::uint64_t heartbeat_failures_total{};
     std::uint64_t consumer_lag_failures_total{};
     std::uint64_t reconnects_total{};
-    std::uint64_t fast_emitted_total{};       // evml_fast_emitted_total: fast-stream events acknowledged by Redis
-    std::uint64_t fast_dropped_total{};       // evml_fast_dropped_total: fast-stream events dropped on backpressure/outage/fencing
+    std::uint64_t fast_emitted_total{};  // evml_fast_emitted_total: fast-stream events acknowledged by Redis
+    std::uint64_t
+        fast_dropped_total{};  // evml_fast_dropped_total: fast-stream events dropped on backpressure/outage/fencing
     std::uint64_t tenancy_violations_total{};
     // Age of the oldest accepted write that is neither acked nor discarded (queue, current batch or spill); 0 when
     // nothing is pending. Measured on the injected steady clock. Plan 60 §5.3.3 `oldest_record_age_s`.
@@ -159,21 +167,24 @@ using QueueItem = std::variant<StampedWrite, ReadItem>;
 
 // The Phase 4 sink (plan 4.4). Producers (the io thread) enqueue and return; one sink thread talks to Redis.
 //
-// Order, oldest first: current batch (`held_`) -> spill -> queue. A newer item is never sent around an older one that is
-// unacked or spilled. Only consecutive emits are pipelined; every other write and every read is a barrier that is sent
-// alone, after every earlier item has a successful reply (P1: a checkpoint can never reach Redis ahead of an event it
-// covers). On an error, everything from the first non-success reply on is re-sent in order; what already landed
+// Order, oldest first: current batch (`held_`) -> spill -> queue. A newer item is never sent around an older one that
+// is unacked or spilled. Only consecutive emits are pipelined; every other write and every read is a barrier that is
+// sent alone, after every earlier item has a successful reply (P1: a checkpoint can never reach Redis ahead of an event
+// it covers). On an error, everything from the first non-success reply on is re-sent in order; what already landed
 // collapses to DUP in emit.lua or, at worst, re-emits an alternating log/revert pair (I6 still holds).
 //
 // Thread model: emit/checkpoint/... and the status getters are called from other threads. Everything else is private to
-// the sink thread, which runs `pump()` in a loop (start()). Unit tests do not start the thread; they call pump() directly.
+// the sink thread, which runs `pump()` in a loop (start()). Unit tests do not start the thread; they call pump()
+// directly.
 /// @brief Multi-threaded Redis stream sink with atomic Lua dedup, dual TCP connections, and disk spill WAL.
 ///
 /// Invariants & Guarantees:
 /// - Invariant I3 (Monotonic Checkpoints): Checkpoint writes (`CkptItem`) only move forward via Lua scripts.
-/// - Invariant I4 (Atomic Deduplication): `emit.lua` checks dedup key, writes stream with `XADD MINID`, and sets dedup TTL.
+/// - Invariant I4 (Atomic Deduplication): `emit.lua` checks dedup key, writes stream with `XADD MINID`, and sets dedup
+/// TTL.
 /// - Invariant P1 (Ordered Delivery): Checkpoints and trims act as barriers; emits pipeline up to `max_batch`.
-/// - Dual TCP Connections: `lease_` connection runs lease renewals and heartbeats independently so slow event pipelines cannot starve renewals.
+/// - Dual TCP Connections: `lease_` connection runs lease renewals and heartbeats independently so slow event pipelines
+/// cannot starve renewals.
 class RedisSink final : public pipeline::Sink {
 public:
     /// @brief Constructs RedisSink with dedicated data and lease connections.
@@ -208,8 +219,8 @@ public:
     /// @brief Coroutine reading current checkpoint from Redis; flushes earlier writes first.
     boost::asio::awaitable<std::optional<pipeline::Checkpoint>> load_checkpoint() override;
     /// @brief Coroutine reading released block records within [from, to] range.
-    boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> released_range(std::uint64_t from,
-                                                                                               std::uint64_t to) override;
+    boost::asio::awaitable<std::optional<std::vector<pipeline::ReleasedEntry>>> released_range(
+        std::uint64_t from, std::uint64_t to) override;
 
     // Starts / stops the sink thread. stop() resolves queued reads to nullopt; writes still queued are left (the next
     // leader re-sweeps from the Redis checkpoint). The destructor stops.
@@ -218,8 +229,8 @@ public:
     /// @brief Signals worker thread to stop, abandons pending reads, and joins worker thread.
     void stop();
 
-    // Publishes the heartbeat payload (the host's JSON state; the content comes from the io thread). Thread-safe. The sink
-    // thread writes the latest payload every heartbeat_ms.
+    // Publishes the heartbeat payload (the host's JSON state; the content comes from the io thread). Thread-safe. The
+    // sink thread writes the latest payload every heartbeat_ms.
     /// @brief Updates latest JSON heartbeat payload to write to Redis.
     void set_heartbeat(std::string payload);
 
@@ -228,9 +239,10 @@ public:
     /// @brief Returns cached consumer lag metrics for configured consumer groups.
     [[nodiscard]] std::vector<ConsumerLag> consumer_lag() const;
 
-    // Graceful shutdown (plan 4.8 "Draining"): waits up to `budget` for every accepted write to be acked, stops the sink
-    // thread, then releases the lease so a standby takes over without waiting for the TTL. If the flush did not finish
-    // it reports how many writes were left: the next leader re-sweeps from the Redis checkpoint, so that is allowed.
+    // Graceful shutdown (plan 4.8 "Draining"): waits up to `budget` for every accepted write to be acked, stops the
+    // sink thread, then releases the lease so a standby takes over without waiting for the TTL. If the flush did not
+    // finish it reports how many writes were left: the next leader re-sweeps from the Redis checkpoint, so that is
+    // allowed.
     struct DrainResult {
         bool flushed{false};
         std::uint64_t unflushed{0};

@@ -9,15 +9,15 @@
 // Failure (transport error or non-2xx) is logged and counted, never fatal. The URL is a credential: it is never logged
 // (only the HTTP status or the redacted TransportError text). An empty URL disables pinging (WARN at construction,
 // status() == "disabled" for /readyz).
+#include <spdlog/logger.h>
+
 #include <atomic>
+#include <boost/asio/any_io_executor.hpp>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
-
-#include <boost/asio/any_io_executor.hpp>
-#include <spdlog/logger.h>
 
 #include "ops/alerts.hpp"  // AlertClock
 
@@ -56,8 +56,8 @@ public:
     /// @brief "enabled" or "disabled", for the /readyz JSON.
     [[nodiscard]] const char* status() const noexcept;
 
-    [[nodiscard]] std::uint64_t pings_total() const noexcept;           // pings answered 2xx
-    [[nodiscard]] std::uint64_t ping_failures_total() const noexcept;   // evml_deadman_ping_failures_total
+    [[nodiscard]] std::uint64_t pings_total() const noexcept;          // pings answered 2xx
+    [[nodiscard]] std::uint64_t ping_failures_total() const noexcept;  // evml_deadman_ping_failures_total
 
     struct State;  // shared with the detached ping coroutines; internal
 

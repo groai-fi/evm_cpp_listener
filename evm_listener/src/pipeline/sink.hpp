@@ -1,11 +1,10 @@
 #pragma once
 
+#include <boost/asio/awaitable.hpp>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <boost/asio/awaitable.hpp>
 
 #include "core/config.hpp"
 #include "pipeline/event.hpp"
@@ -17,8 +16,8 @@ struct Emission {
     core::StreamKind stream{core::StreamKind::Events};
     EventType type{EventType::Log};
     std::string event_id;
-    std::string dedup_key;                     // "dedup:{event_id}"; its value in Redis is the last `type`
-    std::vector<Field> fields;                 // schema v=1, flat
+    std::string dedup_key;                        // "dedup:{event_id}"; its value in Redis is the last `type`
+    std::vector<Field> fields;                    // schema v=1, flat
     std::optional<std::uint64_t> released_block;  // set for safe-class log events: tracked in `released` (plan 3.5)
 };
 
@@ -49,7 +48,8 @@ struct Checkpoint {
 // final-sweep diff skip a vanished log, so the caller must pause and ask again later.
 // Abstract interface isolating pipeline state machine from Redis transport, Lua execution, and disk spill WAL.
 // Concurrency model: writes enqueue asynchronously and never block the Asio event loop; reads are awaitable.
-// Invariants enforced: Invariant I3 (Monotonic Checkpoints), Invariant I4 (Atomic Dedup), Invariant I6 (Revert Fidelity).
+// Invariants enforced: Invariant I3 (Monotonic Checkpoints), Invariant I4 (Atomic Dedup), Invariant I6 (Revert
+// Fidelity).
 class Sink {
 public:
     Sink() = default;
@@ -92,7 +92,7 @@ public:
     // Fetches released safe-class entries with block numbers in [from, to] for final sweep diffing.
     // Watch out: Returns nullopt if sink is degraded or replaying; caller must wait and retry.
     virtual boost::asio::awaitable<std::optional<std::vector<ReleasedEntry>>> released_range(std::uint64_t from,
-                                                                                          std::uint64_t to) = 0;
+                                                                                             std::uint64_t to) = 0;
 };
 
 [[nodiscard]] Emission make_emission(const Event& e, std::optional<std::uint64_t> released_block);

@@ -8,7 +8,6 @@
 #include <limits>
 #include <set>
 #include <sstream>
-
 #include <toml++/toml.hpp>
 
 #include "core/env.hpp"
@@ -23,21 +22,22 @@ namespace {
 class Section {
 public:
     /// @brief Validates that all keys present in table `t` belong to `allowed` set.
-    Section(const toml::table& t, const std::string& origin, std::string path,
+    Section(const toml::table& t, std::string_view origin, std::string path,
             std::initializer_list<std::string_view> allowed)
         : t_(t), origin_(origin), path_(std::move(path)) {
         for (auto&& [k, v] : t_) {
             const std::string_view key = k.str();
             // Fail fast on any unrecognised configuration key
             if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
-                fail(std::string(key), "unknown key");
+                fail(key, "unknown key");
             }
         }
     }
 
     /// @brief Throws formatted ConfigError identifying origin file and TOML path.
-    [[noreturn]] void fail(const std::string& key, const std::string& what) const {
-        throw ConfigError(origin_ + ": " + path_ + (key.empty() ? "" : "." + key) + ": " + what);
+    [[noreturn]] void fail(std::string_view key, std::string_view what) const {
+        throw ConfigError(std::string(origin_) + ": " + path_ + (key.empty() ? "" : "." + std::string(key)) + ": " +
+                          std::string(what));
     }
 
     bool has(std::string_view k) const { return t_.contains(k); }
@@ -47,9 +47,9 @@ public:
     template <class T>
     T req(std::string_view k, const char* type_name) const {
         const toml::node* n = t_.get(k);
-        if (!n) fail(std::string(k), "missing required key");
+        if (!n) fail(k, "missing required key");
         auto v = n->value<T>();
-        if (!v) fail(std::string(k), std::string("expected ") + type_name);
+        if (!v) fail(k, std::string("expected ") + type_name);
         return *v;
     }
     /// @brief Reads optional key of type T with fallback default.
@@ -59,7 +59,9 @@ public:
     }
 
     std::string str(std::string_view k) const { return req<std::string>(k, "string"); }
-    std::string opt_str(std::string_view k, std::string def) const { return opt<std::string>(k, std::move(def), "string"); }
+    std::string opt_str(std::string_view k, std::string def) const {
+        return opt<std::string>(k, std::move(def), "string");
+    }
     bool boolean(std::string_view k) const { return req<bool>(k, "boolean"); }
 
     template <class U>
@@ -74,13 +76,13 @@ public:
     /// @brief Parses required array of strings.
     std::vector<std::string> strings(std::string_view k) const {
         const toml::node* n = t_.get(k);
-        if (!n) fail(std::string(k), "missing required key");
+        if (!n) fail(k, "missing required key");
         const toml::array* a = n->as_array();
-        if (!a) fail(std::string(k), "expected array of strings");
+        if (!a) fail(k, "expected array of strings");
         std::vector<std::string> out;
         for (const auto& e : *a) {
             auto s = e.value<std::string>();
-            if (!s) fail(std::string(k), "expected array of strings");
+            if (!s) fail(k, "expected array of strings");
             out.push_back(*s);
         }
         return out;
@@ -90,51 +92,54 @@ private:
     /// @brief Validates non-negative integer bounds and minimum floor.
     template <class U>
     U check_uint(std::string_view k, std::int64_t v, std::uint64_t min) const {
-        if (v < 0 || static_cast<std::uint64_t>(v) < min || static_cast<std::uint64_t>(v) > std::numeric_limits<U>::max()) {
-            fail(std::string(k), "out of range (min " + std::to_string(min) + ", got " + std::to_string(v) + ")");
+        if (v < 0 || static_cast<std::uint64_t>(v) < min ||
+            static_cast<std::uint64_t>(v) > std::numeric_limits<U>::max()) {
+            fail(k, "out of range (min " + std::to_string(min) + ", got " + std::to_string(v) + ")");
         }
         return static_cast<U>(v);
     }
 
     const toml::table& t_;
-    const std::string& origin_;
+    std::string_view origin_;
     std::string path_;
 };
 
 /// @brief Looks up a required sub-table in TOML root.
-const toml::table& table_of(const toml::table& root, const std::string& origin, std::string_view key) {
+const toml::table& table_of(const toml::table& root, std::string_view origin, std::string_view key) {
     const toml::node* n = root.get(key);
-    if (!n) throw ConfigError(origin + ": missing table [" + std::string(key) + "]");
+    if (!n) throw ConfigError(std::string(origin) + ": missing table [" + std::string(key) + "]");
     const toml::table* t = n->as_table();
-    if (!t) throw ConfigError(origin + ": [" + std::string(key) + "] must be a table");
+    if (!t) throw ConfigError(std::string(origin) + ": [" + std::string(key) + "] must be a table");
     return *t;
 }
 
 /// @brief Looks up an array of tables in TOML root (e.g. [[contracts]]).
-std::vector<const toml::table*> array_tables_of(const toml::table& root, const std::string& origin,
-                                                 std::string_view key) {
+std::vector<const toml::table*> array_tables_of(const toml::table& root, std::string_view origin,
+                                                std::string_view key) {
     const toml::node* n = root.get(key);
-    if (!n) throw ConfigError(origin + ": missing array of tables [[" + std::string(key) + "]]");
+    if (!n) throw ConfigError(std::string(origin) + ": missing array of tables [[" + std::string(key) + "]]");
     const toml::array* a = n->as_array();
-    if (!a) throw ConfigError(origin + ": [[" + std::string(key) + "]] must be an array of tables");
+    if (!a) throw ConfigError(std::string(origin) + ": [[" + std::string(key) + "]] must be an array of tables");
     std::vector<const toml::table*> out;
     for (const auto& e : *a) {
         const toml::table* t = e.as_table();
-        if (!t) throw ConfigError(origin + ": [[" + std::string(key) + "]] entries must be tables");
+        if (!t) throw ConfigError(std::string(origin) + ": [[" + std::string(key) + "]] entries must be tables");
         out.push_back(t);
     }
     return out;
 }
 
 /// @brief Parses finality classification string into Finality enum.
-Finality parse_finality(const Section& s, std::string_view key, const std::string& value) {
+Finality parse_finality(const Section& s, std::string_view key, std::string_view value) {
     if (value == "safe") return Finality::Safe;
     if (value == "finalized") return Finality::Finalized;
-    if (value == "depth") s.fail(std::string(key), "finality=depth is not supported in v1");
-    s.fail(std::string(key), "must be one of safe|finalized|depth, got \"" + value + "\"");
+    if (value == "depth") s.fail(key, "finality=depth is not supported in v1");
+    s.fail(key, "must be one of safe|finalized|depth, got \"" + std::string(value) + "\"");
 }
 
-bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
+bool starts_with(std::string_view s, std::string_view prefix) noexcept {
+    return s.size() >= prefix.size() && s.substr(0, prefix.size()) == prefix;
+}
 
 /// @brief Intermediate provider declaration from TOML before resolving credentials from environment.
 struct Declared {
@@ -149,19 +154,23 @@ struct Declared {
 };
 
 /// @brief Enforces zero hardcoded secrets policy: literal URLs must not contain query parameters, userinfo, or paths.
-void check_credential_free(const Section& s, const std::string& url) {
+void check_credential_free(const Section& s, std::string_view url) {
     const auto scheme_end = url.find("://");
-    const auto path_start = scheme_end == std::string::npos ? std::string::npos : url.find_first_of("/?#", scheme_end + 3);
-    const bool bad = scheme_end == std::string::npos || url.find('@') != std::string::npos ||
-                     url.find('?') != std::string::npos ||
-                     (path_start != std::string::npos && url.substr(path_start) != "/");
+    const auto path_start =
+        scheme_end == std::string_view::npos ? std::string_view::npos : url.find_first_of("/?#", scheme_end + 3);
+    const bool bad = scheme_end == std::string_view::npos || url.find('@') != std::string_view::npos ||
+                     url.find('?') != std::string_view::npos ||
+                     (path_start != std::string_view::npos && url.substr(path_start) != "/");
     if (bad) {
-        s.fail("http_url", "literal URLs must be credential-free (scheme://host only); use http_env for keyed endpoints");
+        s.fail("http_url",
+               "literal URLs must be credential-free (scheme://host only); use http_env for keyed endpoints");
     }
 }
 
 /// @brief Extracts event name prefix from full canonical signature (e.g. "Transfer(address,...)" -> "Transfer").
-std::string event_name(const std::string& sig) { return sig.substr(0, sig.find('(')); }
+std::string event_name(std::string_view sig) {
+    return std::string(sig.substr(0, sig.find('(')));
+}
 
 }  // namespace
 
@@ -228,11 +237,13 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
     } catch (const toml::parse_error& e) {
         // Format syntax error with 1-based source coordinate for operator diagnostics.
         throw ConfigError(origin + ": TOML syntax error: " + std::string(e.description()) + " (line " +
-                          std::to_string(e.source().begin.line) + ", col " + std::to_string(e.source().begin.column) + ")");
+                          std::to_string(e.source().begin.line) + ", col " + std::to_string(e.source().begin.column) +
+                          ")");
     }
     // Reject unexpected top-level sections to catch typos immediately.
-    const Section top(root, origin, "<root>",
-                      {"shard", "chain", "providers", "redundancy", "lease", "contracts", "backfill", "watchdog", "sink", "ops"});
+    const Section top(
+        root, origin, "<root>",
+        {"shard", "chain", "providers", "redundancy", "lease", "contracts", "backfill", "watchdog", "sink", "ops"});
     (void)top;
 
     Config cfg;
@@ -264,8 +275,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
     // [chain]
     {
         const Section s(table_of(root, origin, "chain"), origin, "[chain]",
-                        {"name", "chain_id", "block_time_ms", "default_finality", "depth", "hash_ring_size", "start_policy",
-                         "safe_poll_ms", "finalized_poll_ms", "pending_max_logs"});
+                        {"name", "chain_id", "block_time_ms", "default_finality", "depth", "hash_ring_size",
+                         "start_policy", "safe_poll_ms", "finalized_poll_ms", "pending_max_logs"});
         auto& c = cfg.chain;
         c.name = s.str("name");
         c.chain_id = s.uint<std::uint64_t>("chain_id", 1);
@@ -277,9 +288,12 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
         c.hash_ring_size = s.uint<std::uint32_t>("hash_ring_size", 1);
         const std::string policy = s.str("start_policy");
         // Start policy dictates whether historical sweeping starts at contract deploy blocks or wait for gate sync.
-        if (policy == "contract_start") c.start_policy = StartPolicy::ContractStart;
-        else if (policy == "gate") c.start_policy = StartPolicy::Gate;
-        else s.fail("start_policy", "must be contract_start|gate, got \"" + policy + "\"");
+        if (policy == "contract_start")
+            c.start_policy = StartPolicy::ContractStart;
+        else if (policy == "gate")
+            c.start_policy = StartPolicy::Gate;
+        else
+            s.fail("start_policy", "must be contract_start|gate, got \"" + policy + "\"");
         c.safe_poll_ms = s.uint<std::uint32_t>("safe_poll_ms", 1);
         c.finalized_poll_ms = s.uint<std::uint32_t>("finalized_poll_ms", 1);
         c.pending_max_logs = s.opt_uint<std::uint32_t>("pending_max_logs", c.pending_max_logs, 1);
@@ -291,8 +305,9 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
         const auto tables = array_tables_of(root, origin, "providers");
         std::set<std::string> names;
         for (std::size_t i = 0; i < tables.size(); ++i) {
-            const Section s(*tables[i], origin, "[[providers]][" + std::to_string(i) + "]",
-                            {"name", "ws_env", "http_env", "http_url", "max_getlogs_range", "reconcile_rps", "reconcile_burst"});
+            const Section s(
+                *tables[i], origin, "[[providers]][" + std::to_string(i) + "]",
+                {"name", "ws_env", "http_env", "http_url", "max_getlogs_range", "reconcile_rps", "reconcile_burst"});
             Declared d;
             d.index = i;
             d.name = s.str("name");
@@ -302,7 +317,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
             d.http_env = s.opt_str("http_env", "");
             d.http_literal = s.opt_str("http_url", "");
             // Mutual exclusivity: forbid specifying both an env reference and a literal URL.
-            if (!d.http_env.empty() && !d.http_literal.empty()) s.fail("http_url", "set either http_env or http_url, not both");
+            if (!d.http_env.empty() && !d.http_literal.empty())
+                s.fail("http_url", "set either http_env or http_url, not both");
             // Enforce zero-tolerance secret policy on literal configuration endpoints.
             if (!d.http_literal.empty()) check_credential_free(s, d.http_literal);
             // Every provider must declare at least one endpoint channel.
@@ -319,8 +335,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
     // [redundancy] + provider resolution
     {
         const Section s(table_of(root, origin, "redundancy"), origin, "[redundancy]",
-                        {"mode", "ws_order", "getlogs_order", "failover_after", "stale_after_blocks", "prefer_primary_after_s",
-                         "quota_cooldown_s", "reconcile_rps", "reconcile_burst"});
+                        {"mode", "ws_order", "getlogs_order", "failover_after", "stale_after_blocks",
+                         "prefer_primary_after_s", "quota_cooldown_s", "reconcile_rps", "reconcile_burst"});
         auto& r = cfg.redundancy;
         r.mode = s.str("mode");
         // Supported redundancy modes: sequential failover in v1; hedged is reserved.
@@ -347,16 +363,20 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
         }
 
         // Helper to locate a declared provider by name in the redundancy order list.
-        const auto find = [&](const std::string& name, const char* list) -> const Declared& {
-            const auto it = std::find_if(declared.begin(), declared.end(), [&](const Declared& d) { return d.name == name; });
-            if (it == declared.end()) s.fail(list, "references undeclared provider \"" + name + "\"");
+        const auto find = [&](std::string_view name, const char* list) -> const Declared& {
+            const auto it =
+                std::find_if(declared.begin(), declared.end(), [&](const Declared& d) { return d.name == name; });
+            if (it == declared.end()) s.fail(list, "references undeclared provider \"" + std::string(name) + "\"");
             return *it;
         };
         // Verify URL protocol scheme matches the transport expectation.
-        const auto check_scheme = [&](const std::string& env_name, const std::string& url, bool ws) {
+        const auto check_scheme = [&](std::string_view env_name, std::string_view url, bool ws) {
             const bool ok = ws ? (starts_with(url, "wss://") || starts_with(url, "ws://"))
-                                : (starts_with(url, "https://") || starts_with(url, "http://"));
-            if (!ok) throw ConfigError(origin + ": env " + env_name + " must be a " + (ws ? "ws:// or wss://" : "http:// or https://") + " URL");
+                               : (starts_with(url, "https://") || starts_with(url, "http://"));
+            if (!ok) {
+                throw ConfigError(origin + ": env " + std::string(env_name) + " must be a " +
+                                  (ws ? "ws:// or wss://" : "http:// or https://") + " URL");
+            }
         };
 
         // Resolve WebSocket provider chain in operator-defined priority order.
@@ -387,7 +407,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
             if (url.empty() && !d.http_env.empty()) {
                 url = env_lookup(d.http_env);
                 if (url.empty()) {
-                    cfg.notes.push_back("INFO provider \"" + name + "\" skipped for getLogs: env " + d.http_env + " unset");
+                    cfg.notes.push_back("INFO provider \"" + name + "\" skipped for getLogs: env " + d.http_env +
+                                        " unset");
                     continue;
                 }
                 check_scheme(d.http_env, url, false);
@@ -407,11 +428,13 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
 
         // A provider enabled for both roles is one entity: merge the URLs so callers see both.
         for (auto& w : cfg.ws_chain) {
-            const auto it = std::find_if(cfg.getlogs_chain.begin(), cfg.getlogs_chain.end(), [&](const Provider& g) { return g.name == w.name; });
+            const auto it = std::find_if(cfg.getlogs_chain.begin(), cfg.getlogs_chain.end(),
+                                         [&](const Provider& g) { return g.name == w.name; });
             if (it != cfg.getlogs_chain.end()) w.http_url = it->http_url;
         }
         for (auto& g : cfg.getlogs_chain) {
-            const auto it = std::find_if(cfg.ws_chain.begin(), cfg.ws_chain.end(), [&](const Provider& w) { return w.name == g.name; });
+            const auto it = std::find_if(cfg.ws_chain.begin(), cfg.ws_chain.end(),
+                                         [&](const Provider& w) { return w.name == g.name; });
             if (it != cfg.ws_chain.end()) g.ws_url = it->ws_url;
         }
 
@@ -427,10 +450,12 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
         };
         // Invariant: At least one WS and one HTTP provider must be resolved to run the listener.
         if (cfg.ws_chain.empty()) {
-            throw ConfigError(origin + ": no WS provider enabled; set at least one of: " + unset_names(r.ws_order, true));
+            throw ConfigError(origin +
+                              ": no WS provider enabled; set at least one of: " + unset_names(r.ws_order, true));
         }
         if (cfg.getlogs_chain.empty()) {
-            throw ConfigError(origin + ": no getLogs provider enabled; set at least one of: " + unset_names(r.getlogs_order, false));
+            throw ConfigError(
+                origin + ": no getLogs provider enabled; set at least one of: " + unset_names(r.getlogs_order, false));
         }
     }
 
@@ -465,16 +490,22 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
                 s.fail("address", e.what());
             }
             // Disallow duplicate contract addresses within the same listener process.
-            if (!addrs.insert(c.address.to_hex()).second) s.fail("address", "duplicate contract address " + c.address.to_hex());
+            if (!addrs.insert(c.address.to_hex()).second)
+                s.fail("address", "duplicate contract address " + c.address.to_hex());
 
             const std::string stream = s.opt_str("stream", "events");
-            if (stream == "events") c.stream = StreamKind::Events;
-            else if (stream == "registry") c.stream = StreamKind::Registry;
-            else s.fail("stream", "must be events|registry, got \"" + stream + "\"");
+            if (stream == "events")
+                c.stream = StreamKind::Events;
+            else if (stream == "registry")
+                c.stream = StreamKind::Registry;
+            else
+                s.fail("stream", "must be events|registry, got \"" + stream + "\"");
 
             // Inherit default chain finality if contract does not specify its own override.
-            c.finality = s.has("finality") ? parse_finality(s, "finality", s.str("finality")) : cfg.chain.default_finality;
-            if (c.finality == Finality::Depth && cfg.chain.depth == 0) s.fail("finality", "finality=depth requires [chain].depth > 0");
+            c.finality =
+                s.has("finality") ? parse_finality(s, "finality", s.str("finality")) : cfg.chain.default_finality;
+            if (c.finality == Finality::Depth && cfg.chain.depth == 0)
+                s.fail("finality", "finality=depth requires [chain].depth > 0");
             c.fast_stream = s.opt<bool>("fast_stream", false, "boolean");
 
             if (const toml::node* n = s.node("start_block")) {
@@ -502,7 +533,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
                     s.fail("events", e.what());
                 }
                 // Reject duplicate event signatures for the same contract.
-                if (!seen_topics.insert(c.topics.back().to_hex()).second) s.fail("events", "duplicate event \"" + sig + "\"");
+                if (!seen_topics.insert(c.topics.back().to_hex()).second)
+                    s.fail("events", "duplicate event \"" + sig + "\"");
             }
             // Populate fast lookup route map from (contract_address, topic0) to EventRoute metadata.
             for (std::size_t e = 0; e < c.events.size(); ++e) {
@@ -523,8 +555,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
     // [watchdog]
     {
         const Section s(table_of(root, origin, "watchdog"), origin, "[watchdog]",
-                        {"head_stall_ms", "subscribe_timeout_ms", "progress_stall_ms", "safe_gate_stuck_s", "gate_lag_alert_s",
-                         "process_stall_ms"});
+                        {"head_stall_ms", "subscribe_timeout_ms", "progress_stall_ms", "safe_gate_stuck_s",
+                         "gate_lag_alert_s", "process_stall_ms"});
         auto& w = cfg.watchdog;
         w.head_stall_ms = s.uint<std::uint32_t>("head_stall_ms", 1);
         w.subscribe_timeout_ms = s.uint<std::uint32_t>("subscribe_timeout_ms", 1);
@@ -536,10 +568,10 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
 
     // [sink]
     {
-        const Section s(table_of(root, origin, "sink"), origin, "[sink]",
-                        {"redis_url_env", "retention_ms", "fast_retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir",
-                         "spill_max_bytes", "require_noeviction", "consumer_groups", "consumer_lag_warn_s",
-                         "consumer_lag_crit_s"});
+        const Section s(
+            table_of(root, origin, "sink"), origin, "[sink]",
+            {"redis_url_env", "retention_ms", "fast_retention_ms", "dedup_ttl_s", "queue_capacity", "spill_dir",
+             "spill_max_bytes", "require_noeviction", "consumer_groups", "consumer_lag_warn_s", "consumer_lag_crit_s"});
         auto& k = cfg.sink;
         k.redis_url_env = s.str("redis_url_env");
         k.retention_ms = s.uint<std::uint64_t>("retention_ms", 1);
@@ -550,13 +582,16 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
         k.spill_max_bytes = s.uint<std::uint64_t>("spill_max_bytes", 1);
         k.require_noeviction = s.boolean("require_noeviction");
 
-        // Consumer-group lag probe (plan 4.10): 0 < warn < crit < retention, so an alert fires while data is still safe.
+        // Consumer-group lag probe (plan 4.10): 0 < warn < crit < retention, so an alert fires while data is still
+        // safe.
         k.consumer_lag_warn_s = s.opt_uint<std::uint32_t>("consumer_lag_warn_s", k.consumer_lag_warn_s, 1);
         k.consumer_lag_crit_s = s.opt_uint<std::uint32_t>("consumer_lag_crit_s", k.consumer_lag_crit_s, 1);
-        if (k.consumer_lag_warn_s >= k.consumer_lag_crit_s) s.fail("consumer_lag_warn_s", "must be < consumer_lag_crit_s");
+        if (k.consumer_lag_warn_s >= k.consumer_lag_crit_s)
+            s.fail("consumer_lag_warn_s", "must be < consumer_lag_crit_s");
         // Invariant: Critical lag alert must trigger well before Redis trims stream entries by retention limit.
         if (k.consumer_lag_crit_s >= k.retention_ms / 1000)
-            s.fail("consumer_lag_crit_s", "must be < retention_ms / 1000: an alert after the data was trimmed is too late");
+            s.fail("consumer_lag_crit_s",
+                   "must be < retention_ms / 1000: an alert after the data was trimmed is too late");
 
         if (const toml::node* n = s.node("consumer_groups")) {
             const toml::array* a = n->as_array();
@@ -568,9 +603,12 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
                 const Section g(*t, origin, "[sink].consumer_groups[" + std::to_string(i) + "]", {"stream", "group"});
                 ConsumerGroupCfg c;
                 const std::string stream = g.str("stream");
-                if (stream == "events") c.stream = StreamKind::Events;
-                else if (stream == "registry") c.stream = StreamKind::Registry;
-                else g.fail("stream", "must be events|registry, got \"" + stream + "\"");
+                if (stream == "events")
+                    c.stream = StreamKind::Events;
+                else if (stream == "registry")
+                    c.stream = StreamKind::Registry;
+                else
+                    g.fail("stream", "must be events|registry, got \"" + stream + "\"");
                 c.group = g.str("group");
                 if (c.group.empty()) g.fail("group", "must not be empty");
                 // Deduplicate consumer group definitions per stream.
@@ -588,9 +626,11 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
                          "deadman_ping_env", "deadman_ping_s", "http_user_agent"});
         auto& o = cfg.ops;
         o.http_listen = s.str("http_listen");
-        // Railway tells the service which port to serve through $PORT (plan 60 D5): it replaces the port, keeps the host.
+        // Railway tells the service which port to serve through $PORT (plan 60 D5): it replaces the port, keeps the
+        // host.
         if (const std::string port = env_lookup("PORT"); !port.empty()) {
-            const bool digits = std::all_of(port.begin(), port.end(), [](unsigned char ch) { return std::isdigit(ch); });
+            const bool digits =
+                std::all_of(port.begin(), port.end(), [](unsigned char ch) { return std::isdigit(ch); });
             if (!digits || port.size() > 5 || std::stoul(port) < 1 || std::stoul(port) > 65535) {
                 throw ConfigError(origin + ": env PORT must be an integer 1..65535");
             }
@@ -615,7 +655,8 @@ Config Config::parse(std::string_view toml_text, std::string_view origin_name, c
                                   " is not (refusing unauthenticated alert POSTs)");
             }
             // Enforce HTTPS transport encryption to prevent token leakage over the network.
-            if (!starts_with(hook, "https://")) throw ConfigError(origin + ": env " + o.alert_webhook_env + " must be an https:// URL");
+            if (!starts_with(hook, "https://"))
+                throw ConfigError(origin + ": env " + o.alert_webhook_env + " must be an https:// URL");
         } else {
             cfg.notes.push_back("WARN alerts disabled: env " + o.alert_webhook_env + " unset");
         }

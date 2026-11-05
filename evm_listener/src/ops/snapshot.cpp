@@ -7,7 +7,8 @@ namespace evml::ops {
 
 namespace json = boost::json;
 
-AlertEvent provider_failover_event(const std::optional<std::string>& from, std::string_view to, std::string_view reason) {
+AlertEvent provider_failover_event(const std::optional<std::string>& from, std::string_view to,
+                                   std::string_view reason) {
     AlertEvent e;
     e.kind = AlertEvent::Kind::ProviderFailover;
     const std::string verb = reason == "switch_back" ? "switched back" : "failed over";
@@ -34,7 +35,9 @@ AlertEvent sink_fenced_event(std::string_view why, std::uint64_t discarded_recor
     return e;
 }
 
-void SnapshotBuilder::push_event(AlertEvent e) { pending_.push_back(std::move(e)); }
+void SnapshotBuilder::push_event(AlertEvent e) {
+    pending_.push_back(std::move(e));
+}
 
 OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
     OpsSnapshot s;
@@ -107,11 +110,12 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
         f.quota_exhausted = h.state == provider::State::Cooldown;
         if (f.quota_exhausted) {
             f.quota_message = h.fault_message;
-            f.quota_error_code = h.rpc_code ? std::to_string(*h.rpc_code)
-                                            : (h.http_status > 0 ? std::to_string(h.http_status) : "");
+            f.quota_error_code =
+                h.rpc_code ? std::to_string(*h.rpc_code) : (h.http_status > 0 ? std::to_string(h.http_status) : "");
         }
         if (h.state == provider::State::Disabled) f.auth_http_status = h.http_status;  // 0 = not an HTTP answer
-        if (h.next_probe_in) f.next_probe_ts = in.wall_ms / 1000 + static_cast<std::uint64_t>(h.next_probe_in->count()) / 1000;
+        if (h.next_probe_in)
+            f.next_probe_ts = in.wall_ms / 1000 + static_cast<std::uint64_t>(h.next_probe_in->count()) / 1000;
         s.providers.push_back(std::move(f));
     }
     s.any_healthy_provider = any_up;
@@ -131,7 +135,8 @@ OpsSnapshot SnapshotBuilder::build(const SnapshotInputs& in) {
             AlertEvent e;
             e.kind = AlertEvent::Kind::SinkInvariant;
             e.message = "the sink refused an emit at or below the finalized checkpoint";
-            e.details = {{"new_refusals", cur.below_finalized - prev_->below_finalized}, {"total", cur.below_finalized}};
+            e.details = {{"new_refusals", cur.below_finalized - prev_->below_finalized},
+                         {"total", cur.below_finalized}};
             s.events.push_back(std::move(e));
         }
         if (cur.ws_missed > prev_->ws_missed) {

@@ -23,8 +23,8 @@ enum class Finality : std::uint8_t {
 
 /// @brief Destination Redis stream classification.
 enum class StreamKind : std::uint8_t {
-    Events,    // Fast-path operational and state events stream
-    Registry   // Registry / contract lifecycle stream
+    Events,   // Fast-path operational and state events stream
+    Registry  // Registry / contract lifecycle stream
 };
 
 /// @brief Sweep starting block policy on initial uncheckpointed deployment.
@@ -36,10 +36,14 @@ enum class StartPolicy : std::uint8_t {
 /// @brief Converts Finality enum to lowercase string.
 [[nodiscard]] constexpr const char* to_string(Finality f) noexcept {
     switch (f) {
-        case Finality::Safe: return "safe";
-        case Finality::Finalized: return "finalized";
-        case Finality::Depth: return "depth";
-        case Finality::Latest: return "latest";
+        case Finality::Safe:
+            return "safe";
+        case Finality::Finalized:
+            return "finalized";
+        case Finality::Depth:
+            return "depth";
+        case Finality::Latest:
+            return "latest";
     }
     return "?";
 }
@@ -56,47 +60,48 @@ struct ShardCfg {
 
 /// @brief EVM chain parameters and poll frequencies.
 struct ChainCfg {
-    std::string name;                                        // Chain name (e.g. "base", "ethereum", "arbitrum")
-    std::uint64_t chain_id{};                                // Canonical EVM chain ID (e.g. 8453 for Base)
-    std::uint32_t block_time_ms{};                           // Average block production time
-    Finality default_finality{Finality::Finalized};          // Default finality class for contracts omitting it
-    std::uint32_t depth{};                                   // Block depth requirement when finality == Depth
-    std::uint32_t hash_ring_size{};                          // Ring buffer size for block hash history
-    StartPolicy start_policy{StartPolicy::ContractStart};    // Cold startup block positioning policy
-    std::uint32_t safe_poll_ms{};                            // Safe finality polling interval
-    std::uint32_t finalized_poll_ms{};                       // Finalized finality polling interval
-    std::uint32_t pending_max_logs{200000};                  // PendingBuffer cap: staged WS logs kept for the cross-check (oldest evicted)
+    std::string name;                                      // Chain name (e.g. "base", "ethereum", "arbitrum")
+    std::uint64_t chain_id{};                              // Canonical EVM chain ID (e.g. 8453 for Base)
+    std::uint32_t block_time_ms{};                         // Average block production time
+    Finality default_finality{Finality::Finalized};        // Default finality class for contracts omitting it
+    std::uint32_t depth{};                                 // Block depth requirement when finality == Depth
+    std::uint32_t hash_ring_size{};                        // Ring buffer size for block hash history
+    StartPolicy start_policy{StartPolicy::ContractStart};  // Cold startup block positioning policy
+    std::uint32_t safe_poll_ms{};                          // Safe finality polling interval
+    std::uint32_t finalized_poll_ms{};                     // Finalized finality polling interval
+    std::uint32_t pending_max_logs{
+        200000};  // PendingBuffer cap: staged WS logs kept for the cross-check (oldest evicted)
 };
 
 /// @brief Active RPC provider credentials and capability configuration.
 /// Security Notice: URLs may contain authentication tokens; never log unredacted.
 struct Provider {
-    std::string name;                                  // Provider identifier name (e.g. "alchemy", "infura", "ankr")
-    std::string ws_url;                                // Resolved WebSocket endpoint URL (empty if not enabled)
-    std::string http_url;                              // Resolved HTTP endpoint URL (empty if not enabled)
-    std::uint32_t max_getlogs_range{};                 // Provider-specific getLogs block window ceiling
-    std::optional<std::uint32_t> reconcile_rps{};      // Optional per-provider override for [redundancy].reconcile_rps
-    std::optional<std::uint32_t> reconcile_burst{};    // Optional per-provider override for [redundancy].reconcile_burst
+    std::string name;                                // Provider identifier name (e.g. "alchemy", "infura", "ankr")
+    std::string ws_url;                              // Resolved WebSocket endpoint URL (empty if not enabled)
+    std::string http_url;                            // Resolved HTTP endpoint URL (empty if not enabled)
+    std::uint32_t max_getlogs_range{};               // Provider-specific getLogs block window ceiling
+    std::optional<std::uint32_t> reconcile_rps{};    // Optional per-provider override for [redundancy].reconcile_rps
+    std::optional<std::uint32_t> reconcile_burst{};  // Optional per-provider override for [redundancy].reconcile_burst
 };
 
 /// @brief Multi-provider redundancy, prioritization, and failover policy parameters.
 struct RedundancyCfg {
-    std::string mode;                       // Redundancy mode ("failover" or "hedged")
-    std::vector<std::string> ws_order;      // Prioritized provider sequence for WebSocket streams
-    std::vector<std::string> getlogs_order; // Prioritized provider sequence for HTTP getLogs
-    std::uint32_t failover_after{};         // Consecutive error threshold before failover
-    std::uint32_t stale_after_blocks{};     // Maximum block divergence before marking provider stale
-    std::uint32_t prefer_primary_after_s{}; // Stability duration required before failing back to primary
-    std::uint32_t quota_cooldown_s{};       // Cooldown duration when monthly quota is exhausted
-    std::uint32_t reconcile_rps{2};         // Per-provider token bucket refill rate for getLogs/block reconcile calls
-    std::uint32_t reconcile_burst{4};       // Per-provider token bucket capacity (>= reconcile_rps)
+    std::string mode;                        // Redundancy mode ("failover" or "hedged")
+    std::vector<std::string> ws_order;       // Prioritized provider sequence for WebSocket streams
+    std::vector<std::string> getlogs_order;  // Prioritized provider sequence for HTTP getLogs
+    std::uint32_t failover_after{};          // Consecutive error threshold before failover
+    std::uint32_t stale_after_blocks{};      // Maximum block divergence before marking provider stale
+    std::uint32_t prefer_primary_after_s{};  // Stability duration required before failing back to primary
+    std::uint32_t quota_cooldown_s{};        // Cooldown duration when monthly quota is exhausted
+    std::uint32_t reconcile_rps{2};          // Per-provider token bucket refill rate for getLogs/block reconcile calls
+    std::uint32_t reconcile_burst{4};        // Per-provider token bucket capacity (>= reconcile_rps)
 };
 
 /// @brief Distributed Redis leader lease parameters.
 struct LeaseCfg {
-    bool enabled{};          // True if distributed leader election is enabled
-    std::uint32_t ttl_ms{};  // Lease lock time-to-live in milliseconds
-    std::uint32_t renew_ms{};// Heartbeat interval to renew active lease
+    bool enabled{};            // True if distributed leader election is enabled
+    std::uint32_t ttl_ms{};    // Lease lock time-to-live in milliseconds
+    std::uint32_t renew_ms{};  // Heartbeat interval to renew active lease
 };
 
 /// @brief Tracked contract address, monitored events, and emission routing.
@@ -135,17 +140,17 @@ struct ConsumerGroupCfg {
 
 /// @brief Redis stream sink, retention, deduplication, and local spill configuration.
 struct SinkCfg {
-    std::string redis_url_env;                               // Environment variable name holding Redis connection URL
-    std::uint64_t retention_ms{};                            // Maximum message retention window in milliseconds
-    std::uint64_t fast_retention_ms{3600000};                // Fast signal stream retention window in milliseconds (>= 1000)
-    std::uint32_t dedup_ttl_s{};                             // Redis deduplication key TTL in seconds
-    std::uint32_t queue_capacity{};                          // Maximum in-flight buffer capacity
-    std::string spill_dir;                                   // Local filesystem path for disk spill files
-    std::uint64_t spill_max_bytes{};                         // Maximum disk spill storage quota in bytes
-    bool require_noeviction{};                               // Invariant: require maxmemory-policy == noeviction
-    std::vector<ConsumerGroupCfg> consumer_groups;           // Downstream consumer groups to monitor
-    std::uint32_t consumer_lag_warn_s{43200};                // Consumer lag warning threshold (default 12h)
-    std::uint32_t consumer_lag_crit_s{86400};                // Consumer lag critical threshold (default 24h)
+    std::string redis_url_env;                      // Environment variable name holding Redis connection URL
+    std::uint64_t retention_ms{};                   // Maximum message retention window in milliseconds
+    std::uint64_t fast_retention_ms{3600000};       // Fast signal stream retention window in milliseconds (>= 1000)
+    std::uint32_t dedup_ttl_s{};                    // Redis deduplication key TTL in seconds
+    std::uint32_t queue_capacity{};                 // Maximum in-flight buffer capacity
+    std::string spill_dir;                          // Local filesystem path for disk spill files
+    std::uint64_t spill_max_bytes{};                // Maximum disk spill storage quota in bytes
+    bool require_noeviction{};                      // Invariant: require maxmemory-policy == noeviction
+    std::vector<ConsumerGroupCfg> consumer_groups;  // Downstream consumer groups to monitor
+    std::uint32_t consumer_lag_warn_s{43200};       // Consumer lag warning threshold (default 12h)
+    std::uint32_t consumer_lag_crit_s{86400};       // Consumer lag critical threshold (default 24h)
 };
 
 /// @brief Operational endpoints, metrics, healthchecks, and external alert webhooks.
@@ -162,11 +167,11 @@ struct OpsCfg {
 
 /// @brief Route metadata for a matched (contract_address, topic0) event tuple.
 struct EventRoute {
-    std::string contract;                   // Emitting contract name
-    std::string event;                      // Event name (prefix before '(')
-    StreamKind stream{StreamKind::Events};  // Destination stream
-    Finality finality{Finality::Finalized}; // Event finality requirement
-    bool fast_stream{false};                // True if WebSocket tip logs also emit to evml:{shard}:fast
+    std::string contract;                    // Emitting contract name
+    std::string event;                       // Event name (prefix before '(')
+    StreamKind stream{StreamKind::Events};   // Destination stream
+    Finality finality{Finality::Finalized};  // Event finality requirement
+    bool fast_stream{false};                 // True if WebSocket tip logs also emit to evml:{shard}:fast
 };
 
 /// @brief Composite key lookup for fast event routing: (contract_address, topic0).

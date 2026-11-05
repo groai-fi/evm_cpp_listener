@@ -1,8 +1,5 @@
 #include "rpc/ws_session.hpp"
 
-#include <stdexcept>
-#include <variant>
-
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast/core.hpp>
@@ -10,6 +7,8 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
+#include <stdexcept>
+#include <variant>
 
 #ifdef __linux__
 #include <netinet/in.h>
@@ -51,13 +50,13 @@ public:
         : timer_(ex), active_(std::make_shared<bool>(true)), hit_(std::make_shared<bool>(false)) {
         timer_.expires_after(d);
         // Asynchronously wait for deadline expiration
-        timer_.async_wait([active = active_, hit = hit_, on_timeout = std::move(on_timeout)](
-                              const boost::system::error_code& ec) {
-            // Bail if canceled or operation completed in time
-            if (ec || !*active) return;
-            *hit = true;
-            if (on_timeout) on_timeout();
-        });
+        timer_.async_wait(
+            [active = active_, hit = hit_, on_timeout = std::move(on_timeout)](const boost::system::error_code& ec) {
+                // Bail if canceled or operation completed in time
+                if (ec || !*active) return;
+                *hit = true;
+                if (on_timeout) on_timeout();
+            });
     }
     ~Deadline() noexcept {
         // Disarm active flag before cancelling timer
@@ -245,10 +244,7 @@ net::awaitable<core::Result<std::string, WsClosed>> subscribe(std::shared_ptr<Ws
 template <class Ws>
 net::awaitable<WsClosed> WsSession::serve(std::shared_ptr<WsSession> self, std::shared_ptr<Ws> ws) {
     auto weak = self->weak_from_this();
-    auto p = std::make_shared<Proto>(Proto{self,
-                                           self->cfg_,
-                                           self->handlers_,
-                                           self->exec_,
+    auto p = std::make_shared<Proto>(Proto{self, self->cfg_, self->handlers_, self->exec_,
                                            [weak] {
                                                if (auto s = weak.lock()) s->close_socket();
                                            },
@@ -379,8 +375,7 @@ net::awaitable<WsClosed> WsSession::session_main(std::shared_ptr<WsSession> self
     struct TlsWsConn {
         std::shared_ptr<ssl::context> ctx;
         websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws;
-        TlsWsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c)
-            : ctx(std::move(c)), ws(ex, *ctx) {}
+        TlsWsConn(const net::any_io_executor& ex, std::shared_ptr<ssl::context> c) : ctx(std::move(c)), ws(ex, *ctx) {}
     };
     auto conn = std::make_shared<TlsWsConn>(self->exec_, make_tls_client_context());
     auto ws_ptr = std::shared_ptr<websocket::stream<beast::ssl_stream<beast::tcp_stream>>>(conn, &conn->ws);
@@ -399,7 +394,8 @@ net::awaitable<WsClosed> WsSession::session_main(std::shared_ptr<WsSession> self
     }
     tune_socket(beast::get_lowest_layer(*ws_ptr).socket(), who);
     beast::get_lowest_layer(*ws_ptr).expires_after(self->cfg_.connect_timeout);
-    co_await ws_ptr->next_layer().async_handshake(ssl::stream_base::client, net::redirect_error(net::use_awaitable, ec));
+    co_await ws_ptr->next_layer().async_handshake(ssl::stream_base::client,
+                                                  net::redirect_error(net::use_awaitable, ec));
     if (ec) {
         co_return WsClosed{FailKind::Retry, "TLS handshake failed for " + who + ": " + describe(ec), std::nullopt, 0,
                            std::nullopt};
@@ -421,7 +417,8 @@ std::shared_ptr<WsSession> WsSession::create(net::any_io_executor executor, WsSe
     if (cfg.logs && (cfg.logs->addresses.empty() || cfg.logs->topic0s.empty())) {
         throw std::invalid_argument("WsSession: logs filter needs at least one address and one topic0");
     }
-    if (!handlers.on_ready || !handlers.on_closed) throw std::invalid_argument("WsSession: on_ready/on_closed required");
+    if (!handlers.on_ready || !handlers.on_closed)
+        throw std::invalid_argument("WsSession: on_ready/on_closed required");
     if (cfg.subscribe_heads && !handlers.on_head) throw std::invalid_argument("WsSession: on_head required");
     if (cfg.logs && !handlers.on_log) throw std::invalid_argument("WsSession: on_log required");
     return std::make_shared<WsSession>(Private{}, std::move(executor), std::move(cfg), std::move(handlers));
@@ -452,14 +449,17 @@ void WsSession::finish(WsClosed c) {
     closed_ = true;
     // Calculate total continuous duration in Ready state for backoff decay evaluation
     if (ready_at_) {
-        live_for_ = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - *ready_at_);
+        live_for_ =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - *ready_at_);
     }
     // Deliver terminal event to subscriber
     handlers_.on_closed(c);
 }
 
 /// @brief Top-level coroutine orchestrating session execution.
-net::awaitable<void> WsSession::run() { return run_impl(shared_from_this()); }
+net::awaitable<void> WsSession::run() {
+    return run_impl(shared_from_this());
+}
 
 net::awaitable<void> WsSession::run_impl(std::shared_ptr<WsSession> self) {
     WsClosed out = co_await session_main(self);

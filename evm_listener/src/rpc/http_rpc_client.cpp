@@ -193,15 +193,23 @@ HttpRpcClient::HttpRpcClient(net::any_io_executor executor, HttpRpcClientConfig 
     : state_(std::make_shared<State>(std::move(executor), std::move(cfg))) {}
 
 /// @brief Cleans up socket connections on destruction.
-HttpRpcClient::~HttpRpcClient() { cancel(); }
+HttpRpcClient::~HttpRpcClient() {
+    cancel();
+}
 
-const std::string& HttpRpcClient::name() const noexcept { return state_->cfg.name; }
+const std::string& HttpRpcClient::name() const noexcept {
+    return state_->cfg.name;
+}
 
 /// @brief Explicitly shuts down and resets the active socket connection.
-void HttpRpcClient::close() noexcept { state_->close(); }
+void HttpRpcClient::close() noexcept {
+    state_->close();
+}
 
 /// @brief Cancels any in-flight request or queued waiters and closes the active connection.
-void HttpRpcClient::cancel() noexcept { state_->cancel(); }
+void HttpRpcClient::cancel() noexcept {
+    state_->cancel();
+}
 
 /// @brief Asynchronously resolves DNS and opens either plain TCP or verified TLS connection.
 net::awaitable<core::Result<std::shared_ptr<detail::HttpConn>>> HttpRpcClient::open(std::shared_ptr<State> st) {
@@ -236,8 +244,8 @@ net::awaitable<core::Result<std::shared_ptr<detail::HttpConn>>> HttpRpcClient::o
     {
         ResolverGuard rg(st, resolver);
         // Resolve host to IP endpoints
-        endpoints = co_await resolver->async_resolve(st->url.host, st->url.port,
-                                                     net::redirect_error(net::use_awaitable, ec));
+        endpoints =
+            co_await resolver->async_resolve(st->url.host, st->url.port, net::redirect_error(net::use_awaitable, ec));
     }
     if (ec) {
         co_return core::Error{st->cfg.name + ": resolve failed for " + st->redacted + ": " + ec.message()};
@@ -291,7 +299,8 @@ net::awaitable<core::Result<std::shared_ptr<detail::HttpConn>>> HttpRpcClient::o
 }
 
 /// @brief Sends a JSON-RPC request over the persistent connection without throwing on transport failure.
-net::awaitable<core::Result<HttpResult>> HttpRpcClient::try_call_impl(std::shared_ptr<State> st, std::string json_body) {
+net::awaitable<core::Result<HttpResult>> HttpRpcClient::try_call_impl(std::shared_ptr<State> st,
+                                                                      std::string json_body) {
     if (st->cancelled) {
         co_return core::Error{st->cfg.name + ": client cancelled"};
     }

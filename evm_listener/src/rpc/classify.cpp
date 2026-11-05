@@ -34,7 +34,8 @@ bool has(std::string_view hay, std::string_view needle) noexcept {
     return find_icase(hay, needle) != std::string_view::npos;
 }
 
-/// @brief Parses block range limit numbers from provider error messages (e.g., "eth_getLogs is limited to a 500 range").
+/// @brief Parses block range limit numbers from provider error messages (e.g., "eth_getLogs is limited to a 500
+/// range").
 /// @param msg Error message text.
 /// @return Extracted block limit, or nullopt if pattern not matched.
 std::optional<std::uint32_t> parse_range_limit(std::string_view msg) noexcept {
@@ -98,9 +99,11 @@ Classified classify(const ErrorInfo& e) noexcept {
 /// @brief Parses delta-seconds representation of HTTP Retry-After header.
 std::optional<std::chrono::seconds> parse_retry_after(std::string_view v) noexcept {
     // Strip leading whitespace
-    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.front()))) v.remove_prefix(1);
+    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.front())))
+        v.remove_prefix(1);
     // Strip trailing whitespace
-    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.back()))) v.remove_suffix(1);
+    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.back())))
+        v.remove_suffix(1);
     // Reject empty strings or unreasonably long values (> 9 digits ~ 31 years)
     if (v.empty() || v.size() > 9) return std::nullopt;
     std::int64_t n = 0;

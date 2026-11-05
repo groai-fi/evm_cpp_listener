@@ -19,7 +19,7 @@ StageResult PendingBuffer::stage(const rpc::Log& log, std::string_view source) {
         if (h == b->second.end()) return StageResult::RemovedUnknown;
         if (h->second.erase(log.log_index) == 0) return StageResult::RemovedUnknown;
         --total_;
-        if (h->second.empty()) b->second.erase(h); // Clean up empty hash container
+        if (h->second.empty()) b->second.erase(h);  // Clean up empty hash container
         if (b->second.empty()) buckets_.erase(b);   // Clean up empty block bucket
         return StageResult::Removed;
     }
@@ -28,7 +28,7 @@ StageResult PendingBuffer::stage(const rpc::Log& log, std::string_view source) {
     auto& by_index = buckets_[log.block_number][log.block_hash];
     if (!by_index.emplace(log.log_index, Staged{log, std::string(source)}).second) return StageResult::Duplicate;
     ++total_;
-    evict_to_cap(); // Enforce soft upper bound on memory usage
+    evict_to_cap();  // Enforce soft upper bound on memory usage
     return StageResult::Added;
 }
 
@@ -40,7 +40,7 @@ void PendingBuffer::evict_to_cap() {
             total_ -= logs.size();
             evicted_total_ += logs.size();
         }
-        buckets_.erase(oldest); // FIFO eviction of lowest block heights
+        buckets_.erase(oldest);  // FIFO eviction of lowest block heights
     }
 }
 
@@ -59,7 +59,7 @@ CrossCheck PendingBuffer::reconcile(std::uint64_t from, std::uint64_t to, const 
             const auto h = b->second.find(l.block_hash);
             staged = h != b->second.end() && h->second.count(l.log_index) != 0;
         }
-        if (!staged) ++out.ws_missed; // Sweeper found a log that WebSocket never delivered
+        if (!staged) ++out.ws_missed;  // Sweeper found a log that WebSocket never delivered
     }
 
     // Reconcile and prune buffer buckets within [from, to]
@@ -68,7 +68,7 @@ CrossCheck PendingBuffer::reconcile(std::uint64_t from, std::uint64_t to, const 
             const auto sw = swept.find(h->first);
             for (auto s = h->second.begin(); s != h->second.end();) {
                 if (!in_scope(s->second.log)) {
-                    ++s; // Skip contracts/topics not in current sweep scope
+                    ++s;  // Skip contracts/topics not in current sweep scope
                     continue;
                 }
                 if (sw == swept.end() || sw->second.count(s->first) == 0) ++out.ws_extra;
@@ -87,8 +87,9 @@ std::size_t PendingBuffer::purge_from(std::uint64_t number) {
     std::size_t dropped = 0;
     const auto first = buckets_.lower_bound(number);
     for (auto b = first; b != buckets_.end(); ++b)
-        for (const auto& [hash, logs] : b->second) dropped += logs.size();
-    buckets_.erase(first, buckets_.end()); // Truncate all orphaned fork blocks
+        for (const auto& [hash, logs] : b->second)
+            dropped += logs.size();
+    buckets_.erase(first, buckets_.end());  // Truncate all orphaned fork blocks
     total_ -= dropped;
     return dropped;
 }

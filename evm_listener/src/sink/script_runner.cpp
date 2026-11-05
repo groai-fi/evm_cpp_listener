@@ -2,7 +2,9 @@
 
 namespace evml::sink {
 
-ScriptRunner::ScriptRunner(sw::redis::Redis& redis) : redis_(redis) { load_all(); }
+ScriptRunner::ScriptRunner(sw::redis::Redis& redis) : redis_(redis) {
+    load_all();
+}
 
 void ScriptRunner::load_all() {
     for (std::size_t i = 0; i < kScriptCount; ++i)
