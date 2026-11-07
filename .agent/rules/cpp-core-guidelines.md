@@ -34,3 +34,11 @@ trigger: always_on
 8. **Header & Namespace Hygiene (`SF.2`, `SF.7`, `SF.8`)**:
    - Use `#pragma once` in all headers. Never write `using namespace ...;` at file scope in headers.
    - Keep public headers (`include/`) free of heavy internal implementation headers (use PIMPL where appropriate).
+9. **Data-Oriented Design (DOD) & Cache Locality on Hot Paths (`Per.7`, `Per.19`)**:
+   - **Hot vs. Cold Boundary**: Apply DOD strictly to latency-critical paths (market ingestion, Kalman/microstructure brain, `/dev/shm` IPC structs, and SIMD Monte Carlo solvers). Keep cold startup and async RPC I/O in standard RAII C++20.
+   - **Contiguous Memory & `SoA`**: Prefer contiguous flat storage (`std::array`, pre-allocated `std::vector`, power-of-two ring buffers) over pointer-chasing node containers (`std::map`, `std::unordered_map`, `std::list`). Use Structure-of-Arrays (`SoA`) for SIMD/AVX-512 batch loops so every vector load is unit-stride.
+   - **Cache-Line Alignment & IPC Invariants**: Align shared-memory (`Seqlock`, SPSC queues) and DMA structs to 64-byte cache lines (`alignas(64)`) to prevent false sharing. Enforce binary layout invariants at compile time with `static_assert(std::is_trivially_copyable_v<T>)`, `static_assert(std::is_standard_layout_v<T>)`, and exact `sizeof(T)` checks.
+10. **Zero Allocation, Static Dispatch & Branchless Hot Loops (`Per.11`, `C.120`)**:
+    - **Zero Hot-Path Heap Allocation**: Never allocate or resize heap memory (`new`, `malloc`, `std::vector::push_back` without capacity, `std::string`, heap-boxed `std::function`, or `std::shared_ptr` ref-count churn) inside the tick processing loop. Pre-allocate all working buffers at startup.
+    - **Static Polymorphism over `virtual`**: Do not use `virtual` methods or dynamic dispatch (`dynamic_cast`) on the hot path; use C++20 `concepts`, templates, or `std::variant` to enable inlining.
+    - **Branchless Hot-Path Math**: Prefer branchless expressions (`std::clamp`, conditional moves, arithmetic masks) in tight numerical and SIMD loops to avoid CPU branch mispredictions.
