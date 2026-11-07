@@ -88,14 +88,21 @@ TEST_CASE("base.toml: sink spill settings (process-scoped, ephemeral disk)", "[u
 TEST_CASE("base.toml: the downstream consumer group is watched; removing the keys disables the probe",
           "[unit][config]") {
     const Config c = parse_with(base_toml(), full_env());
-    REQUIRE(c.sink.consumer_groups.size() == 1);
+    REQUIRE(c.sink.consumer_groups.size() == 2);
     CHECK(c.sink.consumer_groups[0].stream == StreamKind::Events);
     CHECK(c.sink.consumer_groups[0].group == "strat:aero_eurcusdc:botB_v1");
+    CHECK(c.sink.consumer_groups[1].stream == StreamKind::Events);
+    CHECK(c.sink.consumer_groups[1].group == "cg_parquet_archiver");
     CHECK(c.sink.consumer_lag_warn_s == 43200);
     CHECK(c.sink.consumer_lag_crit_s == 86400);
 
     std::string bare = mutate(
-        base_toml(), "consumer_groups     = [{ stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" }]\n", "");
+        base_toml(),
+        "consumer_groups     = [\n"
+        "  { stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" },\n"
+        "  { stream = \"events\", group = \"cg_parquet_archiver\" },\n"
+        "]\n",
+        "");
     bare = mutate(bare, "consumer_lag_warn_s = 43200   # 12 h = 25% of the 48 h retention\n", "");
     bare = mutate(bare, "consumer_lag_crit_s = 86400   # 24 h = 50%: half the safety margin is gone\n", "");
     const Config d = parse_with(bare, full_env());
@@ -343,18 +350,25 @@ TEST_CASE("invalid configs fail fast with precise messages", "[unit][config]") {
         const std::string good = "{ stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" }";
         CHECK_THROWS_WITH(parse_with(mutate(base, good, "{ stream = \"nope\", group = \"g\" }"), env),
                           ContainsSubstring("[sink].consumer_groups[0].stream: must be events|registry"));
+        CHECK_THROWS_WITH(parse_with(mutate(base, good, "{ stream = \"fast\", group = \"g\" }"), env),
+                          ContainsSubstring("[sink].consumer_groups[0].stream: must be events|registry, got \"fast\""));
         CHECK_THROWS_WITH(parse_with(mutate(base, good, "{ stream = \"events\", group = \"\" }"), env),
                           ContainsSubstring("[sink].consumer_groups[0].group: must not be empty"));
         CHECK_THROWS_WITH(parse_with(mutate(base, good, good + ", " + good), env),
                           ContainsSubstring("[sink].consumer_groups[1].group: duplicate group"));
         CHECK_THROWS_WITH(parse_with(mutate(base, good, "{ stream = \"events\", group = \"g\", extra = 1 }"), env),
                           ContainsSubstring("[sink].consumer_groups[0].extra: unknown key"));
-        CHECK_THROWS_WITH(parse_with(mutate(base, "[" + good + "]", "\"g\""), env),
+        const std::string full_groups =
+            "[\n"
+            "  { stream = \"events\", group = \"strat:aero_eurcusdc:botB_v1\" },\n"
+            "  { stream = \"events\", group = \"cg_parquet_archiver\" },\n"
+            "]";
+        CHECK_THROWS_WITH(parse_with(mutate(base, full_groups, "\"g\""), env),
                           ContainsSubstring("[sink].consumer_groups: expected an array"));
         // The same group name on the other stream is a different group.
         const Config c = parse_with(
             mutate(base, good, good + ", { stream = \"registry\", group = \"strat:aero_eurcusdc:botB_v1\" }"), env);
-        CHECK(c.sink.consumer_groups.size() == 2);
+        CHECK(c.sink.consumer_groups.size() == 3);
     }
     SECTION("out-of-range integers are rejected") {
         CHECK_THROWS_WITH(parse_with(mutate(base, "block_time_ms      = 2000", "block_time_ms      = 0"), env),
