@@ -136,3 +136,7 @@ build/
 CMakeUserPresets.json
 *.wal
 **/wal/
+
+# Agent teamwork runtime artifacts
+.agents/teamwork/
+
