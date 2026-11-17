@@ -21,6 +21,10 @@ trigger: always_on
 3. **Suitable & Conventional Commit Messages**:
    - Provide clear, descriptive commit messages matching standard conventional commit format (`feat(...)`, `fix(...)`, `test(...)`, `refactor(...)`, `docs(...)`, `chore(...)`).
    - The commit message should accurately explain the specific change and its context.
+   - **Include the issue number when available**: if the commit addresses a GitHub issue or ticket (given by the user, named in the branch, or referenced by the task / OpenSpec change), append it at the end of the subject in parentheses:
+     - Single issue: `<type>(<scope>): <summary> (#<issue>)` (e.g., `fix(sink): drop fast emits when sink is degraded (#12)`)
+     - Multiple issues: `<type>(<scope>): <summary> (#<issue1>, #<issue2>)` (e.g., `fix(provider): verify eth_chainId on HTTP providers (#14, #15)`)
+     - If no issue number is associated with the change, omit the `(#...)` suffix; never invent one.
 
 4. **Leave Changes for User Review**:
    - Always leave modified files in the working directory (unstaged or staged) so the user can inspect diffs (`git diff`, `git status`) before deciding to commit.
